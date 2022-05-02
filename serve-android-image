@@ -1,0 +1,77 @@
+#!/bin/bash
+set -e
+
+DIR="$1"
+
+channels=(stable beta testing)
+
+exec 100<>/run/resign_android_image_update
+flock 100
+
+read device
+read incremental timestamp build channel
+
+re="/"
+for i in "$device" "$incremental" "$timestamp" "$build" "$channel"; do
+	if [[ "$i" =~ $re ]] || test "${#i}" -gt 32; then
+		echo "Invalid input" >&2
+		exit 1
+	fi
+done
+
+ok=
+for c in "${channels[@]}"; do
+	if test "$channel" == "$c"; then
+		ok=1
+	fi
+done
+
+if ! test -n "$ok"; then
+	echo "Invalid channel" >&2
+	exit 1
+fi
+
+mkdir -p "$DIR"
+
+function cleanup
+{
+	rm -f "$DIR"/*.tmp
+
+	inuse=()
+	for c in "${channels[@]}"; do
+		if test -e "$DIR/$device-$c" && read o_incremental o_timestamp o_build o_channel < "$DIR/$device-$c" && test -n "$o_incremental"; then
+			inuse+=("$device-ota_update-$o_incremental.zip")
+		fi
+	done
+
+	for i in "$DIR/$device-ota_update-"*.zip; do
+		used=
+		for j in "${inuse[@]}"; do
+			if test "$i" == "$DIR/$j"; then
+				used=1
+			fi
+		done
+		if test -z "$used" && test -e "$i"; then
+			rm -f "$i"
+		fi
+	done
+}
+trap cleanup EXIT
+
+ota="$DIR/$device-ota_update-$incremental.zip"
+temp="$(mktemp "$ota.XXXXXX.tmp")"
+cat > "$temp"
+if test -s "$temp"; then
+	mv "$temp" "$ota"
+	sync
+elif ! test -e "$ota"; then
+	exit 2
+fi
+
+chantemp="$(mktemp "$DIR/$device-$channel.XXXXXX.tmp")"
+echo "$incremental" "$timestamp" "$build" "$channel" > "$chantemp"
+mv "$chantemp" "$DIR/$device-$channel"
+
+sync
+
+# run cleanup

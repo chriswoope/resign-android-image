@@ -1,0 +1,5 @@
+use_dynamic_partitions=true
+virtual_ab=true
+super_partition_groups=google_dynamic_partitions
+super_google_dynamic_partitions_group_size=8527020032
+super_google_dynamic_partitions_partition_list=system system_ext product vendor vendor_dlkm

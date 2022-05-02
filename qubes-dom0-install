@@ -1,0 +1,127 @@
+#!/bin/bash
+set -o nounset
+set -o pipefail
+set -e
+set -x
+
+# remove the following three lines after reviewing this script
+echo "You are running this script without reviewing it, so we are exiting to protect you!!! Never run anything in dom0 without reviewing it!!!" >&2
+echo "You must review this script to make sure you trust and like what it does and then run it as root in Qubes dom0" >&2
+#exit 1
+
+dom0_dir="$(dirname "$0")"
+if test "$#" -lt 5; then
+	echo "Usage: qubes-dom0-install SIGNER_VM SERVER_VM|SSH_USER@SSH_HOST SERVER_DIR grapheneos DEVICES OPTIONS_RESIGN_ANDROID_IMAGE" >&2
+	exit 1
+fi
+
+if test "$UID" != 0 || ! test -e /etc/qubes/policy.d; then
+	echo "You must run this script as root in Qubes dom0" >&2
+	exit 1
+fi
+
+signer="$1"
+server_vm_or_ssh="$2"
+server_dir="$3"
+os="$4" # only "grapheneos" is supported currently
+devices="$5"
+channels="beta stable" # it's recommended to keep beta even if you don't use it, so that when betas hit stable they have already been signed and are immediately available
+shift 5
+opts="$*"
+
+# note that these paths are not escaped for simplicity, so they must not contain spaces or special shell characters
+
+qrexec_service_name=resign_android_image.Update
+
+script_dir=/home/user/resign-android-image
+var_dir=/home/user/.resign-current-android-image
+key_dir=/home/user/Documents/keys
+
+serve_file=/usr/local/bin/serve-android-image
+
+dom0_service_file=/home/user/bin/resign-current-android-image-service
+dom0_policy_name=10-resign_android_image
+dom0_timer_name=resign-current-android-image
+
+if [[ server_vm_or_ssh =~ @ ]]; then
+	server=
+	updater="ssh $server_vm_or_ssh $serve_file $server_dir"
+else
+	server="$server_vm_or_ssh"
+	updater="qrexec-client-vm $server $qrexec_service_name"
+fi
+
+### setup signer VM
+
+(cd "$dom0_dir" && tar c .)|qvm-run -p "$signer" "mkdir -p $script_dir; cd $script_dir && tar x"
+
+### setup server VM
+
+if test -n "$server"; then
+	qvm-run -u root -p "$server" "cat > $serve_file; chmod +x $serve_file" < "$dom0_dir/serve-android-image"
+
+	qvm-run -u root -p "$server" "cat > /rw/config/$qrexec_service_name; chmod +x /rw/config/$qrexec_service_name" <<EOF
+#!/bin/bash
+DIR='$server_dir'
+exec $serve_file "\$DIR"
+EOF
+
+qvm-run -u root -p "$server" "if ! grep -q /etc/qubes-rpc/$qrexec_service_name /rw/config/rc.local; then cat >> /rw/config/rc.local; fi; chmod +x /rw/config/rc.local" <<EOF
+cp -a /rw/config/$qrexec_service_name /etc/qubes-rpc/$qrexec_service_name
+EOF
+fi
+
+### setup dom0
+
+if test -n "$server"; then
+	cat - >/etc/qubes/policy.d/$dom0_policy_name.policy <<EOF
+$qrexec_service_name	*	"$signer"	"$server"	allow	user=root
+$qrexec_service_name	*	@anyvm	@anyvm	deny
+EOF
+fi
+
+mkdir -p "$(dirname "$dom0_service_file")"
+cat - > "$dom0_service_file" <<EOF
+#!/bin/bash
+for device in $devices; do
+	for channel in $channels; do
+		qvm-run -p "$signer" "UPDATER='$updater' $script_dir/resign-current-android-image $var_dir $key_dir $os \$device \$channel --ota $opts"
+	done
+done
+EOF
+chmod +x "$dom0_service_file"
+
+cat - > /etc/systemd/system/$dom0_timer_name.service <<EOF
+[Unit]
+Description=Resigns and publishes the current Android OS image
+
+[Service]
+Type=oneshot
+User=user
+Group=user
+ExecStart=$dom0_service_file
+EOF
+
+cat - > /etc/systemd/system/$dom0_timer_name.timer <<EOF
+[Unit]
+Description=Resigns and publishes the current Android OS image
+
+[Timer]
+OnCalendar=*-*-* 6:00
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+
+## inform user about the next steps
+
+set +x
+echo "To finish installation, follow these steps:"
+echo "1. In the signing VM $signer, run this command to generate keys, manually resign an image and fix any issues that come up (add --keep and possibly --keep-tmp if there is any issue to help debug it):"
+echo $'\t'"$script_dir/resign-android-image ~/resign-android-image-test.tmp $key_dir $os \"$devices\" CURRENT_${os}_INCREMENTAL_VERSION --ota --generate-keys $*"
+echo "2. In the signing VM $signer, remove the ~/resign-android-image-test.tmp directory once the resigning process suceeeds"
+echo "3. Enable the timer that will automatically resign updates by running this:"
+echo $'\t'"sudo systemctl enable $dom0_timer_name.timer; sudo systemctl start $dom0_timer_name.timer"
+

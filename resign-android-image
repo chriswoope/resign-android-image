@@ -1,0 +1,1787 @@
+#!/bin/bash
+set -o nounset
+set -o pipefail
+set -e
+
+# TODO: build updater with changed url
+# TODO: build backup service with changed allowbackup first API version
+
+data_dir="$(realpath $(dirname "$0"))"
+var_dir="$HOME/.resign-android-image"
+
+mkdir -p "$var_dir"
+
+dir="$1"
+key_dir="$2"
+os="$3"
+device="$4"
+build="$5"
+shift 5
+
+signify=signify-openbsd
+
+if test "$#" != 0 && test "$1" != "--no-unshare"; then
+	deb=()
+	# used internally by some tool
+	if ! which cgpt >/dev/null; then
+		deb+=(cgpt)
+	fi
+
+	if ! which cpio >/dev/null; then
+		deb+=(cpio)
+	fi
+
+	if ! which openssl >/dev/null; then
+		deb+=(openssl)
+	fi
+
+	if ! which java >/dev/null; then
+		deb+=(default-jre-headless)
+	fi
+
+	if ! which "$signify" >/dev/null; then
+		deb+=(signify-openbsd)
+	fi
+
+	if ! which git >/dev/null; then
+		deb+=(git)
+	fi
+
+	if ! which python3 >/dev/null; then
+		deb+=(python3)
+	fi
+
+	if ! which python >/dev/null; then
+		deb+=(python-is-python3)
+	fi
+
+	if ! test -e /usr/lib/python3/dist-packages/google/protobuf; then
+		deb+=(python3-protobuf)
+	fi
+
+	if ! which unshare >/dev/null; then
+		deb+=(util-linux)
+	fi
+
+	if ! which bsdtar >/dev/null; then
+		deb+=(libarchive-tools)
+	fi
+
+	if ! test -e /sbin/resize2fs >/dev/null; then
+		deb+=(e2fsprogs)
+	fi
+
+	if ! which gcc >/dev/null; then
+		deb+=(gcc)
+	fi
+
+	if ! test -e /usr/include/errno.h; then
+		deb+=(libc6-dev)
+	fi
+
+	if ! which llvm-objdump-11 >/dev/null; then
+		deb+=(llvm-11)
+	fi
+
+	if ! which secilc >/dev/null; then
+		deb+=(secilc)
+	fi
+
+	if ! which curl >/dev/null; then
+		deb+=(curl)
+	fi
+
+	if ! which wget >/dev/null; then
+		deb+=(wget)
+	fi
+
+	if test "${#deb[@]}" != 0; then
+		sudo apt-get -y install "${deb[@]}"
+	fi
+
+	exec sudo unshare -m -- sudo -u "$USER" "$0" "$dir" "$key_dir" "$os" "$device" "$build" --no-unshare "$@"
+else
+	shift 1
+fi
+
+# vbmeta: only resign vbmeta
+# resign: resign apks and replace them in the images
+# rebuild: rebuild images
+
+image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm"
+
+build_factory=
+build_factory_zip=
+build_ota=
+want_discard=1
+parallel=
+keep_tmp=
+ro_debuggable=
+ro_secure=
+adb_root=
+recovery_adb_root=
+allowbackup=
+adb_backup=
+zip_opt="-6"
+dev_fast_sign=
+build_method=resign
+replace_boot=
+generate_keys=
+magisk=
+setx=
+hosts_url=
+# must be as long as the original update URL
+orig_update_url="https://releases.grapheneos.org/"
+update_url="https://noupdateurlset.invalid./"
+
+while test "$#" != 0; do
+	if test "$1" == "-v"; then
+		setx="-x"
+		set -x
+	elif test "$1" == "--parallel"; then
+		parallel=1
+	elif test "$1" == "--keep"; then
+		want_discard=
+	elif test "$1" == "--keep-tmp"; then
+		keep_tmp=1
+
+# functionality modifications
+	elif test "$1" == "--update-url"; then
+		update_url="$2"
+		shift
+	elif test "$1" == "--adb-root"; then
+		adb_root=1
+	elif test "$1" == "--recovery-adb-root"; then
+		recovery_adb_root=1
+	elif test "$1" == "--allowbackup"; then
+		allowbackup=1
+	elif test "$1" == "--adb-backup"; then
+		adb_backup=1
+	elif test "$1" == "--replace-boot"; then
+		replace_boot="$2"
+		shift 1
+	elif test "$1" == "--hosts-url"; then
+		hosts_url="$2"
+		shift 1
+	elif test "$1" == "--adaway"; then
+		hosts_url=https:"//adaway.org/hosts.txt"
+	elif test "$1" == "--magisk"; then
+		magisk="$2"
+		shift 1
+		echo "Not yet implemented"
+		exit 1
+
+	elif test "$1" == "--ro-debuggable"; then
+		echo "It's not recommended to use --ro-debuggable if you just want ADB root; use --adb-root instead that will fix selinux policy and only make adbd believe that the build is debuggable" >&2
+		ro_debuggable=1
+	elif test "$1" == "--ro-secure0"; then
+		echo "It's not recommended to use --ro-secure" >&2
+		ro_secure=0
+	elif test "$1" == "--vbmeta-only"; then
+		build_method=vbmeta
+	elif test "$1" == "--factory-image"; then
+		build_factory=1
+	elif test "$1" == "--factory-zip"; then
+		build_factory_zip=1
+	elif test "$1" == "--ota"; then
+		build_ota=1
+	elif test "$1" == "--rebuild"; then
+		build_method=rebuild
+		echo "--rebuild is incomplete and broken" >&2
+	elif test "$1" == "--zip-opt"; then
+		zip_opt="-$2"
+		shift 1
+	elif test "$1" == "--generate-keys"; then
+		generate_keys=1
+	elif test "$1" == "--dev-fast-sign"; then
+		# remove all APEXes, CAPEXes and APKs to make signing very fast during development of this script
+		dev_fast_sign=1
+	else
+		echo "Error: unrecognized parameter $1" 2>&1
+		exit 1
+	fi
+	shift 1
+done
+
+if test "${#update_url}" != "${#orig_update_url}"; then
+	echo Currently update URL must be exactly "${#orig_update_url}" characters long since we binary patch it, but is "${#update_url}" characters long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen
+	exit 1
+fi
+
+
+if test -z "$build_ota" || test -n "$build_factory" || test -z "$build_factory_zip"; then
+	parallel=
+fi
+
+# this is mainly why we unshare the mount namespace
+mkdir -p "$dir/tmp"
+sudo chown root: "$dir/tmp"
+sudo chmod 1777 "$dir/tmp"
+sudo mount --bind "$dir/tmp" /tmp
+sudo mount --bind "$dir/tmp" /var/tmp
+
+function with_temp
+{
+	local path="$1"
+	local mktemp="$2"
+	local complete="$3"
+	local func="$4"
+	shift 4
+
+	local tmp="$($mktemp "$path.XXXXXX.tmp")"
+	# protect against wild rm -rf in case of mktemp being broken
+	case "$tmp" in
+		"$path".*)
+			if test -z "$keep_tmp"; then
+				trap "rm -rf $tmp" EXIT
+			fi
+			if ! ( set -e; "$func" "$tmp" "$@" ); then
+				echo "Failed to run: $func $tmp $@" >&2
+				exit 1
+			fi
+			if test "$complete" == mv; then
+				if ! test -e "$tmp"; then
+					echo "Failed to produce output file: $func $tmp $@" >&2
+					exit 1
+				fi
+				mv "$tmp" "$path"
+			else
+				$complete "$tmp"
+			fi
+			trap - EXIT
+			;;
+		*)
+			echo "$mktemp returned unexpected path: $tmp" >&2
+			exit 1
+			;;
+	esac
+}
+
+make_indent=
+function make_any
+{
+	local path="$1"
+	local mktemp="$2"
+	local func="$3"
+	shift 3
+
+	if ! test -e "$path"; then
+		echo "${make_indent}MAKING $path with $func" >&2
+		make_indent="$make_indent"$'\t'
+		with_temp "$path" "$mktemp" mv "$func" "$@"
+		make_indent="${make_indent:0:-1}"
+		echo "${make_indent}MADE $path with $func" >&2
+	fi
+}
+
+function make_dir
+{
+	local path="$1"
+	shift
+	make_any "$path" "mktemp -d" "$@"
+}
+
+function make_file
+{
+	local path="$1"
+	shift
+	make_any "$path" "mktemp -u" "$@"
+}
+
+function with_temp_dir
+{
+	local path="$1"
+	shift
+	local cleanup="rm -rf"
+	if test -n "$keep_tmp"; then
+		cleanup=
+	fi
+	with_temp "$path" "mktemp -d" "$cleanup" "$@"
+}
+
+function discard
+{
+	echo "${make_indent}DISCARD: $@"
+	if test -n "$want_discard"; then
+		rm -rf "$@"
+	fi
+}
+
+function mkdir_touch
+{
+	mkdir -p "$(dirname "$1")"
+	touch "$1"
+}
+
+function do_unzip
+{
+	unzip -q -d "$1" "$2"
+}
+
+function do_unzip_list
+{
+	bsdtar -tf "$2" > "$1"
+}
+
+# TODO: use Selenium and headless Chromium to automatically download this
+otatools="$(realpath "$var_dir/otatools")"
+function make_otatools {
+	if ! test -e  "$otatools.zip"; then
+		echo "Download otatools manually by going to https://ci.android.com/builds/submitted/8446822/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
+		echo "If that doesn't work, go to https://ci.android.com/builds/branches/aosp-master/grid?, selecting a branch for the current Android version and clicking a green square in the aosp_x86_64 column" >&2
+		echo "Move the file to $otatools.zip" >&2
+		exit 1
+	fi
+	do_unzip "$1" "$otatools.zip"
+}
+
+make_dir "$otatools" make_otatools
+export PATH="$otatools/bin:$PATH"
+
+function do_git_clone
+{
+	local out="$1"
+	shift
+	git clone "$@" "$out"
+}
+
+function git_clone
+{
+	local dir="$1"
+	shift
+	make_dir "$dir" do_git_clone "$@"
+	( cd "$dir" && git pull --rebase ) || exit 1
+}
+
+function download
+{
+	wget -O "$@"
+}
+
+if test "$os" == grapheneos; then
+	git=https://github.com/GrapheneOS
+	branch=12.1
+	base_url="https://releases.grapheneos.org"
+	factory_name="$device-factory-$build"
+	factory_url="$base_url/$factory_name"
+	ota_url="$base_url/$device-ota_update-$build"
+	factory_key="$data_dir/grapheneos-factory.pub"
+	ota_cert="$data_dir/grapheneos-ota.pem"
+else
+	echo "Unsupported OS: $os"
+	exit 1
+fi
+
+if false; then
+	extract_android_ota_payload="$var_dir/android-prepare-vendor/scripts/extract_android_ota_payload/extract_android_ota_payload.py"
+	git_clone "$var_dir/android-prepare-vendor" https://github.com/GrapheneOS/android-prepare-vendor &
+else
+	extract_android_ota_payload="$var_dir/extract_android_ota_payload/extract_android_ota_payload.py"
+	git_clone "$var_dir/extract_android_ota_payload" https://github.com/cyxx/extract_android_ota_payload &
+fi
+
+apktool="$var_dir/apktool.jar"
+make_file "$var_dir/apktool.jar" download https://github.com/iBotPeaches/Apktool/releases/download/v2.6.1/apktool_2.6.1.jar
+
+aosp="$var_dir/aosp-$os"
+mkdir -p "$aosp/build"
+git_clone "$aosp/script" --branch "$branch" "$git/script" &
+git_clone "$aosp/build/make" --branch "$branch" "$git/platform_build" &
+
+wait
+
+for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
+	if ! test -e "$aosp/build/$i"; then
+		ln -s "make/$i" "$aosp/build/$i"
+	fi
+done
+
+if ! test -e "$var_dir/mkbootfs"; then
+	gcc "$data_dir"/mkbootfs.c -o "$var_dir/mkbootfs"
+fi
+
+function gen_keys {
+	subject='/CN=GrapheneOS/'
+	for i in releasekey platform shared media networkstack; do
+		openssl genrsa -f4 4096 > "$1/$i.key"
+		openssl req -new -x509 -sha256 -key "$1/$i.key" -out "$1/$i.x509.pem" -days 10000 -subj "$subject"
+		openssl pkcs8 -in "$1/$i.key" -topk8 -outform DER -out "$1/$i.pk8" -nocrypt
+	done
+	openssl genrsa 4096 | openssl pkcs8 -topk8 -nocrypt -out "$1/avb.pem"
+	"$otatools/bin/avbtool" extract_public_key --key "$1/avb.pem" --output "$1/avb_pkmd.bin"
+	$signify -G -n -p "$1/factory.pub" -s "$1/factory.sec"
+}
+
+if ! test -e "$key_dir"; then
+	if test -n "$generate_keys"; then
+		make_dir "$key_dir" gen_keys
+	else
+		echo "Key directory not found, use --generate-keys to generate keys" >&2
+		exit 1
+	fi
+fi
+
+out_build="$build"
+outdir="$dir/out_$build_method"
+
+mkdir -p "$outdir"
+
+function do_extract_ota_payload {
+	python3 "$extract_android_ota_payload" "$2" "$1"
+}
+
+function do_extract_ota_manifest {
+	python3 "$data_dir/extract_android_ota_manifest/extract_android_ota_manifest.py" "$2" "$1"
+}
+
+function download_ota {
+	curl "$ota_url.zip" -C - -o "$dir/ota.zip"
+	if ! "$otatools/bin/check_ota_package_signature" "$ota_cert" "$dir/ota.zip"; then
+		echo "Failed to verify OTA update signature!" >&2
+		exit 1
+	fi
+	touch "$1"
+}
+
+function extract_image {
+	local out="$2"
+	local img="$3"
+	local query="$4"
+	trap "sudo umount $1" EXIT
+	if ! sudo mount -o loop,ro "$img" "$1"; then
+		echo "Failed to mount $img" >&2
+		exit 1
+	fi
+	local outr="$(realpath "$out")"
+	if test -n "$query"; then
+		(cd "$1" && sudo find . -print0|grep -z -E "$query"|sudo xargs -0 cp --parents --target-directory="$outr" --no-preserve=mode --) || exit 1
+	else
+		(cd "$1" && sudo cp -r --parents --target-directory="$outr" --no-preserve=mode .) || exit 1
+	fi
+	while ! sudo umount "$1"; do sleep 1; done
+	trap - EXIT
+	sudo chown -R "$USER:" "$outr"
+}
+
+function get_avbtool_vbmeta_opts {
+	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Rollback Index:\s*(.*)/--rollback_index \1/p; s/^\s*Rollback Index Location:\s*(.*)/--rollback_index_location \1/p'
+}
+
+function get_avbtool_descriptor_opts {
+	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Rollback Index:\s*(.*)/--rollback_index \1/p; s/^\s*Rollback Index Location:\s*(.*)/--rollback_index_location \1/p; s/^\s*Hash Algorithm:\s*(.*)/--hash_algorithm \1/p; s/^\s*Partition Name:\s*(.*)/--partition_name \1/p; s/^\s*Salt:\s*(.*)/--salt \1/p; s/^\s*Prop: (.*) -> '\''(.*)'\''/--prop \1:\2/p'
+}
+
+function get_avbtool_partitions {
+	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Partition Name:\s*(.*)/\1/p'
+}
+
+# will change build.prop files
+function update_fs_image {
+	local work="$1"
+	local img="$2"
+	local debugfs_script="$3"
+	local src="$4"
+	shift 4
+
+	mkdir "$work/mnt"
+	if test -e "$debugfs_script"; then
+		cp "$debugfs_script" "$work/debugfs"
+	else
+		touch "$work/debugfs"
+	fi
+
+	sudo bash $setx /dev/stdin "$otatools" "$work" "$img" "$src" "$@" <<'EOF' || exit 1
+		set -e
+		set -o nounset
+		set -o pipefail
+		otatools="$1"
+		shift
+
+		img="$2"
+		src="$3"
+		base="$4"
+		modded="$5"
+		root="$6"
+
+		fs_features=
+		block_count=1
+		free_blocks=0
+		free_inodes=0
+		block_size=4096
+		reserved_gdt_blocks=0
+		blocks_per_group=32768
+		inodes_per_group=384
+		inode_blocks_per_group=12
+
+		eval $(/sbin/tune2fs -l "$src"|sed -nre 's/^Filesystem features:\s*([^'\'']**)$/fs_features='"'\1'"'/p; s/^Block count:\s*([0-9]+)$/block_count=\1/p; s/^Free blocks:\s*([0-9]+)$/free_blocks=\1/p; s/^Free inodes:\s*([0-9]+)$/free_inodes=\1/p; s/^Block size:\s*([0-9]+)$/block_size=\1/p; s/^Reserved GDT blocks:\s*([0-9]+)$/reserved_gdt_blocks=\1/p; s/^Blocks per group:\s*([0-9]+)$/blocks_per_group=\1/p; s/^Inodes per group:\s*([0-9]+)$/inodes_per_group=\1/p; s/^Inode blocks per group:\s*([0-9]+)$/inode_blocks_per_group=\1/p')
+
+		group_count="$((($block_count - 1) / $blocks_per_group + 1))"
+
+		extent_size=12
+		addr_size=4
+		desc_size=32
+		if grep -q -w "64bit" <<< "$fs_features"; then
+			addr_size=8
+			desc_size=64
+		fi
+
+		# superblock, inode bitmap, block bitmaps, block group descriptors, reserved GDT blocks
+		other_blocks_per_group="$((4 + ($blocks_per_group - 1) * $addr_size / $block_size + $reserved_gdt_blocks + ($group_count - 1) * $desc_size / $block_size))"
+
+		min_extent_nodes_per_block="$((($block_size - $extent_size) / $extent_size / 2))"
+
+		trap "umount $1/mnt" EXIT
+		if ! mount -o loop,ro "$src" "$1/mnt"; then
+			echo "Failed to mount $src" >&2
+			exit 1
+		fi
+
+		files=()
+		use_tmp_dir=
+		extra_inodes=0
+		extra_data_blocks=0
+
+		while read p; do
+			mod="$base/$p"
+			orig="$1/mnt$root/$p"
+			if ! cmp -s "$orig" "$mod" 2>/dev/null; then
+				orig_size="$(stat -c %s "$orig")"
+				mod_size="$(stat -c %s "$mod")"
+				if test -e "$modded/$p"; then
+					if ! test -e "$orig"; then
+						if ! test -s "$modded/$p"; then
+							echo "File to rewrite doesn't exist: $p" >&2
+							exit 1
+						fi
+					else
+						if test -z "$use_tmp_dir"; then
+							((extra_inodes+=1))
+							((extra_data_blocks+=2)) # overestimate: one for the directory filename, one for the directory itself
+							use_tmp_dir=1
+						fi
+					fi
+
+					file_blocks=0
+					file_extent_tree_blocks=0
+					if test "$mod_size" != 0; then
+						((file_blocks=(mod_size - 1) / block_size + 1))
+
+						current_blocks="$file_blocks"
+						while test "$current_blocks" -gt 4; do
+							((current_blocks=(file_extent_tree_blocks - 1) / min_extent_nodes_per_block + 1))
+							((file_extent_tree_blocks+=current_blocks))
+						done
+					fi
+
+					file_name_blocks=1
+					((extra_data_blocks+=file_blocks + file_extent_tree_blocks + file_name_blocks))
+					((extra_inodes+=1))
+				else
+					if ! test -e "$orig"; then
+						echo "Original file not found for $p" >&2
+						exit 1
+					fi
+					echo "Patching $p: $orig_size -> $mod_size"
+					if test "$orig_size" != "$mod_size"; then
+						echo "Unexpected file size change for file $p: $orig_size -> $mod_size"
+						exit 1
+					fi
+				fi
+				b="$(basename "$p")"
+				if test "$b" == build.prop; then
+					diff -u "$orig" "$mod"
+				fi
+
+				files+=("$p")
+			fi
+		done < <(cd "$base" && find . -type f -print)
+
+		while ! umount "$1/mnt"; do sleep 1; done
+		sleep 1
+
+		if test "${#files[@]}" != 0; then
+			if test "$free_inodes" -lt "$extra_inodes"; then
+				((extra_inodes-=free_inodes))
+			else
+				extra_inodes=0
+			fi
+
+			if test "$free_blocks" -lt "$extra_data_blocks"; then
+				((extra_data_blocks-=free_blocks))
+			else
+				extra_data_blocks=0
+			fi
+
+			new_img_size=
+			if test "$extra_data_blocks" != 0 || test "$extra_inodes" != 0; then
+				echo "Resizing $src to add $extra_data_blocks data blocks and $extra_inodes inodes"
+				img_size="$("$otatools"/bin/avbtool info_image --image "$src"|sed -nre 's/^\s*Original image size:\s*([0-9]+).*/\1/p')"
+
+				inodes_per_block="$(($inodes_per_group / $inode_blocks_per_group))"
+				data_blocks_per_group="$(($blocks_per_group - $inode_blocks_per_group - $other_blocks_per_group))"
+
+				img_blocks="$((($img_size + $block_size - 1) / $block_size))"
+				img_groups="$((($img_blocks + $blocks_per_group - 1) / $blocks_per_group))"
+				img_blocks_to_full_group="$(($img_groups * $blocks_per_group - $img_blocks))"
+
+				inode_blocks_to_full_group=0
+				if test "$data_blocks_per_group" -lt "$img_blocks_to_full_group"; then
+					inode_blocks_to_full_group="$(($img_blocks_to_full_group - $data_blocks_per_group))"
+				fi
+				if test "$inode_blocks_per_group" -lt "$inode_blocks_to_full_group"; then
+					inode_blocks_to_full_group="$inode_blocks_per_group"
+				fi
+
+				extra_inode_blocks="$((($extra_inodes + $inodes_per_block - 1) / $inodes_per_block))"
+				inode_extra_blocks="$extra_inode_blocks"
+				if test "$extra_inode_blocks" -gt "$inode_blocks_to_full_group"; then
+					extra_inode_groups="$((($extra_inode_blocks - $inode_blocks_to_full_group + $inode_blocks_per_group - 1) / $inode_blocks_per_group))"
+					inode_extra_blocks="$(($extra_inode_blocks + $extra_inode_groups * ($blocks_per_group - $inode_blocks_per_group)))"
+				fi
+
+
+				data_blocks_to_full_group="$img_blocks_to_full_group"
+				if test "$data_blocks_per_group" -lt "$data_blocks_to_full_group"; then
+					data_blocks_to_full_group="$data_blocks_per_group"
+				fi
+
+				data_extra_blocks="$extra_data_blocks"
+				if test "$extra_data_blocks" -gt "$data_blocks_to_full_group"; then
+					extra_data_groups="$((($extra_data_blocks - $data_blocks_to_full_group + $data_blocks_per_group - 1) / $data_blocks_per_group))"
+					data_extra_blocks="$(($extra_data_blocks + $extra_data_groups * ($blocks_per_group - $data_blocks_per_group)))"
+				fi
+
+				extra_blocks="$data_extra_blocks"
+				if test "$inode_extra_blocks" -gt "$extra_blocks"; then
+					extra_blocks="$inode_extra_blocks"
+				fi
+
+				# used for safety and also because resize2fs seems to refuse to create block groups smaller than 50 blocks
+				margin_blocks="$(($other_blocks_per_group + 256))"
+				# in case we need a new group descriptor in each block group
+				gd_blocks="$group_count"
+				add_blocks="$(($extra_blocks + $gd_blocks + $margin_blocks))"
+				new_img_size="$(($img_size + $add_blocks * $block_size))"
+				echo "Adding $(($add_blocks * $block_size)) bytes = $add_blocks blocks = $extra_blocks extra blocks (max of $data_extra_blocks blocks for data and $inode_extra_blocks for inodes) + $gd_blocks GD blocks + $margin_blocks margin blocks"
+
+				# TODO: we should rebuild the care map if we are growing the partition!
+			fi
+
+			cp -a "$src" "$img"
+
+			if test -n "$new_img_size"; then
+				"$otatools/bin/avbtool" erase_footer --image "$img"
+				truncate -s "$new_img_size" "$img"
+				/sbin/resize2fs "$img"
+			fi
+
+			# patch out shared_blocks flag
+			# this means that writes might affect multiple files, but that's probably fine (we carefully truncate/overwrite properly)
+			dd if="$img" of="$1/features" skip=$((0x465)) bs=1 count=1 2>/dev/null
+			dd if=/dev/zero of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
+
+			loop="$(mount -v -o loop,rw,noatime "$img" "$1/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
+			echo 0 > /sys/fs/ext4/"$loop"/reserved_clusters
+
+			tmp_dir=
+			tmp_i=0
+
+			for i in "${!files[@]}"; do
+				p="${files[i]}"
+				mod="$base/$p"
+				orig="$1/mnt$root/$p"
+
+				tmp=
+
+				if test -e "$modded/$p"; then
+					if test -e "$orig"; then
+						times="$(stat -c '%X %Y %Z' -- "$orig")"
+						if test -z "$tmp_dir"; then
+							tmp_dir="$(mktemp -d "$1/mnt/.tmp.XXXXXX")"
+						fi
+
+						tmp="$tmp_dir/$tmp_i"
+						((tmp_i+=1))
+						# we must move the file away since we cannot delete it as that might mark blocks shared with other files as free, result in a catastrophic random overwrite
+						mv "$orig" "$tmp"
+						cp -a --preserve=mode,ownership,timestamps,links,xattr,all --attributes-only "$tmp" "$orig"
+					else
+						touch "$orig"
+					fi
+					if test -s "$modded/$p"; then
+						times="$(stat -c '%X %Y %Z' -- "$1/mnt$root")"
+						read mode uid gid con rest < "$modded/$p"
+						touch "$orig"
+						chown "$uid:$gid" "$orig"
+						chmod "$mode" "$orig"
+						attr -q -S -s selinux -V "$con" "$orig"
+					fi
+				else
+					times="$(stat -c '%X %Y %Z' -- "$orig")"
+				fi
+
+				# the dd options must be exactly like these so that we don't try to allocate any new blocks if size doesn't increase
+				dd if="$mod" of="$orig" bs=4096 conv=notrunc,sparse >/dev/null
+				read atime mtime ctime <<<"$times"
+				touch -d "@$mtime" -m -- "$orig"
+				touch -d "@$atime" -a -- "$orig"
+				echo "set_inode_field $root/$p ctime @$ctime" >> "$1/debugfs"
+				if test -n "$tmp"; then
+					tmp_rel="$(sed -e "s|^$1/mnt||" <<<"$tmp")"
+					# use unlink so that it doesn't free potentially shared blocks
+					echo "unlink $tmp_rel" >> "$1/debugfs"
+				fi
+			done
+
+			if test -n "$tmp_dir"; then
+				tmp_dir_rel="$(sed -e "s|^$1/mnt||" <<<"$tmp_dir")"
+				# rmdir is fine here, we can't have shared blocks in the directory
+				echo "rmdir $tmp_dir_rel" >> "$1/debugfs"
+			fi
+			while ! umount "$1/mnt"; do sleep 1; done
+		else
+			ln -f "$src" "$img"
+		fi
+
+		trap - EXIT
+EOF
+
+	local changed=
+	if test -s "$work/debugfs"; then
+		/sbin/debugfs -w "$img" < "$work/debugfs"
+		changed=1
+	fi
+
+	if test -e "$work/features"; then
+		dd if="$work/features" of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
+		rm -f "$work/features"
+		changed=1
+	fi
+
+	if test -n "$changed"; then
+		"$otatools/bin/avbtool" add_hashtree_footer --image "$img" $(get_avbtool_descriptor_opts "$src")
+	fi
+}
+
+function make_fs_image {
+	local out="$1"
+	local b="$2"
+	shift 2
+	with_temp_dir "$outdir/mntrw-$b" update_fs_image "$out" "$outdir/debugfs/$b" "$@"
+}
+
+# don't use toybox cpio since it's terrible (it dereferences symbolic links...)
+
+function unpack_ramdisk {
+	local imgr="$(realpath "$2")"
+	mkdir -p "$1"
+	(cd "$1" && "$otatools/bin/lz4" -d "$imgr" -|cpio -i -d --preserve-modification-time) || exit 1
+}
+
+function update_ramdisk {
+	sudo bash $setx /dev/stdin "$otatools" "$var_dir/mkbootfs" "$@" <<'EOF' || exit 1
+		set -e
+		otatools="$1"
+		mkbootfs="$2"
+		shift 2
+
+		mkdir -p "$1"
+		"$otatools/bin/lz4" -d "$2" -|(cd "$1" && cpio -i -d --preserve-modification-time) || exit 1
+
+		rdr="$(realpath "$1")"
+		(cd "$3" && find -type f|while read i; do
+			o="$rdr/$i"
+			if ! cmp -s "$i" "$o"; then
+				echo "Updating $i: $(stat -c %s "$o") -> $(stat -c %s "$i")"
+				times="$(stat -c '%X %Y %Z' -- "$o")"
+				dd if="$i" of="$o" bs=1M conv=notrunc
+				truncate -r "$i" "$o"
+				read atime mtime ctime <<<"$times"
+				touch -d "@$mtime" -m -- "$o"
+			fi
+		done) || exit 1
+
+		"$mkbootfs" "$1"|"$otatools/bin/lz4" -f -l -12 --favor-decSpeed - "$2"
+		chown -R 1000:1000 "$1"
+EOF
+}
+
+function extract_boot_image {
+	local d="$2"
+	local img="$3"
+
+	local imgr="$(realpath "$img")"
+	(cd "$1" && "$otatools/bin/unpack_bootimg" --boot_img "$imgr" --out bootimg --format mkbootimg > mkbootimg_args) || exit 1
+	mkdir -p "$d"
+	if test -e "$1/bootimg/ramdisk"; then
+		for i in kernel cmdline; do
+			mv "$1/bootimg/$i" "$d"
+		done
+		unpack_ramdisk "$d/RAMDISK" "$1/bootimg/ramdisk"
+	else
+		for i in dtb bootconfig; do
+			mv "$1/bootimg/$i" "$d"
+		done
+		unpack_ramdisk "$d/RAMDISK" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_"
+		#unpack_ramdisk "$d/../VENDOR_DLKM/RAMDISK" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_dlkm"
+	fi
+}
+
+function update_boot_image {
+	local img="$2"
+	local src="$3"
+	local bootimg="$4"
+	local d="$5"
+
+	cp -a -r "$bootimg"/* "$1"
+	if test -e "$1/bootimg/ramdisk"; then
+		for i in kernel cmdline; do
+			cp -a "$d/$i" "$1/bootimg"
+		done
+		update_ramdisk "$1/bootimg/ramdisk.d" "$1/bootimg/ramdisk" "$d/RAMDISK"
+		(cd "$1" && sh -c "$otatools/bin/mkbootimg $(<mkbootimg_args) -o bootimg.img") || exit 1
+		mv "$1/bootimg.img" "$img"
+	else
+		for i in dtb bootconfig; do
+			cp -a "$d/$i" "$1/bootimg"
+		done
+		update_ramdisk "$1/bootimg/vendor-ramdisk-by-name/ramdisk_.d" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_" "$d/RAMDISK"
+		(cd "$1" && sh -c "$otatools/bin/mkbootimg $(<mkbootimg_args) --vendor_boot bootimg.img") || exit 1
+		mv "$1/bootimg.img" "$img"
+	fi
+
+	"$otatools/bin/avbtool" add_hash_footer --image "$img" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
+}
+
+function make_boot_image {
+	local out="$1"
+	local b="$2"
+	shift 2
+	replace=
+	if test "$b" == boot && test -n "$replace_boot"; then
+		replace="$replace_boot"
+	fi
+	if test -n "$replace"; then
+		local img="$3"
+		local src="$4"
+		cp -a "$replace" "$img"
+		"$otatools/bin/avbtool" add_hash_footer --image "$img" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
+	else
+		with_temp_dir "$outdir/mkbootimg-$b" update_boot_image "$out" "$@" "$replace"
+	fi
+}
+
+function make_vbmeta {
+	local src="$2"
+	local imgs="$3"
+
+	local opts=()
+	for i in $(get_avbtool_partitions "$src"); do
+		opts+=("--include_descriptors_from_image" "$imgs/$i.img")
+	done
+
+	"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1" "${opts[@]}" $(get_avbtool_vbmeta_opts "$src")
+}
+
+function get_avb_algorithm {
+	local avb_algorithm=SHA256_RSA4096
+	if test "$(stat -c %s "$key_dir/avb_pkmd.bin")" == 520; then
+		avb_algorithm=SHA256_RSA2048
+	fi
+	echo "$avb_algorithm"
+}
+
+function make_extract_fs {
+	with_temp_dir "$outdir/mnt" extract_image "$@"
+
+	if test -n "$dev_fast_sign"; then
+		find "$1" -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|grep -v framework-res.apk|xargs rm -f
+	fi
+}
+
+function extract_system {
+	find "$2"/system -mindepth 1 -maxdepth 1 -print0|xargs -0 mv --target-directory="$1"
+}
+
+function extract_root {
+	find "$2"/system -mindepth 1 -maxdepth 1 -print0|xargs -0 rm -rf
+	find "$2" -mindepth 1 -maxdepth 1 -print0|xargs -0 mv --target-directory="$1"
+}
+
+function extract_root_and_system {
+	work="$1"
+	shift
+	make_extract_fs "$work" "$@"
+	make_dir "$outdir/target_files_extracted/SYSTEM" extract_system "$work"
+	make_dir "$outdir/target_files_extracted/ROOT" extract_root "$work"
+}
+
+function make_extract_ota {
+	make_file "$dir/ota.zip.ok" download_ota
+
+	do_unzip "$1" "$dir/ota.zip"
+}
+
+function make_extract_ota_payload {
+	make_dir "$dir/ota" make_extract_ota
+	discard "$dir/ota.zip"
+
+	make_dir "$dir/ota_meta" do_extract_ota_manifest "$dir/ota/payload.bin"
+	for i in apex_info.pb; do
+		make_file "$dir/ota_meta/$i" make_hardlink "$dir/ota/$i"
+	done
+
+	do_extract_ota_payload "$1" "$dir/ota/payload.bin"
+}
+
+function make_extract_boot {
+	local work="$1"
+	local bootimg="$2"
+	shift 2
+
+	mkdir -p "$bootimg"
+	rm -rf "$bootimg"
+	make_dir "$bootimg" extract_boot_image "$work" "$@"
+}
+
+function make_original_apk_cert_hashes {
+	function go {
+		outr="$(realpath "$1")"
+		(
+			cd "$3"
+			find . -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|while read i; do
+				echo "$i"
+				"$otatools/bin/apksigner" verify --print-certs "$i" || exit 1
+				if unzip -q -l "$i" apex_pubkey >/dev/null; then
+					if ! unzip -q -p "$i" apex_payload.img > "$outr/apex_payload.img" 2>/dev/null; then
+						if ! unzip -q -p "$i" original_apex > "$outr/original_apex"; then
+							echo "Unable to unpack APEX $i" >&2
+							exit 1
+						else
+							if ! unzip -q -p "$outr/original_apex" apex_payload.img > "$outr/apex_payload.img"; then
+								echo "Unable to unpack original APEX $i" >&2
+								exit 1
+							fi
+						fi
+					fi
+					mkdir -p "$outr/APEX"
+					trap "sudo umount $outr/APEX" EXIT
+					sudo mount -o loop,ro "$outr/apex_payload.img" "$outr/APEX"
+					(
+						cd "$outr"
+						sudo find ./APEX -iname '*.apk'|while read j; do
+							echo "$j"
+							"$otatools/bin/apksigner" verify --print-certs "$j"
+						done
+					) || exit 1
+					while ! sudo umount "$outr/APEX"; do sleep 1; done
+					trap - EXIT
+				fi
+			done
+		)|sed -nre '/^\./x; / SHA-256 digest:/ {s/.* SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
+	}
+	with_temp_dir "$outdir/apk_cert_hashes_tmp" go "$@"
+}
+
+function make_target_files_extracted {
+	make_dir "$dir/ota_payload" make_extract_ota_payload
+	discard "$dir/ota/payload.bin"
+
+	#mkdir "$1/META"
+	#ls -1 "$dir/ota_payload"|sed -re 's/\.img$//'>"$1/META/ab_partitions.txt"
+	#get_avbtool_partitions "$dir/ota_payload/vbmeta.img">"$1/META/ab_partitions.txt"
+
+	mkdir -p "$outdir/target_files_extracted"
+
+	if test "$build_method" == vbmeta; then
+		mkdir -p "$outdir/target_files_extracted/IMAGES"
+		ls -1 "$dir/ota_payload"|while read i; do
+			if test "$i" == vbmeta.img; then
+				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img") || exit 1
+			else
+				make_file "$outdir/target_files_extracted/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
+			fi
+		done || exit 1
+	fi
+
+	query=
+
+	if test "$build_method" != rebuild; then
+		# unconditionally extract so that if we change flags we don't have to rebuild
+		query='(^|/)build\.prop$|(^|/)plat_sepolicy.cil$|(^|/)services-platform-compat-config.xml$|(^|/)hosts$'
+		if test "$build_method" == resign; then
+			if test -n "$dev_fast_sign"; then
+				query="$query|"'framework-res\.apk$'
+			else
+				query="$query|"'\.apk$|\.c?apex$'
+			fi
+
+			query="$query"'|(^|/)otacerts\.zip$|mac_permissions\.xml$'
+		fi
+	fi
+
+	for b in $image_parts; do
+		if test "$b" != system && test -e "$dir/ota_payload/$b.img"; then
+			d="$(echo "$b"|tr a-z A-Z)"
+			make_dir "$outdir/target_files_extracted/$d" make_extract_fs "$dir/ota_payload/$b.img" "$query"
+		fi
+	done
+
+	if ! test -e "$outdir/target_files_extracted/SYSTEM" || ! test -e "$outdir/target_files_extracted/ROOT"; then
+		with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query"
+	fi
+
+	for b in boot vendor_boot; do
+		if test -e "$dir/ota_payload/$b.img"; then
+			d="$(echo "$b"|tr a-z A-Z)"
+			make_dir "$outdir/target_files_extracted/$d" make_extract_boot "$outdir/bootimg/$b" "$dir/ota_payload/$b.img"
+		fi
+	done
+
+	make_file "$outdir/apk_cert_hashes.txt" make_original_apk_cert_hashes "$outdir/target_files_extracted"
+	touch "$1"
+}
+
+function patch_apex {
+	local work="$1"
+	local out="$2"
+	local apex="$3"
+	local cmd="$4"
+	shift 4
+
+	local debugfs=/sbin/debugfs
+
+	type="$("$otatools/bin/deapexer" --debugfs_path "$debugfs" info --print-type "$apex")"
+	if test "$type" == COMPRESSED; then
+		"$otatools/bin/deapexer" --debugfs_path "$debugfs" decompress --input "$apex" --output "$work"/original.apex
+	else
+		ln "$apex" "$work"/original.apex
+	fi
+
+	"$otatools/bin/deapexer" --debugfs_path "$debugfs" extract "$work"/original.apex "$work"/payload
+	for i in apex_manifest.pb apex_manifest.json lost+found; do
+		if test -d "$work/payload/$i"; then
+			rmdir "$work/payload/$i"
+		else
+			rm -f "$work/payload/$i"
+		fi
+	done
+
+	"$cmd" "$work/payload" "$@"
+
+	unzip -q -x -d "$work/apex" "$work"/original.apex
+
+	args=()
+	if test -e "$work/apex/apex_manifest.json"; then
+		args+=(--manifest_json "$work/apex/apex_manifest.json")
+	fi
+	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
+
+	cp "$work/original.apex" "$work/modded.apex"
+	modded_apex_r="$(realpath "$work/modded.apex")"
+	(cd "$work" && zip -0 "$modded_apex_r" apex_payload.img)
+	"$otatools/bin/zipalign" -f 4096 "$work/modded.apex" "$work/aligned.apex"
+
+	if test "$type" == COMPRESSED; then
+		# apex_compression_tool tries to make an hardlink from the input to /tmp, so we need to copy it to /tmp
+		aligned_tmp="$(mktemp)"
+		cp -a "$work"/aligned.apex "$aligned_tmp"
+		"$otatools/bin/apex_compression_tool" compress --apex_compression_tool_path "$otatools/bin:$PATH" --input "$aligned_tmp" --output "$work/out.apex"
+	else
+		ln "$work"/modded.apex "$work/out.apex"
+	fi
+	ln -f "$work/out.apex" "$out"
+}
+
+
+function patch_apk_raw {
+	local out_zip="$1/zip.zip"
+	local files="$1/files"
+	local out="$2"
+	local in_zip="$3"
+	local cmd="$4"
+	shift 4
+
+	mkdir -p "$files"
+	unzip -x -d "$files" "$in_zip"
+	"$cmd" "$files" "$@"
+	out_zip_r="$(realpath "$out_zip")"
+	bsdtar -tf "$in_zip"|(cd "$files" && zip -0 -@ "$out_zip_r")
+	rm -f "$out"
+	"$otatools/bin/zipalign" -f -p 4 "$out_zip" "$out"
+}
+
+function install_apktool_framework {
+	java -jar "$apktool" if -p "$1" "$outdir/target_files_extracted/SYSTEM/framework/framework-res.apk"
+}
+
+function patch_apk_apktool {
+	local work="$1"
+	shift
+
+	local resources=1
+	local opts=
+	while true; do
+		if test "$1" == '-r'; then
+			opts="$opts -r"
+			resources=
+			shift
+		elif test "$1" == '-s'; then
+			opts="$opts -s"
+			shift
+		else
+			break
+		fi
+	done
+
+	local out="$1"
+	local in_zip="$2"
+	local cmd="$3"
+	shift 3
+
+	local framework_dir=
+	if test -n "$resources"; then
+		framework_dir="$outdir/apktool-framework"
+		make_dir "$framework_dir" install_apktool_framework
+	else
+		mkdir -p "$work/framework"
+		framework_dir="$work/framework"
+	fi
+
+	java -jar "$apktool" d $opts -p "$framework_dir" -o "$work/files" "$in_zip"
+	"$cmd" "$work/files" "$@"
+	java -jar "$apktool" b -p "$framework_dir" -o "$work/out.apk" "$work/files"
+	unzip -q -x -d "$work/out" "$work/out.apk"
+	work_r="$(realpath "$work")"
+	bsdtar -tf "$work/out.apk"|(cd "$work/out" && zip -0 -@ "$work_r/out0.apk")
+	rm -f "$out"
+	"$otatools/bin/zipalign" -f -p 4 "$work_r/out0.apk" "$out"
+}
+
+function patch_adbd {
+	patch="$(mktemp)"
+	echo -n -e '\x20\x00\x80\x52' > "$patch" # mov w0,#0x1
+	# non-LLVM objdump fails to annotate calls to the PLT with the symbol name
+	llvm-objdump-11 -d "$2"|sed -nre 's/^\s*([0-9a-f]+):\s*[0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f]\s+bl\s+\0x[0-9a-f]+\s+<__android_log_is_debuggable@plt>$/\1/p'|while read i; do
+		dd if="$patch" of="$1" bs=1 count=4 seek="$((0x$i))" conv=notrunc
+	done
+}
+
+function patch_adbd_in_root {
+	for dir in "$@"; do
+		patch_adbd "$dir/bin/adbd" "$dir/bin/adbd"
+	done
+}
+
+function patch_seedvault {
+	# replace (flags & FLAG_ALLOW_BACKUP) with (FLAG_ALLOW_BACKUP)
+	find "$1" -name '*.smali' -type f -print0|xargs -0 sed -i -z -re 's|(iget [^,]+, [^,]+, Landroid/content/pm/ApplicationInfo;->flags:I\n\s*const [^,]+, 0x8000\n\s*)and-int/2addr ([^,]+), [^,[:space:]]+|\1const \2, 0x8000|g'
+}
+
+function patch_updater {
+	for i in "$1/res/values/strings.xml" "$1/resources.arsc"; do
+		if test -e "$i"; then
+			sed -i -e "s|$orig_update_url|$update_url|g" "$i"
+		fi
+	done
+}
+
+function make_target_files_intermediates_base {
+	make_file "$outdir/target_files_extracted.done" make_target_files_extracted
+
+	mkdir -p "$outdir/debugfs"
+	rm -f "$outdir/debugfs"/*
+
+	if test "$update_url" != "$orig_update_url"; then
+		mkdir -p "$1/SYSTEM/priv-app/Updater"
+		with_temp_dir "$outdir/patch-updater" patch_apk_raw {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Updater/Updater.apk patch_updater
+		mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Updater/Updater.apk"
+	fi
+
+	if test -n "$adb_root"; then
+		for i in SYSTEM/apex/com.android.adbd.apex SYSTEM/apex/com.android.adbd.capex; do
+			if test -e "$outdir/target_files_extracted/$i"; then
+				mkdir -p "$1/SYSTEM/apex"
+				with_temp_dir "$outdir/patch-adbd-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_adbd_in_root
+			fi
+		done
+		if test -e "$outdir/target_files_extracted/SYSTEM/bin/adbd"; then
+			mkdir -p "$1/SYSTEM/bin"
+			patch_adbd {"$1","$outdir/target_files_extracted"}/SYSTEM/bin/adbd
+		fi
+	fi
+
+	if test -n "$allowbackup"; then
+		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
+			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
+			with_temp_dir "$outdir/patch_seedvault" patch_apk_apktool -r {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk patch_seedvault
+			mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Seedvault/Seedvault.apk"
+			echo "unlink /system/priv-app/Seedvault/oat" >> "$outdir/debugfs/system"
+		fi
+	fi
+
+	cp -a -n -l --target-directory="$1" "$outdir/target_files_extracted"/*
+}
+
+
+function make_misc_info {
+	if false; then
+	cat ->"$1" <<EOF
+recovery_api_version=99999
+fstab_version=2
+ab_update=true
+verity=true
+avb_enable=true
+lz4_ramdisks=true
+avb_avbtool=avbtool
+EOF
+	else
+		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
+	fi
+}
+
+function make_certs {
+	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while read f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+}
+
+function make_product_security {
+	while read h c k; do echo "$c"|xxd -p -r|openssl x509 -in - -inform DER -outform PEM > $1/$k.x509.pem; done < "$outdir"/certs.txt
+}
+
+
+function make_apkcerts {
+	join -a 1 -1 2 -o '1.1,2.2' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|grep 'apk ') <(cut -d ' ' -f 1,3 "$outdir/certs.txt")|sed -nre '/[^ ]*\/([^/ ]*) $/ {s|[^ ]*/([^/ ]*) $|name="\1" certificate="PRESIGNED" private_key="" partition=""|p; b;}; s|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" certificate="build/make/target/product/security/\2.x509.pem" private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
+}
+
+function make_apexkeys {
+	join -a 1 -1 2 -o '1.1,2.3' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|sed -nre 's/\.capex /.apex /; /.apex /p') "$outdir/certs.txt"|sed -nre 's|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="build/make/target/product/security/\2.x509.pem" container_private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
+}
+
+function make_otakeys {
+	touch "$1"
+}
+
+function make_hardlink {
+	rm -f "$1"
+	ln "$2" "$1"
+}
+
+function make_target_files_intermediates {
+	make_dir "$outdir/target_files_intermediates" make_target_files_intermediates_base
+	make_file "$outdir/certs.txt" make_certs
+	make_dir "$outdir/product_security" make_product_security
+	mkdir -p "$outdir/target_files_intermediates/META"
+	make_file "$outdir/target_files_intermediates/META/apkcerts.txt" make_apkcerts
+	make_file "$outdir/target_files_intermediates/META/apexkeys.txt" make_apexkeys
+	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
+	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
+	if test "$build_method" == rebuild; then
+		cp -f "$dir/ota_meta/ab_partitions.txt" "$outdir/target_files_intermediates/META/ab_partitions.txt"
+#		mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
+#		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/dtbo.img" make_hardlink "$dir/ota_payload/dtbo.img"
+	else
+		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
+	fi
+	touch "$1"
+}
+
+function make_target_files_intermediates_zip {
+	make_file "$outdir/target_files_intermediates.done" make_target_files_intermediates
+	discard "$outdir/target_files_extracted"
+
+	local zip="$(realpath "$1")"
+	rm -f "$zip"
+	(cd "$outdir/target_files_intermediates"; zip -q -y -0 -r "$zip" *)
+}
+
+function make_target_files_signed_zip {
+	function go {
+		make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
+		discard "$outdir/target_files_intermediates"
+
+		if test "$build_method" == vbmeta; then
+			rm -f "$2"
+			ln "$outdir/target_files_intermediates.zip" "$2"
+		else
+			from="$(realpath "$outdir/target_files_intermediates.zip")"
+			to="$(realpath "$2")"
+			mkdir -p "$1/build/make/target/product"
+			ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
+			ln -s "$(realpath "$key_dir")" "$1/keys"
+			cd "$1"
+			# TODO: distinguish beetwen errors before add_image_... and after
+			if ! (sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$aosp/script/release.sh"; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x 2>&1 | tee "$outdir/sign_target_files.txt"; then
+				if test "$build_method" == resign && grep -qE '^\s*File "[^"]*/add_img_to_target_files.py", line [0-9]+, in AddImagesToTargetFiles\s*$' "$outdir/sign_target_files.txt"; then
+					echo "Expected failure: signed completed, sign_target_files_apk failed while trying to create images which we don't want"
+				else
+					exit 1
+				fi
+			fi
+		fi
+	}
+	with_temp_dir "$outdir/sign_target_files" go "$@"
+}
+
+function install_magisk {
+	make_dir "$outdir/magisk" do_unzip "$magisk"
+
+	echo "Magisk installation support in this script has not been written yet, use the official Magisk app and --replace-boot instead to install Magisk manually" >&2
+	exit 1
+}
+
+function make_target_files_signed {
+	make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
+	make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
+
+	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
+
+	find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -z -re 's/\n*$/\n\n/'
+	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
+	# grep -vz BOOT|
+	prop_sed=""
+	if test -n "$ro_debuggable"; then
+		prop_sed="$prop_sed; s/^ro.debuggable=.*/ro.debuggable=$ro_debuggable/"
+	fi
+	if test -n "$ro_secure"; then
+		prop_sed="; s/^ro.secure=.*/ro.secure=$ro_secure/"
+	fi
+	if test -n "$prop_sed"; then
+		find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -re "$prop_sed"
+	fi
+	sepolicy="$(mktemp)"
+	su=
+	if test -n "$recovery_adb_root"; then
+		# replace all calls to __android_log_is_debuggable with the constant 1
+		patch_adb "$1/VENDOR_BOOT/RAMDISK/system/bin/adbd"
+	fi
+
+	if test -n "$adb_root"; then
+		echo '(allow adbd adbd (process (setcurrent)))' >> "$sepolicy"
+		su=1
+	fi
+
+	if false; then
+		#echo '(typetransition dumpstate su_exec process su)' >> "$sepolicy"
+
+		# this would be needed to let shell su to root if we supported a "su" binary, in addition to actually adding the binary
+		echo '(typetransition shell su_exec process su)' >> "$sepolicy"
+
+		su=1
+	fi
+
+	if test -n "$su"; then
+		# su.cil generated like this starting from userdebug target_files from ci.android.com
+		# sed -re 's/(expandtypeattribute .* )true/\1false/' SYSTEM/etc/selinux/plat_sepolicy.cil > plat_sepolicy_noexpand.cil
+		# secilc -G -N -m plat_sepolicy_noexpand.cil -o plat_sepolicy_noexpand.policy && checkpolicy -C -M -b plat_sepolicy_noexpand.policy -o dis.cil
+		# grep -w su dis.cil|sed -re 's/^(\(typeattributeset [^ ]*) .*\)$/\1 (su))/'|grep -v 'su_exec process su' > su.cil
+
+		# TODO: we are filtering some permissions arbitrarily, we should use a better way to filter them
+		sed -e 's/ nlmsg_getneigh//; s/ get_attestation_key//; s/ migrate_any_key//; s/ su_userfaultfd//' "$data_dir/su.cil"|grep -v '\[userfaultfd\]' >> "$sepolicy"
+	fi
+	if test -n "$allowbackup"; then
+		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="183147249"\s+name="IGNORE_ALLOW_BACKUP_IN_D2D"\s+overridable="true"\s+/>)|\11" \2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
+		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="180523564"\s+name="IGNORE_FULL_BACKUP_CONTENT_IN_D2D"\s+overridable="true"\s+/>)|\11" \2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
+	fi
+	if test -n "$adb_backup"; then
+		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="171032338"\s+name="RESTRICT_ADB_BACKUP"\s+/>)|\199"\2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
+	fi
+	if test -n "$hosts_url"; then
+		curl "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
+		mkdir_touch "$outdir/modded_paths/SYSTEM/etc/hosts"
+	fi
+	if test "$(wc -l < "$sepolicy")" != 0; then
+		echo "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" > "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
+
+		# we remove all neverallows because they have no runtime effect after policy compilation (unless validation fails, but in that case the device fails to boot), and it's too hard to fix them
+		# TODO: fix the neverallows...
+		sed -i -re '/^\(neverallow /d' "$1/SYSTEM/etc/selinux/plat_sepolicy.cil"
+
+		# we must filter out rules for types that don't exist in the policy
+		declare -A se_types
+		while read i; do
+			se_types["$i"]=1
+		done < <(sed -nre 's/^\((type|typeattribute|role) ([^ )]*).*\)$/\2/p' "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" |sort|uniq)
+
+		sed -re 'h; s/[()]//g; s/\S* (\S*) (\S*).*/\1|\2|/; /\|/! s/.*/||/; G; s/\n//;' "$sepolicy"|while IFS='|' read a b r; do
+			ok=1
+			for i in $a $b; do
+				if test "$i" != su && test "$i" != self && test -z "${se_types[$i]:-}"; then
+					ok=
+				fi
+			done
+			if test -n "$ok"; then
+				echo "$r"
+			fi
+		done >> "$1/SYSTEM/etc/selinux/plat_sepolicy.cil"
+
+		# check the policy
+		secilc -m -M true -G -N -c 32 "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" -o /dev/null -f /dev/null
+		mkdir_touch "$outdir/modded_paths/SYSTEM/etc/selinux/plat_sepolicy.cil"
+	fi
+
+	if test -n "$magisk"; then
+		install_magisk "$1"
+	fi
+}
+
+function make_target_files_base {
+	if test "$build_method" == resign; then
+		make_dir "$outdir/target_files_signed" make_target_files_signed
+		discard "$outdir/target_files_signed.zip"
+
+		cp -a "$outdir/target_files_signed/META" "$1/META"
+
+		outr="$(realpath "$1")"
+		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr") || exit 1
+
+		ls -1 "$dir/ota_meta"|while read i; do
+			ln -f "$dir/ota_meta/$i" "$1/META/$i"
+		done
+
+		rm -f "$1/META/care_map.pb"
+	else
+		echo "Should not have called make_target_files" >&2
+		exit 1
+	fi
+}
+
+# vbmeta: ota_payload -> [copy ota_payload images and make new vbmeta] -> target_files_intermediate -> target_files_intermediate.zip -> [ln] -> target_files_signed.zip -> [ln] -> target_files.zip
+# resign: ota_payload -> [extract apks from images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [integrate with ota_payload images] -> target_files -> target_files.zip
+# rebuild: ota_payload -> [unpack all images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [rename] -> target_files.zip
+
+function read_prop {
+	local i
+	for i in "" /etc; do
+		local p="$1$i/build.prop"
+		if test -e "$p"; then
+			while IFS== read k v; do
+				if test "$k" == "$2"; then
+					echo "$v"
+					exit 0
+				fi
+			done < "$p"
+		fi
+	done
+	exit 1
+}
+
+function make_care_map {
+	care_map_txt="$(mktemp)"
+	while read b; do
+		ok=
+		for i in $image_parts; do
+			if test "$b" == "$i"; then
+				ok=1
+			fi
+		done
+		if test -n "$ok" && test -e "$outdir/target_files/IMAGES/$b.img"; then
+			d="$(echo "$b"|tr a-z A-Z)"
+			prop=
+			print=
+			for i in fingerprint thumbprint; do
+				local p="ro.$b.build.$i"
+				if print="$(read_prop "$outdir/target_files/$d" "$p")"; then
+					prop="$p"
+					break
+				fi
+			done
+
+			if test -z "$prop"; then
+				echo "Cannot find fingerprint for partition $b while building the care map" >&2
+				prop=unknown
+				print=unknown
+			fi
+
+			size="$("$otatools"/bin/avbtool info_image --image "$outdir/target_files/IMAGES/$b.img"|sed -nre 's/^\s*Original image size:\s*([0-9]+).*/\1/p')"
+			blocks="$(($size / 4096))"
+
+			echo "$b" >> "$care_map_txt"
+			echo "2,0,$blocks" >> "$care_map_txt"
+			echo "$prop" >> "$care_map_txt"
+			echo "$print" >> "$care_map_txt"
+		fi
+	done < "$outdir/target_files/META/ab_partitions.txt"
+
+	"$otatools/bin/care_map_generator" "$care_map_txt" "$1"
+}
+
+function make_target_files_zip {
+	if test "$build_method" == resign; then
+		make_dir "$outdir/target_files" make_target_files_base
+
+		mkdir -p "$outdir/target_files/IMAGES"
+		ls -1 "$dir/ota_payload"|while read i; do
+			local done=
+			for j in $image_parts vbmeta boot vendor_boot; do
+				if test "$i" == "$j.img"; then
+					done=1
+				fi
+			done
+			if test -z "$done"; then
+				make_file "$outdir/target_files/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
+			fi
+		done || exit 1
+
+		for b in $image_parts; do
+			if test -e "$dir/ota_payload/$b.img"; then
+				d="$(echo "$b"|tr a-z A-Z)"
+				if test -e "$outdir/target_files_signed/$d"; then
+					root=
+					if test "$b" == system; then
+						root=/system
+					fi
+					make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "$root"
+				fi
+			fi
+		done
+
+		for b in boot vendor_boot; do
+			if test -e "$dir/ota_payload/$b.img"; then
+				d="$(echo "$b"|tr a-z A-Z)"
+				make_file "$outdir/target_files/IMAGES/$b.img" make_boot_image "$b" "$dir/ota_payload/$b.img" "$outdir/bootimg/$b" "$outdir/target_files_signed/$d"
+			fi
+		done
+
+		make_file "$outdir/target_files/IMAGES/vbmeta.img" make_vbmeta "$dir/ota_payload/vbmeta.img" "$outdir/target_files/IMAGES"
+
+		discard "$outdir/target_files_signed"
+
+		make_file "$outdir/target_files/META/care_map.pb" make_care_map
+
+		local zip="$(realpath "$1")"
+		rm -f "$zip"
+		(cd "$outdir/target_files"; zip -q -y -0 -r "$zip" *) || exit 1
+	else
+		make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
+		discard "$outdir/target_files_intermediates.zip"
+		rm -f "$1"
+		ln "$outdir/target_files_signed.zip" "$1"
+	fi
+}
+
+# needs out_target_files.zip
+function make_ota_unchecked {
+	local extra_ota=()
+	ls -1 "$dir/ota_payload"|while read i; do
+		if ! unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
+			local b="$(basename "$f" .img)"
+			extra_ota+=( "--custom-image" )
+			extra_ota+=( "$b:$i" )
+		fi
+	done
+	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "${extra_ota[@]}" "$outdir/target_files.zip" "$1"
+}
+
+# make sure we have the correct key in recovery so that we can sideload another update, otherwise we can get locked out the device...
+function check_images {
+	local vendor_boot="$2"
+	local system="$3"
+	"$otatools/bin/unpack_bootimg" --boot_img "$vendor_boot" --out "$1/vendor_boot" >&2
+	mkdir "$1/vendor_boot_ramdisk" >&2
+	lz4 -d "$1/vendor_boot/vendor_ramdisk00" -|(cd "$1/vendor_boot_ramdisk" && cpio -i) >&2
+	mkdir "$1/recovery_otacerts" >&2
+	unzip -x -d "$1/recovery_otacerts" "$1/vendor_boot_ramdisk/system/etc/security/otacerts.zip" >&2
+	if ! cmp "$1/recovery_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
+		echo "Recovery otacerts.zip has wrong key!!!" >&2
+		exit 1
+	fi
+	echo "dump /system/etc/security/otacerts.zip $1/system_otacerts.zip"|debugfs "$system" >&2
+	mkdir "$1/system_otacerts" >&2
+	unzip -x -d "$1/system_otacerts" "$1/system_otacerts.zip" >&2
+	if ! cmp "$1/system_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
+		echo "System otacerts.zip has wrong key!!!" >&2
+		exit 1
+	fi
+	echo "CHECK SUCCESSFUL"
+}
+
+function check_ota {
+	mkdir "$1"/ota >&2
+	unzip -x -d "$1/ota" "$outdir/ota_unchecked.zip" >&2
+	python3 "$extract_android_ota_payload" "$1/ota/payload.bin" "$1/ota_payload" >&2
+	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img"
+}
+
+function make_ota {
+	make_file "$outdir/ota_unchecked.zip" make_ota_unchecked
+
+	result="$(set -e; with_temp_dir "$outdir/check_ota" check_ota)"
+	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
+		ln "$outdir/ota_unchecked.zip" "$1"
+	else
+		echo "OTA key check failed!!!"
+		exit 1
+	fi
+}
+
+function download_factory {
+	mkdir -p "$dir/factory_zip"
+	curl "$factory_url.zip" -C - -o "$dir/factory_zip/$factory_name.zip"
+	curl "$factory_url.zip.sig" -C - -o "$dir/factory_zip/$factory_name.zip.sig"
+	if ! ( cd "$dir/factory_zip" && $signify -Cqp "$factory_key" -x "$factory_name.zip.sig" ); then
+		echo "Failed to verify factory image signature!" >&2
+		exit 1
+	fi
+	touch "$1"
+}
+
+function do_unzip_img2simg {
+	unzip -q -p "$3" "$4" > "$1"/img
+	"$otatools/bin/img2simg" "$1"/img "$2" 4096
+}
+
+# needs out_target_files.zip
+function make_factory_image {
+	mkdir -p "$dir/factory_zip"
+	make_file "$dir/factory_zip.ok" download_factory
+
+	make_dir "$dir/factory" do_unzip "$dir/factory_zip/$factory_name.zip"
+	make_file "$dir/factory.list" do_unzip_list "$dir/factory_zip/$factory_name.zip"
+	discard "$dir/factory_zip/$factory_name.zip"
+
+	make_dir "$dir/factory_image" do_unzip "$dir/factory/$factory_name/image-$device-$build.zip"
+	make_file "$dir/factory_image.list" do_unzip_list "$dir/factory/$factory_name/image-$device-$build.zip"
+	discard "$dir/factory/$factory_name/image-$device-$build.zip"
+
+	ls -1 "$dir/factory_image"|while read i; do
+		if unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
+			simg=
+			for j in $image_parts; do
+				if test "$i" == "$j.img"; then
+					simg=1
+				fi
+			done
+			if test -n "$simg"; then
+				with_temp_dir "$outdir/target_files-img-$i" do_unzip_img2simg "$1/$i" "$outdir/target_files.zip" "IMAGES/$i"
+			else
+				unzip -q -p "$outdir/target_files.zip" "IMAGES/$i" > "$1/$i"
+			fi
+		else
+			ln "$dir/factory_image/$i" "$1/$i"
+		fi
+	done
+}
+
+function make_factory_unchecked {
+	local out="$1/$device-factory-$build"
+	mkdir "$out"
+	shift 1
+
+	make_dir "$outdir/factory_image" make_factory_image
+	# NOTE: only OK if we make OTA first
+	if test "$#" != 0 && test "$1" == "--discard"; then
+		discard "$outdir/target_files.zip"
+	fi
+
+	local zip="$(realpath "$out/image-$device-$build.zip")"
+	# files in the zip must be in the proper order
+	factory_image_entries="$(<$dir/factory_image.list)"
+	(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries) || exit 1
+
+	ls -1 "$dir/factory/$device-factory-$build"|while read i; do
+		if test "$i" == avb_pkmd.bin; then
+			cp -a "$key_dir/avb_pkmd.bin" "$out"
+		elif test "$i" == "image-$device-$build.zip"; then
+			:
+		else
+			ln "$dir/factory/$device-factory-$build/$i" "$out"
+		fi
+	done
+}
+
+function make_factory {
+	make_dir "$outdir/factory_unchecked" make_factory_unchecked
+
+	result="$(set -e; with_temp_dir "$outdir/check_factory" check_factory)"
+	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
+		ln --target-directory="$outdir"/factory "$outdir/factory_unchecked"/*
+	else
+		echo "Factory key check failed!!!"
+		exit 1
+	fi
+}
+
+function check_factory {
+	mkdir "$1"/ota  >&2
+	unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/image-$device-$build"  >&2
+	"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
+	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img"
+}
+
+
+function make_factory_zip {
+	make_dir "$outdir/factory" make_factory
+	discard "$outdir/factory_image"
+
+	local zip="$(realpath "$1")"
+	rm -f "$zip"
+	factory_entries="$(<"$dir/factory.list")"
+	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries) || exit 1
+}
+
+function make_factory_zip_sig {
+	local key="$(realpath "$key_dir/factory.sec")"
+	(cd "$outdir/out"; sha256sum --tag "$device-factory-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+}
+
+
+out_ota="$outdir/out/$device-ota_update-$out_build.zip"
+out_factory="$outdir/out/$device-factory-$out_build.zip"
+
+if ! test -e "$out_ota" || ! test -e "$out_factory"; then
+	mkdir -p "$outdir/out"
+	if test -n "$parallel"; then
+		make_file "$dir/factory_zip.ok" download_factory &
+	fi
+
+	make_file "$outdir/target_files.zip" make_target_files_zip
+	discard "$outdir/target_files" "$outdir/target_files_signed.zip"
+
+	if test -n "$parallel"; then
+		# kill the download, we'll just resume it in parallel with making the OTA image
+		kill %1
+		wait
+
+		make_file "$out_ota" make_ota &
+		make_file "$out_factory" make_factory_zip &
+		wait
+		if ! test -e "$out_ota" || ! test -e "$out_factory"; then
+			echo "Parallel build failed" >&2
+			exit 1
+		fi
+		discard "$dir/ota_payload"
+	else
+		if test -n "$build_ota"; then
+			make_file "$out_ota" make_ota
+			discard "$dir/ota_payload"
+		fi
+		if test -n "$build_factory"; then
+			make_dir "$outdir/factory" make_factory
+		fi
+		if test -n "$build_factory_zip"; then
+			make_file "$out_factory" make_factory_zip --discard
+		fi
+	fi
+fi
+discard "$outdir/target_files.zip"
+discard "$outdir/factory"
+
+if test -n "$build_factory_zip"; then
+	make_file "$out_factory.sig" make_factory_zip_sig
+fi
+
+if test -n "$build_ota"; then
+	function make_metadata {
+		ln "$out_ota" "$1/ota.zip"
+		"$aosp/script/generate_metadata.py" "$1/ota.zip" || exit 1
+		rm -f "$1/ota.zip"
+	}
+
+	make_dir "$outdir/out_meta" make_metadata
+
+	ls -1 "$outdir/out_meta"|while read i; do
+		if ! test -e "$outdir/out/$i"; then
+			ln "$outdir/out_meta/$i" "$outdir/out/$i"
+		fi
+	done
+fi

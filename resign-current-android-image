@@ -1,0 +1,73 @@
+#!/bin/bash
+set -x
+
+resign_android_image="$(dirname "$0")/resign-android-image"
+dir="$1"
+key_dir="$2"
+os="$3"
+device="$4"
+in_channel="$5"
+shift 5
+
+if test "$os" == grapheneos; then
+	base_url="https://releases.grapheneos.org"
+else
+	echo "Unsupported OS: $os"
+	exit 1
+fi
+
+read incremental timestamp build channel < <(curl "$base_url/$device-$in_channel")
+
+if test "$channel" != "$in_channel"; then
+	exit 1
+fi
+
+mkdir -p "$dir"
+exec 100<>"$dir/lock"
+flock 100
+
+ota_failed_dir="$dir/ota_failed/$os/$device"
+ota_failed="$ota_failed_dir/$build"
+if test -e "$ota_failed"; then
+	if test "$(stat -c %Y "$ota_failed")" -gt "$(($(date +%s) - 86400))"; then
+		exit 1
+	fi
+fi
+
+channel_done_dir="$dir/channel_done/$channel/$os/$device"
+channel_done="$channel_done_dir/$build"
+if test -e "$channel_done"; then
+	if test "$(<"$channel_done")" == 0 || test "$(stat -c %Y "$channel_done")" -gt "$(($(date +%s) - 86400))"; then
+		exit 0
+	fi
+fi
+
+(echo "$device"; echo "$incremental $timestamp $build $channel")|$UPDATER
+status="$?"
+if test "$status" != 2; then
+	mkdir -p "$channel_done_dir"
+	echo "$status" > "$channel_done"
+	exit "$status"
+fi
+
+build_dir="$dir/build"
+function cleanup
+{
+	rm -rf "$build_dir"
+}
+trap cleanup EXIT
+
+"$resign_android_image" "$build_dir" "$key_dir" "$os" "$device" "$incremental" "$@"
+status="$?"
+if test "$status" != 0; then
+	mkdir -p "$ota_failed_dir"
+	echo "$status" > "$ota_failed"
+	exit "$status"
+fi
+
+(echo "$device"; echo "$incremental $timestamp $build $channel"; cat "$build_dir/out_resign/out/$device-ota_update-$incremental.zip")|$UPDATER
+status="$?"
+
+mkdir -p "$channel_done_dir"
+echo "$status" > "$channel_done"
+exit "$status"
