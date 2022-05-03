@@ -27,7 +27,7 @@ exec 100<>"$dir/lock"
 flock 100
 
 ota_failed_dir="$dir/ota_failed/$os/$device"
-ota_failed="$ota_failed_dir/$build"
+ota_failed="$ota_failed_dir/$incremental"
 if test -e "$ota_failed"; then
 	if test "$(stat -c %Y "$ota_failed")" -gt "$(($(date +%s) - 86400))"; then
 		exit 1
@@ -35,7 +35,7 @@ if test -e "$ota_failed"; then
 fi
 
 channel_done_dir="$dir/channel_done/$channel/$os/$device"
-channel_done="$channel_done_dir/$build"
+channel_done="$channel_done_dir/$incremental"
 if test -e "$channel_done"; then
 	if test "$(<"$channel_done")" == 0 || test "$(stat -c %Y "$channel_done")" -gt "$(($(date +%s) - 86400))"; then
 		exit 0
