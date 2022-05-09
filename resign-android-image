@@ -366,7 +366,7 @@ if test "$os" == grapheneos; then
 	factory_url="$base_url/$factory_name"
 	ota_url="$base_url/$device-ota_update-$build"
 	factory_key="$data_dir/grapheneos-factory.pub"
-	ota_cert="$data_dir/grapheneos-ota.pem"
+	ota_cert="$data_dir/grapheneos-otacerts/$device.pem"
 else
 	echo "Unsupported OS: $os"
 	exit 1

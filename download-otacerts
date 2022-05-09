@@ -1,0 +1,32 @@
+#!/bin/bash
+# used to create grapheneos-otacerts directory, can be used to add support for new devices
+signify=signify-openbsd
+os="$1"
+incremental="$2"
+shift 2
+
+if test "$os" != grapheneos; then
+	echo "OS not supported" 2>&1
+	exit 1
+fi
+
+sudo apt install -y signify-openbsd android-sdk-libsparse-utils
+
+mkdir -p grapheneos-otacerts
+# barbet blueline bonito bramble coral crosshatch flame oriole raven redfin sargo sunfish
+for device in "$@"; do
+	f="$device-factory-$incremental"
+	wget https://releases.grapheneos.org/$f.zip
+	wget https://releases.grapheneos.org/$f.zip.sig
+	$signify -Cqp grapheneos-factory.pub -x "$f.zip.sig" || exit 1
+	i="$f/image-$device-$incremental.zip"
+	unzip -x "$f.zip" "$i"
+	unzip -x "$i" system.img
+	simg2img system.img system.img.raw
+	echo 'dump /system/etc/security/otacerts.zip otacerts.zip'|debugfs system.img.raw
+	unzip -x otacerts.zip keys/releasekey.x509.pem
+	mv keys/releasekey.x509.pem grapheneos-otacerts/$device.pem
+	rm -f system.img "$i" "$f.zip" "$f.zip.sig"
+	rmdir "$f" keys
+done
+
