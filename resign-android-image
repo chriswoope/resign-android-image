@@ -545,15 +545,20 @@ function update_fs_image {
 			mod="$base/$p"
 			orig="$1/mnt$root/$p"
 			if ! cmp -s "$orig" "$mod" 2>/dev/null; then
-				orig_size="$(stat -c %s "$orig")"
+				orig_size=-1
+				if test -e "$orig"; then
+					orig_size="$(stat -c %s "$orig")"
+				fi
 				mod_size="$(stat -c %s "$mod")"
-				if test -e "$modded/$p"; then
-					if ! test -e "$orig"; then
+				if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
+					if test "$orig_size" == -1; then
 						if ! test -s "$modded/$p"; then
-							echo "File to rewrite doesn't exist: $p" >&2
+							echo "File to patch or rewrite doesn't exist: $p" >&2
 							exit 1
 						fi
+						echo "Creating $p: size $mod_size" >&2
 					else
+						echo "Rewriting $p: size $orig_size -> $mod_size" >&2
 						if test -z "$use_tmp_dir"; then
 							((extra_inodes+=1))
 							((extra_data_blocks+=2)) # overestimate: one for the directory filename, one for the directory itself
@@ -577,15 +582,7 @@ function update_fs_image {
 					((extra_data_blocks+=file_blocks + file_extent_tree_blocks + file_name_blocks))
 					((extra_inodes+=1))
 				else
-					if ! test -e "$orig"; then
-						echo "Original file not found for $p" >&2
-						exit 1
-					fi
-					echo "Patching $p: $orig_size -> $mod_size"
-					if test "$orig_size" != "$mod_size"; then
-						echo "Unexpected file size change for file $p: $orig_size -> $mod_size"
-						exit 1
-					fi
+					echo "Patching $p: size $mod_size" >&2
 				fi
 				b="$(basename "$p")"
 				if test "$b" == build.prop; then
