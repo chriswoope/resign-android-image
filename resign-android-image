@@ -1699,8 +1699,8 @@ function make_factory {
 }
 
 function check_factory {
-	mkdir "$1"/ota  >&2
-	unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/image-$device-$build"  >&2
+	mkdir "$1"/factory_image >&2
+	unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$device-factory-$build/image-$device-$build.zip" system.img vendor_boot.img >&2
 	"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
 	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img"
 }
