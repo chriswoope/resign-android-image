@@ -1691,7 +1691,8 @@ function make_factory {
 
 	result="$(set -e; with_temp_dir "$outdir/check_factory" check_factory)"
 	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
-		ln --target-directory="$1" "$outdir/factory_unchecked"/*
+		mkdir -p "$1/$device-factory-$build"
+		ln --target-directory="$1/$device-factory-$build" "$outdir/factory_unchecked/$device-factory-$build"/*
 	else
 		echo "Factory key check failed!!!"
 		exit 1
