@@ -859,12 +859,11 @@ function make_boot_image {
 		replace="$replace_boot"
 	fi
 	if test -n "$replace"; then
-		local img="$3"
-		local src="$4"
-		cp -a "$replace" "$img"
-		"$otatools/bin/avbtool" add_hash_footer --image "$img" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
+		local src="$1"
+		cp -a "$replace" "$out"
+		"$otatools/bin/avbtool" add_hash_footer --image "$out" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
 	else
-		with_temp_dir "$outdir/mkbootimg-$b" update_boot_image "$out" "$@" "$replace"
+		with_temp_dir "$outdir/mkbootimg-$b" update_boot_image "$out" "$@"
 	fi
 }
 
