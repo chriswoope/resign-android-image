@@ -54,7 +54,9 @@ If you don't want to use Qubes (note that having a secure workstation is crucial
 
 # What could go wrong?
 
-The situation to avoid is ending up in a state where there is no way to update the device via an OTA (you can't use fastboot with a locked bootloader), which can result in complete loss of data if the device also doesn't boot, and complete loss of non-root-accessible data if root is disabled.
+**Important: don't disable OEM unlocking. Doing so means that you can get the device in a state where it doesn't boot, doesn't enter recovery, you can't flash with fastboot and you can't unlock the bootloader to flash, which might make the device unrecoverable. The GrapheneOS site talks about it, but it's not clear what security benefit it can possibly provide. Someone who manages to get kernel-level or root-level access remotely to a device or someone with physical access to an unlocked device can just turn it on again, while someone with physical access to a locked device can just replace the device with an identical device, achieving the same result as unlocking the bootloader on your device, since it wipes user data anyway.**
+
+The situation to avoid is ending up in a state where there is no way to update the device via an OTA (you can't use fastboot with a locked bootloader), which can result in complete loss of data if the device also doesn't boot, complete loss of non-root-accessible data if root is disabled, and even an unrecoverable device if you disabled OEM unlocking.
 
 Note that not locking the bootloader will make this situation impossible (you can always reflash from the bootloader), but at the cost of letting exploits be persistent, and evil maids replace your OS with impunity.
 
