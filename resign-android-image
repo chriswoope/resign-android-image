@@ -541,7 +541,7 @@ function update_fs_image {
 		extra_inodes=0
 		extra_data_blocks=0
 
-		while read p; do
+		while IFS= read -r p; do
 			mod="$base/$p"
 			orig="$1/mnt$root/$p"
 			if ! cmp -s "$orig" "$mod" 2>/dev/null; then
@@ -786,7 +786,7 @@ function update_ramdisk {
 		"$otatools/bin/lz4" -d "$2" -|(cd "$1" && cpio -i -d --preserve-modification-time) || exit 1
 
 		rdr="$(realpath "$1")"
-		(cd "$3" && find -type f|while read i; do
+		(cd "$3" && find -type f|while IFS= read -r i; do
 			o="$rdr/$i"
 			if ! cmp -s "$i" "$o"; then
 				echo "Updating $i: $(stat -c %s "$o") -> $(stat -c %s "$i")"
@@ -945,7 +945,7 @@ function make_original_apk_cert_hashes {
 		outr="$(realpath "$1")"
 		(
 			cd "$3"
-			find . -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|while read i; do
+			find . -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|while IFS= read -r i; do
 				echo "$i"
 				"$otatools/bin/apksigner" verify --print-certs "$i" || exit 1
 				if unzip -q -l "$i" apex_pubkey >/dev/null; then
@@ -965,7 +965,7 @@ function make_original_apk_cert_hashes {
 					sudo mount -o loop,ro "$outr/apex_payload.img" "$outr/APEX"
 					(
 						cd "$outr"
-						sudo find ./APEX -iname '*.apk'|while read j; do
+						sudo find ./APEX -iname '*.apk'|while IFS= read -r j; do
 							echo "$j"
 							"$otatools/bin/apksigner" verify --print-certs "$j"
 						done
@@ -1237,7 +1237,7 @@ EOF
 }
 
 function make_certs {
-	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while read f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
 }
 
 function make_product_security {
