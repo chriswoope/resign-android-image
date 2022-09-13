@@ -323,20 +323,13 @@ function do_unzip_list
 	bsdtar -tf "$2" > "$1"
 }
 
-# TODO: use Selenium and headless Chromium to automatically download this
-otatools="$(realpath "$var_dir/otatools")"
-function make_otatools {
-	if ! test -e  "$otatools.zip"; then
-		echo "Download otatools manually by going to https://ci.android.com/builds/submitted/8446822/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
-		echo "If that doesn't work, go to https://ci.android.com/builds/branches/aosp-master/grid?, selecting a branch for the current Android version and clicking a green square in the aosp_x86_64 column" >&2
-		echo "Move the file to $otatools.zip" >&2
-		exit 1
-	fi
-	do_unzip "$1" "$otatools.zip"
+function otatools_help_and_exit
+{
+	echo "Download otatools manually by going to https://ci.android.com/builds/submitted/9056882/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
+	echo "If that doesn't work, go to https://ci.android.com/builds/branches/aosp-master/grid?, selecting a branch for the current Android version and clicking a green square in the aosp_cf_arm64_phone column" >&2
+	echo "Move the file to $otatools.zip and remove the $otatools directory if present" >&2
+	exit 1
 }
-
-make_dir "$otatools" make_otatools
-export PATH="$otatools/bin:$PATH"
 
 function do_git_clone
 {
@@ -353,14 +346,32 @@ function git_clone
 	( cd "$dir" && git pull --rebase ) || exit 1
 }
 
+function git_clone_branch
+{
+	local dir="$1"
+	local branch="$2"
+	shift 2
+	make_dir "$dir" do_git_clone --branch "$branch" "$@"
+	( cd "$dir" && git checkout "$branch" && git pull --rebase ) || exit 1
+}
+
 function download
 {
 	wget -O "$@"
 }
 
+android=
+
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
-	branch=12.1
+	if test "$build" -ge 2022081900; then
+		echo "Android 13 is not yet supported" >&2
+		branch=13
+		android=130
+	else
+		branch=12.1
+		android=121
+	fi
 	base_url="https://releases.grapheneos.org"
 	factory_name="$device-factory-$build"
 	factory_url="$base_url/$factory_name"
@@ -371,6 +382,26 @@ else
 	echo "Unsupported OS: $os"
 	exit 1
 fi
+
+# TODO: use Selenium and headless Chromium to automatically download this
+otatools="$(realpath "$var_dir/otatools")"
+function make_otatools {
+	if ! test -e  "$otatools.zip"; then
+		otatools_help_and_exit
+	fi
+	do_unzip "$1" "$otatools.zip"
+}
+
+make_dir "$otatools" make_otatools
+if test "$android" -ge 130; then
+	if ! grep -q Android-13 "$otatools/releasetools/common.py"; then
+		echo "Outdated otatools: building an Android 13 image with an otatools version from before Android 13" >&2
+		otatools_help_and_exit
+	fi
+fi
+
+export PATH="$otatools/bin:$PATH"
+
 
 if false; then
 	extract_android_ota_payload="$var_dir/android-prepare-vendor/scripts/extract_android_ota_payload/extract_android_ota_payload.py"
@@ -385,8 +416,8 @@ make_file "$var_dir/apktool.jar" download https://github.com/iBotPeaches/Apktool
 
 aosp="$var_dir/aosp-$os"
 mkdir -p "$aosp/build"
-git_clone "$aosp/script" --branch "$branch" "$git/script" &
-git_clone "$aosp/build/make" --branch "$branch" "$git/platform_build" &
+git_clone_branch "$aosp/script" "$branch" "$git/script" &
+git_clone_branch "$aosp/build/make" "$branch" "$git/platform_build" &
 
 wait
 
