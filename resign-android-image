@@ -1608,6 +1608,11 @@ function make_target_files_zip {
 			fi
 		done
 
+		if test "$android" -ge 130 && ! test -e "$outdir/target_files/IMAGES/pvmfw.img"; then
+			extract_factory_image
+			cp -a "$dir/factory_image/pvmfw.img" "$outdir/target_files/IMAGES/pvmfw.img"
+		fi
+
 		make_file "$outdir/target_files/IMAGES/vbmeta.img" make_vbmeta "$dir/ota_payload/vbmeta.img" "$outdir/target_files/IMAGES"
 
 		discard "$outdir/target_files_signed"
@@ -1696,18 +1701,26 @@ function do_unzip_img2simg {
 	"$otatools/bin/img2simg" "$1"/img "$2" 4096
 }
 
+function extract_factory_image {
+	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory_image.list"; then
+		if ! test -e "$dir/factory" || ! test -e "$dir/factory.list"; then
+			mkdir -p "$dir/factory_zip"
+			make_file "$dir/factory_zip.ok" download_factory
+
+			make_dir "$dir/factory" do_unzip "$dir/factory_zip/$factory_name.zip"
+			make_file "$dir/factory.list" do_unzip_list "$dir/factory_zip/$factory_name.zip"
+			discard "$dir/factory_zip/$factory_name.zip"
+		fi
+
+		make_dir "$dir/factory_image" do_unzip "$dir/factory/$factory_name/image-$device-$build.zip"
+		make_file "$dir/factory_image.list" do_unzip_list "$dir/factory/$factory_name/image-$device-$build.zip"
+		discard "$dir/factory/$factory_name/image-$device-$build.zip"
+	fi
+}
+
 # needs out_target_files.zip
 function make_factory_image {
-	mkdir -p "$dir/factory_zip"
-	make_file "$dir/factory_zip.ok" download_factory
-
-	make_dir "$dir/factory" do_unzip "$dir/factory_zip/$factory_name.zip"
-	make_file "$dir/factory.list" do_unzip_list "$dir/factory_zip/$factory_name.zip"
-	discard "$dir/factory_zip/$factory_name.zip"
-
-	make_dir "$dir/factory_image" do_unzip "$dir/factory/$factory_name/image-$device-$build.zip"
-	make_file "$dir/factory_image.list" do_unzip_list "$dir/factory/$factory_name/image-$device-$build.zip"
-	discard "$dir/factory/$factory_name/image-$device-$build.zip"
+	extract_factory_image
 
 	ls -1 "$dir/factory_image"|while read i; do
 		if unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
