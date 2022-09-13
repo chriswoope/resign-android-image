@@ -431,26 +431,62 @@ if ! test -e "$var_dir/mkbootfs"; then
 	gcc "$data_dir"/mkbootfs.c -o "$var_dir/mkbootfs"
 fi
 
-function gen_keys {
-	subject='/CN=GrapheneOS/'
-	for i in releasekey platform shared media networkstack; do
-		openssl genrsa -f4 4096 > "$1/$i.key"
-		openssl req -new -x509 -sha256 -key "$1/$i.key" -out "$1/$i.x509.pem" -days 10000 -subj "$subject"
-		openssl pkcs8 -in "$1/$i.key" -topk8 -outform DER -out "$1/$i.pk8" -nocrypt
-	done
-	openssl genrsa 4096 | openssl pkcs8 -topk8 -nocrypt -out "$1/avb.pem"
-	"$otatools/bin/avbtool" extract_public_key --key "$1/avb.pem" --output "$1/avb_pkmd.bin"
-	$signify -G -n -p "$1/factory.pub" -s "$1/factory.sec"
+function gen_key {
+	openssl genrsa -f4 4096 > "$1"
 }
 
-if ! test -e "$key_dir"; then
+subject='/CN=GrapheneOS/'
+function make_pem {
+	openssl req -new -x509 -sha256 -key "$2" -out "$1" -days 10000 -subj "$subject"
+}
+
+function make_pk8 {
+	openssl pkcs8 -in "$2" -topk8 -outform DER -out "$1" -nocrypt
+}
+
+function gen_avb_pem {
+	openssl genrsa 4096 | openssl pkcs8 -topk8 -nocrypt -out "$1"
+}
+
+function make_avb_pkmd {
+	"$otatools/bin/avbtool" extract_public_key --key "$2" --output "$1"
+}
+
+function gen_signify_key {
+	$signify -G -n -p "$2" -s "$1"
+}
+
+function make_keys {
+	mkdir -p "$key_dir"
+	keys="releasekey platform shared media networkstack"
+	for i in $keys; do
+		if test -n "$generate_keys"; then
+			make_file "$key_dir/$i.key" gen_key
+		elif ! test -e "$key_dir/$i.key"; then
+			echo "Key $key_dir/$i.key not found, use --generate-keys to generate keys automatically" >&2
+			exit 1
+		fi
+		make_file "$key_dir/$i.x509.pem" make_pem "$key_dir/$i.key"
+		make_file "$key_dir/$i.pk8" make_pk8 "$key_dir/$i.key"
+	done
 	if test -n "$generate_keys"; then
-		make_dir "$key_dir" gen_keys
-	else
-		echo "Key directory not found, use --generate-keys to generate keys" >&2
+		make_file "$key_dir/avb.pem" gen_avb_pem
+	elif ! test -e "$key_dir/avb.pem"; then
+		echo "Key $key_dir/avb.pem not found, use --generate-keys to generate keys automatically" >&2
 		exit 1
 	fi
-fi
+	make_file "$key_dir/avb_pkmd.bin" make_avb_pkmd "$key_dir/avb.pem"
+	if test -n "$generate_keys"; then
+		make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
+	elif ! test -e "$key_dir/factory.sec"; then
+		echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
+		exit 1
+	elif ! test -e "$key_dir/factory.pub"; then
+		echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
+		exit 1
+	fi
+}
+make_keys
 
 out_build="$build"
 outdir="$dir/out_$build_method"
