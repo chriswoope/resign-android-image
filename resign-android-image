@@ -459,6 +459,9 @@ function gen_signify_key {
 function make_keys {
 	mkdir -p "$key_dir"
 	keys="releasekey platform shared media networkstack"
+	if test "$android" -ge 130; then
+		keys="$keys bluetooth"
+	fi
 	for i in $keys; do
 		if test -n "$generate_keys"; then
 			make_file "$key_dir/$i.key" gen_key
@@ -1304,7 +1307,7 @@ EOF
 }
 
 function make_certs {
-	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
 }
 
 function make_product_security {
