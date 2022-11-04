@@ -1375,8 +1375,9 @@ function make_target_files_signed_zip {
 			ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
 			ln -s "$(realpath "$key_dir")" "$1/keys"
 			cd "$1"
+			key_map="-k build/make/target/product/security/bluetooth=keys/bluetooth"
 			# TODO: distinguish beetwen errors before add_image_... and after
-			if ! (sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$aosp/script/release.sh"; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x 2>&1 | tee "$outdir/sign_target_files.txt"; then
+			if ! (sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$aosp/script/release.sh"|sed -re 's/(-d "\$KEY_DIR")/\1 $KEY_MAP/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 KEY_MAP="$key_map" bash -x 2>&1 | tee "$outdir/sign_target_files.txt"; then
 				if test "$build_method" == resign && grep -qE '^\s*File "[^"]*/add_img_to_target_files.py", line [0-9]+, in AddImagesToTargetFiles\s*$' "$outdir/sign_target_files.txt"; then
 					echo "Expected failure: signed completed, sign_target_files_apk failed while trying to create images which we don't want"
 				else
