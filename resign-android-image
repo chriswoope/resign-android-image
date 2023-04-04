@@ -334,7 +334,7 @@ function do_unzip_list
 
 function otatools_help_and_exit
 {
-	echo "Download otatools manually by going to https://ci.android.com/builds/submitted/9056882/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
+	echo "Download otatools manually by going to https://ci.android.com/builds/submitted/9884203/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
 	echo "If that doesn't work, go to https://ci.android.com/builds/branches/aosp-master/grid?, selecting a branch for the current Android version and clicking a green square in the aosp_cf_arm64_phone column" >&2
 	echo "Move the file to $otatools.zip and remove the $otatools directory if present" >&2
 	exit 1
