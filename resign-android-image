@@ -760,7 +760,13 @@ function update_fs_image {
 
 				tmp=
 
-				if test -e "$modded/$p"; then
+				orig_size=-1
+				if test -e "$orig"; then
+					orig_size="$(stat -c %s "$orig")"
+				fi
+				mod_size="$(stat -c %s "$mod")"
+
+				if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
 					if test -e "$orig"; then
 						times="$(stat -c '%X %Y %Z' -- "$orig")"
 						if test -z "$tmp_dir"; then
@@ -788,6 +794,7 @@ function update_fs_image {
 				fi
 
 				# the dd options must be exactly like these so that we don't try to allocate any new blocks if size doesn't increase
+				# note that the file has either 0 size in the modded or orig_size != mod_size case, or otherwise it has size orig_size = mod_size
 				dd if="$mod" of="$orig" bs=4096 conv=notrunc,sparse >/dev/null
 				read atime mtime ctime <<<"$times"
 				touch -d "@$mtime" -m -- "$orig"
