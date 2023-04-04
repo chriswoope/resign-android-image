@@ -22,6 +22,15 @@ signify=signify-openbsd
 
 if test "$#" != 0 && test "$1" != "--no-unshare"; then
 	deb=()
+
+	if ! which zip >/dev/null; then
+		deb+=(zip)
+	fi
+
+	if ! which unzip >/dev/null; then
+		deb+=(unzip)
+	fi
+
 	# used internally by some tool
 	if ! which cgpt >/dev/null; then
 		deb+=(cgpt)
