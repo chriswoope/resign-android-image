@@ -1119,7 +1119,12 @@ function make_target_files_extracted {
 		with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query"
 	fi
 
-	for b in boot vendor_boot; do
+	ramdisk_part=boot
+	if test -e "$dir/ota_payload/init_boot.img"; then
+		ramdisk_part=init_boot
+	fi
+
+	for b in "$ramdisk_part" vendor_boot; do
 		if test -e "$dir/ota_payload/$b.img"; then
 			d="$(echo "$b"|tr a-z A-Z)"
 			make_dir "$outdir/target_files_extracted/$d" make_extract_boot "$outdir/bootimg/$b" "$dir/ota_payload/$b.img"
@@ -1598,10 +1603,15 @@ function make_target_files_zip {
 	if test "$build_method" == resign; then
 		make_dir "$outdir/target_files" make_target_files_base
 
+		ramdisk_part=boot
+		if test -e "$dir/ota_payload/init_boot.img"; then
+			ramdisk_part=init_boot
+		fi
+
 		mkdir -p "$outdir/target_files/IMAGES"
 		ls -1 "$dir/ota_payload"|while read i; do
 			local done=
-			for j in $image_parts vbmeta boot vendor_boot; do
+			for j in $image_parts vbmeta "$ramdisk_part" vendor_boot; do
 				if test "$i" == "$j.img"; then
 					done=1
 				fi
@@ -1624,7 +1634,7 @@ function make_target_files_zip {
 			fi
 		done
 
-		for b in boot vendor_boot; do
+		for b in "$ramdisk_part" vendor_boot; do
 			if test -e "$dir/ota_payload/$b.img"; then
 				d="$(echo "$b"|tr a-z A-Z)"
 				make_file "$outdir/target_files/IMAGES/$b.img" make_boot_image "$b" "$dir/ota_payload/$b.img" "$outdir/bootimg/$b" "$outdir/target_files_signed/$d"
