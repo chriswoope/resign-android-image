@@ -453,7 +453,13 @@ function make_avb_pkmd {
 }
 
 function gen_signify_key {
-	$signify -G -n -p "$2" -s "$1"
+	$signify -G -n -p "$1/key.pub" -s "$1/key.sec"
+	if ! test -s "$1/key.sec" || ! test -s "$1/key.pub"; then
+		echo "Failed to generate keys" >&2
+		exit 1
+	fi
+	mv "$1/key.sec" "$2"
+	mv "$1/key.pub" "$3"
 }
 
 function make_keys {
@@ -480,7 +486,7 @@ function make_keys {
 	fi
 	make_file "$key_dir/avb_pkmd.bin" make_avb_pkmd "$key_dir/avb.pem"
 	if test -n "$generate_keys"; then
-		make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
+		with_temp_dir "$key_dir/factory" gen_signify_key "$key_dir/factory.sec" "$key_dir/factory.pub"
 	elif ! test -e "$key_dir/factory.sec"; then
 		echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
 		exit 1
