@@ -1241,6 +1241,7 @@ function patch_apk_apktool {
 		framework_dir="$work/framework"
 	fi
 
+	echo "If Java runs out of memory, try setting JAVA_OPTS=-Xmx4g or similar"
 	java -jar "$apktool" d $opts -p "$framework_dir" -o "$work/files" "$in_zip"
 	"$cmd" "$work/files" "$@"
 	java -jar "$apktool" b -p "$framework_dir" -o "$work/out.apk" "$work/files"
