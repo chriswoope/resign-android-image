@@ -1329,7 +1329,11 @@ lz4_ramdisks=true
 avb_avbtool=avbtool
 EOF
 	else
+		# TODO: properly create this instead of copying one from a raven build from source and hoping it works
 		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
+		if test -e "$dir/ota_payload/init_boot.img"; then
+			echo "init_boot=true" >> "$1"
+		fi
 	fi
 }
 
