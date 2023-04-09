@@ -410,6 +410,7 @@ if test "$android" -ge 130; then
 fi
 
 export PATH="$otatools/bin:$PATH"
+export ANDROID_HOST_OUT="$otatools"
 
 
 if false; then
@@ -1142,16 +1143,23 @@ function patch_apex {
 	local cmd="$4"
 	shift 4
 
-	local debugfs=/sbin/debugfs
+	local debugfs="$otatools/bin/debugfs_static"
+	if ! test -x "$debugfs"; then
+		debugfs=/sbin/debugfs
+	fi
+	local blkid="$otatools/bin/blkid_static"
+	if ! test -x "$blkid"; then
+		blkid="$(which blkid)"
+	fi
 
-	type="$("$otatools/bin/deapexer" --debugfs_path "$debugfs" info --print-type "$apex")"
+	type="$("$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" info --print-type "$apex")"
 	if test "$type" == COMPRESSED; then
-		"$otatools/bin/deapexer" --debugfs_path "$debugfs" decompress --input "$apex" --output "$work"/original.apex
+		"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" decompress --input "$apex" --output "$work"/original.apex
 	else
 		ln "$apex" "$work"/original.apex
 	fi
 
-	"$otatools/bin/deapexer" --debugfs_path "$debugfs" extract "$work"/original.apex "$work"/payload
+	"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" extract "$work"/original.apex "$work"/payload
 	for i in apex_manifest.pb apex_manifest.json lost+found; do
 		if test -d "$work/payload/$i"; then
 			rmdir "$work/payload/$i"
