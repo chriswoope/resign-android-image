@@ -16,8 +16,8 @@ mkdir -p grapheneos-otacerts
 # barbet bluejay blueline bonito bramble coral crosshatch flame oriole raven redfin sargo sunfish
 for device in "$@"; do
 	f="$device-factory-$incremental"
-	wget https://releases.grapheneos.org/$f.zip
-	wget https://releases.grapheneos.org/$f.zip.sig
+	wget -C https://releases.grapheneos.org/$f.zip
+	wget -C https://releases.grapheneos.org/$f.zip.sig
 	$signify -Cqp grapheneos-factory.pub -x "$f.zip.sig" || exit 1
 	i="$f/image-$device-$incremental.zip"
 	unzip -x "$f.zip" "$i"
