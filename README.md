@@ -1,4 +1,4 @@
-# resign-android-image
+# resign-android-image (with untested Android 14 support)
 
 **Status: minimally maintained for my own Pixel 6 Pro, other devices completely untested by me. Added some Pixel 7/7 Pro support code, it builds but not sure if it actually works**
 

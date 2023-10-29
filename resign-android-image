@@ -373,8 +373,11 @@ android=
 
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
-	if test "$build" -ge 2022081900; then
-		echo "Android 13 support is untested!" >&2
+	if test "$build" -ge 2023100800; then
+		echo "Android 14 support is untested!" >&2
+		branch=14
+		android=140
+	elif test "$build" -ge 2022081900; then
 		branch=13
 		android=130
 	else
@@ -403,8 +406,8 @@ function make_otatools {
 
 make_dir "$otatools" make_otatools
 if test "$android" -ge 130; then
-	if ! grep -q Android-13 "$otatools/releasetools/common.py"; then
-		echo "Outdated otatools: building an Android 13 image with an otatools version from before Android 13" >&2
+	if ! grep -qE 'Android-1[3-9]' "$otatools/releasetools/common.py"; then
+		echo "Outdated otatools: building an Android 13+ image with an otatools version from before Android 13" >&2
 		otatools_help_and_exit
 	fi
 fi
