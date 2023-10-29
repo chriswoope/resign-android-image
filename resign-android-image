@@ -1067,7 +1067,7 @@ function make_original_apk_cert_hashes {
 					trap - EXIT
 				fi
 			done
-		)|sed -nre '/^\./x; / SHA-256 digest:/ {s/.* SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
+		)|sed -nre '/^\./x; /^Signer #1 certificate SHA-256 digest:/ {s/.* SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
 	}
 	with_temp_dir "$outdir/apk_cert_hashes_tmp" go "$@"
 }
@@ -1360,7 +1360,7 @@ function make_apkcerts {
 }
 
 function make_apexkeys {
-	join -a 1 -1 2 -o '1.1,2.3' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|sed -nre 's/\.capex /.apex /; /.apex /p') "$outdir/certs.txt"|sed -nre 's|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="build/make/target/product/security/\2.x509.pem" container_private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
+	join -a 1 -1 2 -o '1.1,2.3' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|sed -nre 's/\.capex /.apex /; /.apex /p') "$outdir/certs.txt"|sed -nre '/[^ ]*\/([^/ ]*) $/ {s|[^ ]*/([^/ ]*) $|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="PRESIGNED" container_private_key="PRESIGNED" partition=""|p; b;}; s|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="build/make/target/product/security/\2.x509.pem" container_private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
 }
 
 function make_otakeys {
