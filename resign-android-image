@@ -1349,8 +1349,29 @@ EOF
 	fi
 }
 
-function make_certs {
+function make_certs_mac {
 	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+}
+
+function make_certs {
+	(
+		cat "$outdir/certs_mac.txt"
+		# TODO: any better way of getting the shared key?
+		for k in testkey shared platform media networkstack bluetooth; do
+			if ! grep -q "$k" "$outdir/certs_mac.txt"; then
+				i="$(if test "$k" == testkey; then
+					bsdtar -x -f "$outdir"/target_files_extracted/SYSTEM/etc/security/otacerts.zip -O keys/releasekey.x509.pem
+				elif test "$k" == shared; then
+					"$otatools/bin/apksigner" verify --print-certs-pem "$outdir"/target_files_extracted/PRODUCT/priv-app/Contacts/Contacts.apk
+				else
+					echo "Missing original key hash for $k in mac_permissions" >&2
+					exit 1
+				fi|openssl x509 -in - -inform PEM -outform DER|xxd -p -c 999999999)"
+				test -n "$i" || exit 1
+				echo "$(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1)" "$i" "$k"
+			fi
+		done
+	)|sort|uniq>"$1" || exit 1
 }
 
 function make_product_security {
@@ -1377,6 +1398,7 @@ function make_hardlink {
 
 function make_target_files_intermediates {
 	make_dir "$outdir/target_files_intermediates" make_target_files_intermediates_base
+	make_file "$outdir/certs_mac.txt" make_certs_mac
 	make_file "$outdir/certs.txt" make_certs
 	make_dir "$outdir/product_security" make_product_security
 	mkdir -p "$outdir/target_files_intermediates/META"
