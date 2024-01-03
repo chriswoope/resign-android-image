@@ -2,6 +2,8 @@
 
 **Status: minimally maintained for my own Pixel 6 Pro, other devices completely untested by me. Added some code to support Pixel 7/8/..., it builds but not sure if it actually works**
 
+**Note: earlier Android 14 builds had an issue that caused the updater to not be available (because we were failing to resign apks signed with releasekey and shared). If you installed them you need to reboot into recovery mode and sideload an OTA for the latest version via USB adb**
+
 resign-android-image is a script that takes GrapheneOS binary OTA updates and resigns them with your own signing keys (including support for automating the process and installing in Qubes), and also supports applying modifications, such as having ADB root and being able to backup all applications, that violate the Android security model that GrapheneOS wishes to uphold, not because they make the device less secure for you, but because they follow your own wishes over providing guarantees to app developers that the OS will behave in a certain way. It could also support resigning stock Android 12-13 OS images with very few modifications.
 
 With resign-android-image, you can take back control of your Android device, by letting you run the OS (currently only GrapheneOS is supported) with a locked bootloader, but signed with your own keys instead of the upstream keys, and with some optional modifications including optional root access, without building it from scratch every time there is an update.
