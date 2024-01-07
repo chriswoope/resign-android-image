@@ -374,7 +374,6 @@ android=
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
 	if test "$build" -ge 2023100800; then
-		echo "Android 14 support is untested!" >&2
 		branch=14
 		android=140
 	elif test "$build" -ge 2022081900; then
