@@ -411,6 +411,33 @@ if test "$android" -ge 130; then
 	fi
 fi
 
+function download_aapt2 {
+	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
+	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1"
+	chmod +x "$1"
+}
+
+function make_aapt2_wrapper {
+	cat - > "$1" <<"EOF"
+#!/bin/bash
+aapt2="$(dirname "$0")/aapt2.maven"
+if test "$1" == dump && test "$2" == badging; then
+	exec "$aapt2" "$@"|sed -re 's/^minS(dkVersion:.*)/s\1\nminS\1/'
+else
+	exec "$aapt2" "$@"
+fi
+EOF
+	chmod +x "$1"
+}
+
+# replace aapt2 with Maven version so that it can actually parse Android 14 QPR2 apks
+# and wrap it so that it outputs sdkVersion= in addition to minSdkVersion= since sign_target_files_apks expects that
+if test -e "$otatools/bin/aapt2" && ! test -e "$otatools/bin/aapt2.otatools"; then
+	mv "$otatools/bin/aapt2" "$otatools/bin/aapt2.otatools"
+fi
+make_file "$otatools/bin/aapt2.maven" download_aapt2
+make_file "$otatools/bin/aapt2" make_aapt2_wrapper
+
 export PATH="$otatools/bin:$PATH"
 export ANDROID_HOST_OUT="$otatools"
 
