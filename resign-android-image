@@ -1422,6 +1422,13 @@ function make_hardlink {
 	ln "$2" "$1"
 }
 
+function make_update_engine_config {
+	cat >"$1" <<EOF
+PAYLOAD_MAJOR_VERSION=2
+PAYLOAD_MINOR_VERSION=4
+EOF
+}
+
 function make_target_files_intermediates {
 	make_dir "$outdir/target_files_intermediates" make_target_files_intermediates_base
 	make_file "$outdir/certs_mac.txt" make_certs_mac
@@ -1432,6 +1439,7 @@ function make_target_files_intermediates {
 	make_file "$outdir/target_files_intermediates/META/apexkeys.txt" make_apexkeys
 	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
+	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config
 	if test "$build_method" == rebuild; then
 		cp -f "$dir/ota_meta/ab_partitions.txt" "$outdir/target_files_intermediates/META/ab_partitions.txt"
 #		mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
