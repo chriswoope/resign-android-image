@@ -16,9 +16,13 @@ mkdir -p grapheneos-otacerts
 # barbet bluejay blueline bonito bramble coral crosshatch flame oriole raven redfin sargo sunfish
 for device in "$@"; do
 	f="$device-factory-$incremental"
-	wget -C https://releases.grapheneos.org/$f.zip
-	wget -C https://releases.grapheneos.org/$f.zip.sig
-	$signify -Cqp grapheneos-factory.pub -x "$f.zip.sig" || exit 1
+	wget -c https://releases.grapheneos.org/$f.zip
+	wget -c https://releases.grapheneos.org/$f.zip.sig
+	if test "$(head -n 1 "$f.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
+		ssh-keygen -Y verify -f grapheneos-allowed_signers -I contact@grapheneos.org -n "factory images" -s "$f.zip.sig" < "$f.zip" || exit 1
+	else
+		$signify -Cqp grapheneos-factory.pub -x "$f.zip.sig" || exit 1
+	fi
 	i="$f/image-$device-$incremental.zip"
 	unzip -x "$f.zip" "$i"
 	unzip -x "$i" system.img

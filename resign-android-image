@@ -139,6 +139,7 @@ generate_keys=
 magisk=
 setx=
 hosts_url=
+sign_factory_images=ssh-keygen
 # must be as long as the original update URL
 orig_update_url="https://releases.grapheneos.org/"
 update_url="https://noupdateurlset.invalid./"
@@ -202,6 +203,9 @@ while test "$#" != 0; do
 		shift 1
 	elif test "$1" == "--generate-keys"; then
 		generate_keys=1
+	elif test "$1" == "--sign-factory-images"; then
+		sign_factory_images="$2"
+		shift
 	elif test "$1" == "--dev-fast-sign"; then
 		# remove all APEXes, CAPEXes and APKs to make signing very fast during development of this script
 		dev_fast_sign=1
@@ -388,6 +392,8 @@ if test "$os" == grapheneos; then
 	factory_url="$base_url/$factory_name"
 	ota_url="$base_url/$device-ota_update-$build"
 	factory_key="$data_dir/grapheneos-factory.pub"
+	factory_identity="contact@grapheneos.org"
+	factory_allowed_signers="$data_dir/grapheneos-allowed_signers"
 	ota_cert="$data_dir/grapheneos-otacerts/$device.pem"
 else
 	echo "Unsupported OS: $os"
@@ -501,6 +507,10 @@ function gen_signify_key {
 	mv "$1/key.pub" "$3"
 }
 
+function gen_ssh_key {
+	ssh-keygen -t ed25519 -P '' -f "$1"
+}
+
 function make_keys {
 	mkdir -p "$key_dir"
 	keys="releasekey platform shared media networkstack"
@@ -524,14 +534,23 @@ function make_keys {
 		exit 1
 	fi
 	make_file "$key_dir/avb_pkmd.bin" make_avb_pkmd "$key_dir/avb.pem"
-	if test -n "$generate_keys"; then
-		with_temp_dir "$key_dir/factory" gen_signify_key "$key_dir/factory.sec" "$key_dir/factory.pub"
-	elif ! test -e "$key_dir/factory.sec"; then
-		echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
-		exit 1
-	elif ! test -e "$key_dir/factory.pub"; then
-		echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
-		exit 1
+	if test "$sign_factory_images" == signify; then
+		if test -n "$generate_keys"; then
+			with_temp_dir "$key_dir/factory" gen_signify_key "$key_dir/factory.sec" "$key_dir/factory.pub"
+		elif ! test -e "$key_dir/factory.sec"; then
+			echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
+			exit 1
+		elif ! test -e "$key_dir/factory.pub"; then
+			echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
+			exit 1
+		fi
+	elif test "$sign_factory_images" == ssh-keygen; then
+		if test -n "$generate_keys"; then
+			make_file "$key_dir/id_ed25519" gen_ssh_key
+		elif ! test -e "$key_dir/id_ed25519"; then
+			echo "Key $key_dir/id_ed25519 not found, use --generate-keys to generate keys automatically" >&2
+			exit 1
+		fi
 	fi
 }
 make_keys
@@ -1799,9 +1818,16 @@ function download_factory {
 	mkdir -p "$dir/factory_zip"
 	curl "$factory_url.zip" -C - -o "$dir/factory_zip/$factory_name.zip"
 	curl "$factory_url.zip.sig" -C - -o "$dir/factory_zip/$factory_name.zip.sig"
-	if ! ( cd "$dir/factory_zip" && $signify -Cqp "$factory_key" -x "$factory_name.zip.sig" ); then
-		echo "Failed to verify factory image signature!" >&2
-		exit 1
+	if test "$(head -n 1 "$dir/factory_zip/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
+		if ! ssh-keygen -Y verify -f "$factory_allowed_signers" -I "$factory_identity" -n "factory images" -s "$dir/factory_zip/$factory_name.zip.sig" < "$dir/factory_zip/$factory_name.zip"; then
+			echo "Failed to verify factory image signature with ssh-keygen!" >&2
+			exit 1
+		fi
+	else
+		if ! ( cd "$dir/factory_zip" && $signify -Cqp "$factory_key" -x "$factory_name.zip.sig" ); then
+			echo "Failed to verify factory image signature with signify!" >&2
+			exit 1
+		fi
 	fi
 	touch "$1"
 }
@@ -1911,7 +1937,11 @@ function make_factory_zip {
 
 function make_factory_zip_sig {
 	local key="$(realpath "$key_dir/factory.sec")"
-	(cd "$outdir/out"; sha256sum --tag "$device-factory-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+	if test "$sign_factory_images" == signify; then
+		(cd "$outdir/out"; sha256sum --tag "$device-factory-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+	elif test "$sign_factory_images" == ssh-keygen; then
+		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$outdir/out/$device-factory-$out_build.zip" > "$1" || exit 1
+	fi
 }
 
 
@@ -1956,7 +1986,7 @@ fi
 discard "$outdir/target_files.zip"
 discard "$outdir/factory"
 
-if test -n "$build_factory_zip"; then
+if test -n "$build_factory_zip" && test -n "$sign_factory_images"; then
 	make_file "$out_factory.sig" make_factory_zip_sig
 fi
 
