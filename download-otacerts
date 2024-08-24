@@ -1,6 +1,11 @@
 #!/bin/bash
 # used to create grapheneos-otacerts directory, can be used to add support for new devices
+set -x
+
 signify=signify-openbsd
+want_discard=1
+use_loop=1
+
 os="$1"
 incremental="$2"
 shift 2
@@ -10,30 +15,122 @@ if test "$os" != grapheneos; then
 	exit 1
 fi
 
+lpunpack=
+simg2img=
+
+var_dir="$HOME/.resign-android-image"
+for otatools in /usr "$(realpath "$var_dir/otatools")" ./otatools; do
+	if test -x "$otatools/bin/lpunpack"; then
+		lpunpack="$otatools/bin/lpunpack"
+	fi
+	if test -x "$otatools/bin/simg2img"; then
+		simg2img="$otatools/bin/simg2img"
+	fi
+done
+
 sudo apt install -y signify-openbsd android-sdk-libsparse-utils
+
+function discard
+{
+	if test -n "$want_discard"; then
+		rm -f "$@"
+	fi
+}
+
+function multiple_simg2img
+{
+	local out="$1"
+	local pattern="$2"
+
+	# use a loop device if possible so that simg2img doesn't truncate the file and we can combine the images
+	# otherwise fall back to the much slower dd sparse
+
+	local out_loop=
+	local i0=0
+	if ! test -e "${pattern}0.img"; then
+		i0=1
+	fi
+	local i=
+	for((i = i0;; ++i)); do
+		local part="${pattern}$i.img"
+		if ! test -e "$part"; then
+			break
+		fi
+		if test "$i" == "$i0"; then
+			"$simg2img" "$part" "$out"
+			discard "$part"
+		else
+			if test -n "$use_loop"; then
+				if test -z "$out_loop"; then
+					out_loop="$(sudo losetup --show -f "$out")"
+					if test -n "$out_loop"; then
+						sudo chown "$(id -u):$(id -g)" "$out_loop"
+					else
+						use_loop=
+					fi
+				fi
+			fi
+
+			if test -n "$out_loop"; then
+				"$simg2img" "$part" "$out_loop"
+				discard "$part"
+			else
+				"$simg2img" "$part" "$part".raw
+				discard "$part"
+				dd if="$part".raw of="$out" bs=512 conv=notrunc conv=sparse
+				discard "$part".raw
+			fi
+		fi
+	done
+	if test -n "$out_loop"; then
+		sudo losetup -d "$out_loop"
+	fi
+}
 
 mkdir -p grapheneos-otacerts
 # barbet bluejay blueline bonito bramble coral crosshatch flame oriole raven redfin sargo sunfish
 for device in "$@"; do
-	f="$device-factory-$incremental"
-	wget -c https://releases.grapheneos.org/$f.zip
-	wget -c https://releases.grapheneos.org/$f.zip.sig
-	if test "$(head -n 1 "$f.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
-		ssh-keygen -Y verify -f grapheneos-allowed_signers -I contact@grapheneos.org -n "factory images" -s "$f.zip.sig" < "$f.zip" || exit 1
+	for kind in install factory; do
+		install="$device-$kind-$incremental"
+		wget -c https://releases.grapheneos.org/$install.zip || continue
+		wget -c https://releases.grapheneos.org/$install.zip.sig
+		break
+	done
+	if test "$(head -n 1 "$install.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
+		ssh-keygen -Y verify -f grapheneos-allowed_signers -I contact@grapheneos.org -n "factory images" -s "$install.zip.sig" < "$install.zip" || exit 1
 	else
-		$signify -Cqp grapheneos-factory.pub -x "$f.zip.sig" || exit 1
+		$signify -Cqp grapheneos-factory.pub -x "$install.zip.sig" || exit 1
 	fi
-	i="$f/image-$device-$incremental.zip"
-	unzip -x "$f.zip" "$i"
-	unzip -x "$i" system.img
-	img=system.img
-	if simg2img system.img system.img.raw; then
-		img=system.img.raw
+	discard "$install.zip.sig"
+	internal="$install/image-$device-$incremental.zip"
+	unzip -x "$install.zip" "$internal"
+	if test -s "$internal"; then
+		discard "$install.zip"
+		unzip -x "$internal" system.img
+		discard "$internal"
+		rmdir "$install"
+		img=system.img
+		if "$simg2img" "$img" "$img".raw; then
+			discard "$img"
+			img="$img".raw
+		fi
+	else
+		if ! test -x "$lpunpack"; then
+			echo "Download otatools as instructed by resign-android-image so that lpunpack is available"
+			exit 1
+		fi
+		unzip -x "$install.zip" "$install/super_*.img"
+		discard "$install.zip"
+		multiple_simg2img super.img "$install/super_"
+		rmdir "$install"
+		"$lpunpack" -p system_a super.img
+		discard super.img
+		img=system_a.img
 	fi
 	echo 'dump /system/etc/security/otacerts.zip otacerts.zip'|debugfs "$img"
+	discard "$img"
 	unzip -x otacerts.zip keys/releasekey.x509.pem
+	discard otacerts.zip
 	mv keys/releasekey.x509.pem grapheneos-otacerts/$device.pem
-	rm -f system.img "$i" "$f.zip" "$f.zip.sig"
-	rmdir "$f" keys
+	rmdir keys
 done
-
