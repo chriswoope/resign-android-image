@@ -2004,7 +2004,10 @@ fi
 if test -n "$build_ota"; then
 	function make_metadata {
 		ln "$out_ota" "$1/ota.zip"
-		generate_metadata="$aosp/script/generate-metadata.py"
+		generate_metadata="$aosp/script/generate-metadata"
+		if ! test -e "$generate_metadata"; then
+			generate_metadata="$aosp/script/generate-metadata.py"
+		fi
 		if ! test -e "$generate_metadata"; then
 			generate_metadata="$aosp/script/generate_metadata.py"
 		fi
