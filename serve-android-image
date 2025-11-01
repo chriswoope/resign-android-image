@@ -3,7 +3,7 @@ set -e
 
 DIR="$1"
 
-channels=(stable beta testing)
+channels=(stable beta testing stable-security-preview beta-security-preview testing-security-preview)
 
 exec 100<>/run/resign_android_image_update
 flock 100

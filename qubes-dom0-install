@@ -25,7 +25,7 @@ server_vm_or_ssh="$2"
 server_dir="$3"
 os="$4" # only "grapheneos" is supported currently
 devices="$5"
-channels="beta stable" # it's recommended to keep beta even if you don't use it, so that when betas hit stable they have already been signed and are immediately available
+channels="beta stable beta-security-preview stable-security-preview" # it's recommended to keep beta even if you don't use it, so that when betas hit stable they have already been signed and are immediately available
 shift 5
 opts="$*"
 
