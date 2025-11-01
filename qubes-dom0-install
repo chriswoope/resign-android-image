@@ -7,7 +7,7 @@ set -x
 # remove the following three lines after reviewing this script
 echo "You are running this script without reviewing it, so we are exiting to protect you!!! Never run anything in dom0 without reviewing it!!!" >&2
 echo "You must review this script to make sure you trust and like what it does and then run it as root in Qubes dom0" >&2
-#exit 1
+exit 1
 
 dom0_dir="$(dirname "$0")"
 if test "$#" -lt 5; then
