@@ -88,8 +88,8 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(libc6-dev)
 	fi
 
-	if ! which llvm-objdump-11 >/dev/null; then
-		deb+=(llvm-11)
+	if ! which llvm-objdump >/dev/null; then
+		deb+=(llvm)
 	fi
 
 	if ! which secilc >/dev/null; then
@@ -1340,7 +1340,7 @@ function patch_adbd {
 	patch="$(mktemp)"
 	echo -n -e '\x20\x00\x80\x52' > "$patch" # mov w0,#0x1
 	# non-LLVM objdump fails to annotate calls to the PLT with the symbol name
-	llvm-objdump-11 -d "$2"|sed -nre 's/^\s*([0-9a-f]+):\s*[0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f]\s+bl\s+\0x[0-9a-f]+\s+<__android_log_is_debuggable@plt>$/\1/p'|while read i; do
+	llvm-objdump -d "$2"|sed -nre 's/^\s*([0-9a-f]+):\s*[0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f]\s+bl\s+\0x[0-9a-f]+\s+<__android_log_is_debuggable@plt>$/\1/p'|while read i; do
 		dd if="$patch" of="$1" bs=1 count=4 seek="$((0x$i))" conv=notrunc
 	done
 }
