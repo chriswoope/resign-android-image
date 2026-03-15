@@ -268,7 +268,7 @@ function with_temp
 					exit 1
 				fi
 				mv "$tmp" "$path"
-			else
+			elif test -n "$complete"; then
 				$complete "$tmp"
 			fi
 			trap - EXIT
