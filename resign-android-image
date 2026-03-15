@@ -461,7 +461,7 @@ fi
 
 function download_aapt2 {
 	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
-	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1"
+	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1" || exit 1
 	chmod +x "$1"
 }
 
