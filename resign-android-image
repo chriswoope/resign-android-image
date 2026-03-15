@@ -510,10 +510,6 @@ for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
 	fi
 done
 
-if ! test -e "$var_dir/mkbootfs"; then
-	gcc "$data_dir"/mkbootfs.c -o "$var_dir/mkbootfs"
-fi
-
 function gen_key {
 	openssl genrsa -f4 4096 > "$1"
 }
@@ -960,35 +956,28 @@ function make_fs_image {
 function unpack_ramdisk {
 	local imgr="$(realpath "$2")"
 	mkdir -p "$1"
-	(cd "$1" && "$otatools/bin/lz4" -d "$imgr" -|cpio -i -d --preserve-modification-time) || exit 1
+	cd "$1" && "$otatools/bin/lz4" -d "$imgr" -|cpio -i -d --preserve-modification-time || exit 0 # ignore mknod failure
 }
 
 function update_ramdisk {
-	sudo bash $setx /dev/stdin "$otatools" "$var_dir/mkbootfs" "$@" <<'EOF' || exit 1
-		set -e
-		otatools="$1"
-		mkbootfs="$2"
-		shift 2
+	mkdir -p "$1"
+	"$otatools/bin/lz4" -d "$2" -|(cd "$1" && cpio -i -d --preserve-modification-time --no-preserve-owner)
+	"$otatools/bin/lz4" -d "$2" -|cpio -t -n -v|"$data_dir"/cpio2mkbootfs.py "$1.fsc" "$1.nodes"
 
-		mkdir -p "$1"
-		"$otatools/bin/lz4" -d "$2" -|(cd "$1" && cpio -i -d --preserve-modification-time) || exit 1
+	rdr="$(realpath "$1")"
+	(cd "$3" && find -type f|while IFS= read -r i; do
+		o="$rdr/$i"
+		if ! cmp -s "$i" "$o"; then
+			echo "Updating $i: $(stat -c %s "$o") -> $(stat -c %s "$i")"
+			times="$(stat -c '%X %Y %Z' -- "$o")"
+			dd if="$i" of="$o" bs=1M conv=notrunc
+			truncate -r "$i" "$o"
+			read atime mtime ctime <<<"$times"
+			touch -d "@$mtime" -m -- "$o"
+		fi
+	done) || exit 1
 
-		rdr="$(realpath "$1")"
-		(cd "$3" && find -type f|while IFS= read -r i; do
-			o="$rdr/$i"
-			if ! cmp -s "$i" "$o"; then
-				echo "Updating $i: $(stat -c %s "$o") -> $(stat -c %s "$i")"
-				times="$(stat -c '%X %Y %Z' -- "$o")"
-				dd if="$i" of="$o" bs=1M conv=notrunc
-				truncate -r "$i" "$o"
-				read atime mtime ctime <<<"$times"
-				touch -d "@$mtime" -m -- "$o"
-			fi
-		done) || exit 1
-
-		"$mkbootfs" "$1"|"$otatools/bin/lz4" -f -l -12 --favor-decSpeed - "$2"
-		chown -R 1000:1000 "$1"
-EOF
+	"$otatools/bin/mkbootfs" -f "$1.fsc" -n "$1.nodes" "$1"|"$otatools/bin/lz4" -f -l -12 --favor-decSpeed - "$2" || exit 1
 }
 
 function extract_boot_image {
