@@ -1827,7 +1827,7 @@ function check_images {
 	local system="$3"
 	"$otatools/bin/unpack_bootimg" --boot_img "$vendor_boot" --out "$1/vendor_boot" >&2
 	mkdir "$1/vendor_boot_ramdisk" >&2
-	lz4 -d "$1/vendor_boot/vendor_ramdisk00" -|(cd "$1/vendor_boot_ramdisk" && cpio -i) >&2
+	"$otatools/bin/lz4" -d "$1/vendor_boot/vendor_ramdisk00" -|(cd "$1/vendor_boot_ramdisk" && cpio -i) >&2
 	mkdir "$1/recovery_otacerts" >&2
 	unzip -x -d "$1/recovery_otacerts" "$1/vendor_boot_ramdisk/system/etc/security/otacerts.zip" >&2
 	if ! cmp "$1/recovery_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
