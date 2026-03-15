@@ -129,6 +129,7 @@ image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm"
 
 build_factory=
 build_factory_zip=
+factory_optimized=
 build_ota=
 want_discard=1
 parallel=
@@ -426,9 +427,11 @@ if test "$os" == grapheneos; then
 	base_url="https://releases.grapheneos.org"
 	if test "$build" -ge 2024082000; then
 		factory_name="$device-install-$build"
+		out_factory_word=install
 		factory_optimized=1
 	else
-		factory_name="$device-factory-$build"
+		factory_name="$device-factory-$build"\
+		out_factory_word=factory
 		factory_optimized=
 	fi
 	factory_url="$base_url/$factory_name"
@@ -1867,6 +1870,10 @@ function do_unzip_img2simg {
 	"$otatools/bin/img2simg" "$1"/img "$2" 4096
 }
 
+function do_ln_dir {
+	ln "$2"/* "$1"
+}
+
 function extract_factory_image {
 	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory_image.list"; then
 		if ! test -e "$dir/factory" || ! test -e "$dir/factory.list"; then
@@ -1878,9 +1885,13 @@ function extract_factory_image {
 			discard "$dir/factory_zip/$factory_name.zip"
 		fi
 
-		make_dir "$dir/factory_image" do_unzip "$dir/factory/$factory_name/image-$device-$build.zip"
-		make_file "$dir/factory_image.list" do_unzip_list "$dir/factory/$factory_name/image-$device-$build.zip"
-		discard "$dir/factory/$factory_name/image-$device-$build.zip"
+		if test -n "$factory_optimized"; then
+			make_dir "$dir/factory_image" do_ln_dir "$dir/factory/$factory_name"
+		else
+			make_dir "$dir/factory_image" do_unzip "$dir/factory/$factory_name/image-$device-$build.zip"
+			make_file "$dir/factory_image.list" do_unzip_list "$dir/factory/$factory_name/image-$device-$build.zip"
+			discard "$dir/factory/$factory_name/image-$device-$build.zip"
+		fi
 	fi
 }
 
@@ -1889,7 +1900,11 @@ function make_factory_image {
 	extract_factory_image
 
 	ls -1 "$dir/factory_image"|while read i; do
-		if unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
+		if test "$i" == avb_pkmd.bin; then
+			cp -a "$key_dir/avb_pkmd.bin" "$1"
+		elif test "$i" == flash-all.sh || test "$i" == flash-all.bat || test "$i" == script.txt; then
+			cat "$i" |sed -re 's/echo Flashing super, 1\/[0-9]+/echo Flashing super/; /echo Flashing super, .*/d; s/flash super super_1.img/flash super super.img/; /flash super super_/d' > "$1/$i"
+		elif unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
 			simg=
 			for j in $image_parts; do
 				if test "$i" == "$j.img"; then
@@ -1901,6 +1916,10 @@ function make_factory_image {
 			else
 				unzip -q -p "$outdir/target_files.zip" "IMAGES/$i" > "$1/$i"
 			fi
+		elif test "$i" == super.img || test "$i" == super_1.img; then
+			"$otatools/bin/build_super_image" "$outdir/target_files.zip" "$1/super.img"
+		elif [[ $i == super_*.img ]] && test "$i" != "super_empty.img"; then
+			:
 		else
 			ln "$dir/factory_image/$i" "$1/$i"
 		fi
@@ -1908,7 +1927,7 @@ function make_factory_image {
 }
 
 function make_factory_unchecked {
-	local out="$1/$device-factory-$build"
+	local out="$1/$factory_name"
 	mkdir "$out"
 	shift 1
 
@@ -1918,20 +1937,24 @@ function make_factory_unchecked {
 		discard "$outdir/target_files.zip"
 	fi
 
-	local zip="$(realpath "$out/image-$device-$build.zip")"
-	# files in the zip must be in the proper order
-	factory_image_entries="$(<$dir/factory_image.list)"
-	(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries) || exit 1
+	if test -n "$factory_optimized"; then
+		ln "$outdir/factory_image"/* "$out"
+	else
+		local zip="$(realpath "$out/image-$device-$build.zip")"
+		# files in the zip must be in the proper order
+		factory_image_entries="$(<$dir/factory_image.list)"
+		(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries) || exit 1
 
-	ls -1 "$dir/factory/$device-factory-$build"|while read i; do
-		if test "$i" == avb_pkmd.bin; then
-			cp -a "$key_dir/avb_pkmd.bin" "$out"
-		elif test "$i" == "image-$device-$build.zip"; then
-			:
-		else
-			ln "$dir/factory/$device-factory-$build/$i" "$out"
-		fi
-	done
+		ls -1 "$dir/factory/$factory_name"|while read i; do
+			if test "$i" == avb_pkmd.bin; then
+				cp -a "$key_dir/avb_pkmd.bin" "$out"
+			elif test "$i" == "image-$device-$build.zip"; then
+				:
+			else
+				ln "$dir/factory/$factory_name/$i" "$out"
+			fi
+		done
+	fi
 }
 
 function make_factory {
@@ -1939,8 +1962,8 @@ function make_factory {
 
 	result="$(set -e; with_temp_dir "$outdir/check_factory" check_factory)"
 	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
-		mkdir -p "$1/$device-factory-$build"
-		ln --target-directory="$1/$device-factory-$build" "$outdir/factory_unchecked/$device-factory-$build"/*
+		mkdir -p "$1/$factory_name"
+		ln --target-directory="$1/$factory_name" "$outdir/factory_unchecked/$factory_name"/*
 	else
 		echo "Factory key check failed!!!"
 		exit 1
@@ -1949,8 +1972,21 @@ function make_factory {
 
 function check_factory {
 	mkdir "$1"/factory_image >&2
-	unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$device-factory-$build/image-$device-$build.zip" system.img vendor_boot.img >&2
-	"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
+	if test -n "$factory_optimized"; then
+		ln "$outdir/factory_unchecked/$factory_name"/* "$1/factory_image"
+		if test -e "$1/factory_image/super_1.img"; then
+			"$otatools/bin/simg2img" $(ls -1 "$1/factory_image"/super_*.img|sort -V) "$1/super.img" >&2
+		else
+			"$otatools/bin/simg2img" "$1/factory_image/super.img" "$1/super.img" >&2
+		fi
+		mkdir "$1/lpunpack"
+		"$otatools"/bin/lpunpack -p system_a "$1/super.img" "$1/lpunpack" >&2
+		mv "$1/lpunpack/system_a.img" "$1/system.img"
+	else
+		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$factory_name/image-$device-$build.zip" system.img vendor_boot.img >&2
+		"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
+	fi
+	
 	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img"
 }
 
@@ -1961,22 +1997,22 @@ function make_factory_zip {
 
 	local zip="$(realpath "$1")"
 	rm -f "$zip"
-	factory_entries="$(<"$dir/factory.list")"
+	factory_entries="$(sed -re 's/\/super_1.img$/\/super.img/; /\/super_[0-9]+.img$/d' "$dir/factory.list")"
 	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries) || exit 1
 }
 
 function make_factory_zip_sig {
 	local key="$(realpath "$key_dir/factory.sec")"
 	if test "$sign_factory_images" == signify; then
-		(cd "$outdir/out"; sha256sum --tag "$device-factory-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+		(cd "$outdir/out"; sha256sum --tag "$device-$out_factory_word-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
 	elif test "$sign_factory_images" == ssh-keygen; then
-		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$outdir/out/$device-factory-$out_build.zip" > "$1" || exit 1
+		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$outdir/out/$device-$out_factory_word-$out_build.zip" > "$1" || exit 1
 	fi
 }
 
 
 out_ota="$outdir/out/$device-ota_update-$out_build.zip"
-out_factory="$outdir/out/$device-factory-$out_build.zip"
+out_factory="$outdir/out/$device-$out_factory_word-$out_build.zip"
 
 if ! test -e "$out_ota" || ! test -e "$out_factory"; then
 	mkdir -p "$outdir/out"
