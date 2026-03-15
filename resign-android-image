@@ -138,6 +138,9 @@ adb_backup=
 zip_opt="-6"
 dev_fast_sign=
 build_method=resign
+loop_method=
+loop_mount="sudo mount -o loop,ro"
+loop_umount="sudo umount"
 replace_boot=
 generate_keys=
 magisk=
@@ -213,6 +216,9 @@ while test "$#" != 0; do
 	elif test "$1" == "--dev-fast-sign"; then
 		# remove all APEXes, CAPEXes and APKs to make signing very fast during development of this script
 		dev_fast_sign=1
+	elif test "$1" == "--guestmount"; then
+		loop_method=guestmount
+		loop_mount="sudo guestmount -o allow_other -r -m /dev/sda -a"
 	else
 		echo "Error: unrecognized parameter $1" 2>&1
 		exit 1
@@ -613,8 +619,8 @@ function extract_image {
 	local out="$2"
 	local img="$3"
 	local query="$4"
-	trap "sudo umount $1" EXIT
-	if ! sudo mount -o loop,ro "$img" "$1"; then
+	trap "$loop_umount $1" EXIT
+	if ! $loop_mount "$img" "$1"; then
 		echo "Failed to mount $img" >&2
 		exit 1
 	fi
@@ -624,7 +630,7 @@ function extract_image {
 	else
 		(cd "$1" && sudo cp -r --parents --target-directory="$outr" --no-preserve=mode .) || exit 1
 	fi
-	while ! sudo umount "$1"; do sleep 1; done
+	while ! $loop_umount "$1"; do sleep 1; done
 	trap - EXIT
 	sudo chown -R "$USER:" "$outr"
 }
@@ -656,12 +662,15 @@ function update_fs_image {
 		touch "$work/debugfs"
 	fi
 
-	sudo bash $setx /dev/stdin "$otatools" "$work" "$img" "$src" "$@" <<'EOF' || exit 1
+	sudo bash $setx /dev/stdin "$otatools" "$loop_method" "$loop_mount" "$loop_umount" "$work" "$img" "$src" "$@" <<'EOF' || exit 1
 		set -e
 		set -o nounset
 		set -o pipefail
 		otatools="$1"
-		shift
+		loop_method="$2"
+		loop_mount="$3"
+		loop_umount="$4"
+		shift 4
 
 		img="$2"
 		src="$3"
@@ -696,8 +705,8 @@ function update_fs_image {
 
 		min_extent_nodes_per_block="$((($block_size - $extent_size) / $extent_size / 2))"
 
-		trap "umount $1/mnt" EXIT
-		if ! mount -o loop,ro "$src" "$1/mnt"; then
+		trap "$loop_umount $1/mnt" EXIT
+		if ! $loop_mount "$src" "$1/mnt"; then
 			echo "Failed to mount $src" >&2
 			exit 1
 		fi
@@ -759,7 +768,7 @@ function update_fs_image {
 			fi
 		done < <(cd "$base" && find . -type f -print)
 
-		while ! umount "$1/mnt"; do sleep 1; done
+		while ! $loop_umount "$1/mnt"; do sleep 1; done
 		sleep 1
 
 		if test "${#files[@]}" != 0; then
@@ -843,8 +852,14 @@ function update_fs_image {
 			dd if="$img" of="$1/features" skip=$((0x465)) bs=1 count=1 2>/dev/null
 			dd if=/dev/zero of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
 
-			loop="$(mount -v -o loop,rw,noatime "$img" "$1/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
-			echo 0 > /sys/fs/ext4/"$loop"/reserved_clusters
+			if test "$loop_method" == "guestmount"; then
+				eval $(guestfish --listen -a "$img")
+				guestfish --remote launch : mount_options rw,noatime /dev/sda / : debug sh "echo 0 > /sys/fs/ext4/sda/reserved_clusters" : mount-local "$1/mnt"
+				guestfish --remote mount-local-run &
+			else
+				loop="$(mount -v -o loop,rw,noatime "$img" "$1/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
+				echo 0 > /sys/fs/ext4/"$loop"/reserved_clusters
+			fi
 
 			tmp_dir=
 			tmp_i=0
@@ -908,7 +923,7 @@ function update_fs_image {
 				# rmdir is fine here, we can't have shared blocks in the directory
 				echo "rmdir $tmp_dir_rel" >> "$1/debugfs"
 			fi
-			while ! umount "$1/mnt"; do sleep 1; done
+			while ! $loop_umount "$1/mnt"; do sleep 1; done
 		else
 			ln -f "$src" "$img"
 		fi
@@ -1134,8 +1149,8 @@ function make_original_apk_cert_hashes {
 						fi
 					fi
 					mkdir -p "$outr/APEX"
-					trap "sudo umount $outr/APEX" EXIT
-					sudo mount -o loop,ro "$outr/apex_payload.img" "$outr/APEX"
+					trap "$loop_umount $outr/APEX" EXIT
+					$loop_mount "$outr/apex_payload.img" "$outr/APEX"
 					(
 						cd "$outr"
 						sudo find ./APEX -iname '*.apk'|while IFS= read -r j; do
@@ -1143,7 +1158,7 @@ function make_original_apk_cert_hashes {
 							"$otatools/bin/apksigner" verify --print-certs "$j"
 						done
 					) || exit 1
-					while ! sudo umount "$outr/APEX"; do sleep 1; done
+					while ! $loop_umount "$outr/APEX"; do sleep 1; done
 					trap - EXIT
 				fi
 			done
