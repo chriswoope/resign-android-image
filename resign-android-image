@@ -108,6 +108,10 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(xz-utils)
 	fi
 
+	if ! which xxd >/dev/null; then
+		deb+=(xxd)
+	fi
+
 	if test "${#deb[@]}" != 0; then
 		sudo apt-get -y install "${deb[@]}"
 	fi
@@ -1136,6 +1140,7 @@ function make_original_apk_cert_hashes {
 							"$otatools/bin/apksigner" verify --print-certs "$j"
 						done
 					) || exit 1
+					rm -rf "$outr/APEX"
 				fi
 			done
 		)|sed -nre '/^\./x; /^Signer #1 certificate SHA-256 digest:/ {s/.* SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
