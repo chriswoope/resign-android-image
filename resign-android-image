@@ -1439,7 +1439,7 @@ function make_certs {
 				else
 					echo "Missing original key hash for $k in mac_permissions" >&2
 					exit 1
-				fi|openssl x509 -in - -inform PEM -outform DER|xxd -p -c 999999999)"
+				fi|openssl x509 -in /dev/stdin -inform PEM -outform DER|xxd -p -c 999999999)"
 				test -n "$i" || exit 1
 				echo "$(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1)" "$i" "$k"
 			fi
@@ -1448,7 +1448,7 @@ function make_certs {
 }
 
 function make_product_security {
-	while read h c k; do echo "$c"|xxd -p -r|openssl x509 -in - -inform DER -outform PEM > $1/$k.x509.pem; done < "$outdir"/certs.txt
+	while read h c k; do echo "$c"|xxd -p -r|openssl x509 -in /dev/stdin -inform DER -outform PEM > $1/$k.x509.pem; done < "$outdir"/certs.txt
 }
 
 
