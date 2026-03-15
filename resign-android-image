@@ -104,6 +104,10 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(wget)
 	fi
 
+	if ! which xzcat >/dev/null; then
+		deb+=(xz-utils)
+	fi
+
 	if test "${#deb[@]}" != 0; then
 		sudo apt-get -y install "${deb[@]}"
 	fi
