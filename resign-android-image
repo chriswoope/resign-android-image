@@ -112,6 +112,10 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(xxd)
 	fi
 
+	if ! which simg2simg >/dev/null; then
+		deb+=(android-sdk-libsparse-utils)
+	fi
+
 	if test "${#deb[@]}" != 0; then
 		sudo apt-get -y install "${deb[@]}"
 	fi
@@ -433,6 +437,11 @@ if test "$os" == grapheneos; then
 		factory_name="$device-factory-$build"\
 		out_factory_word=factory
 		factory_optimized=
+	fi
+	if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
+		max_download_size=$((0x10000000))
+	else
+		max_download_size=$((0xf900000))
 	fi
 	factory_url="$base_url/$factory_name"
 	ota_url="$base_url/$device-ota_update-$build"
@@ -1899,11 +1908,100 @@ function extract_factory_image {
 function make_factory_image {
 	extract_factory_image
 
-	ls -1 "$dir/factory_image"|while read i; do
+	local super_names=()
+	local super_files=()
+
+	if test -e "$dir/factory_image/super_1.img" || test -e "$dir/factory_image/super.img"; then
+		"$otatools/bin/build_super_image" "$outdir/target_files.zip" "$1/super.img"
+
+		if test -e "$dir/factory_image/super_1.img"; then
+			simg2simg "$1/super.img" "$1/super" "$max_download_size"
+			rm -f "$1/super.img"
+
+			local super_count=0
+			for f in "$1"/super.[0-9]*; do
+				((super_count++))
+			done
+
+			for ((i = 1; i <= super_count; i++)); do
+				mv "$1/super.$(($i - 1))" "$1/super_$i.img"
+				super_names+=("super, $i/$super_count")
+				super_files+=("super_$i.img")
+			done
+		else
+			super_names=("super")
+			super_files=("super.img")
+		fi
+	fi
+
+	ls -1 "$dir/factory_image" | while read i; do
 		if test "$i" == avb_pkmd.bin; then
 			cp -a "$key_dir/avb_pkmd.bin" "$1"
-		elif test "$i" == flash-all.sh || test "$i" == flash-all.bat || test "$i" == script.txt; then
-			cat "$i" |sed -re 's/echo Flashing super, 1\/[0-9]+/echo Flashing super/; /echo Flashing super, .*/d; s/flash super super_1.img/flash super super.img/; /flash super super_/d' > "$1/$i"
+		elif test "$i" == flash-all.sh; then
+			{
+				local super_inserted=
+				while IFS= read -r line; do
+					if [[ "${#super_files[@]}" != 0 && ( "$line" == "echo Flashing super"* || "$line" == "fastboot flash super super"* ) ]]; then
+						if test -z "$super_inserted"; then
+							for ((i = 0; i < ${#super_files[@]}; i++)); do
+								echo "echo Flashing ${super_names[$i]}"
+								echo "fastboot flash super ${super_files[$i]}"
+							done
+							super_inserted=1
+						fi
+					else
+						echo "$line"
+					fi
+				done < "$dir/factory_image/$i"
+			} > "$1/$i"
+		elif test "$i" == flash-all.bat; then
+			{
+				local super_inserted= skip_errorlevel= skip_blank=
+				while IFS= read -r line; do
+					if [[ "${#super_files[@]}" != 0 && "$line" == "echo Flashing super"* ]]; then
+						if test -z "$super_inserted"; then
+							for ((i = 0; i < ${#super_files[@]}; i++)); do
+								echo "echo Flashing ${super_names[$i]}"
+								echo "fastboot flash super ${super_files[$i]}"
+								echo "if %errorlevel% neq 0 call:pakExit"
+								echo
+							done
+							super_inserted=1
+						fi
+						continue
+					fi
+					if [[ "${#super_files[@]}" != 0 && "$line" == "fastboot flash super super"* ]]; then
+						skip_errorlevel=1
+						continue
+					fi
+					if test -n "$skip_errorlevel" && [[ "$line" == *"errorlevel"* ]]; then
+						skip_errorlevel=
+						skip_blank=1
+						continue
+					fi
+					if test -n "$skip_blank" && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+						skip_blank=
+						continue
+					fi
+					echo "$line"
+				done < "$dir/factory_image/$i"
+			} > "$1/$i"
+		elif test "$i" == script.txt; then
+			{
+				local super_inserted=
+				while IFS= read -r line; do
+					if [[ "${#super_files[@]}" != 0 && "$line" == flash\ super\ super* ]]; then
+						if test -z "$super_inserted"; then
+							for ((i = 0; i < ${#super_files[@]}; i++)); do
+								echo "flash super ${super_files[$i]}"
+							done
+							super_inserted=1
+						fi
+					else
+						echo "$line"
+					fi
+				done < "$dir/factory_image/$i"
+			} > "$1/$i"
 		elif unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
 			simg=
 			for j in $image_parts; do
@@ -1916,10 +2014,8 @@ function make_factory_image {
 			else
 				unzip -q -p "$outdir/target_files.zip" "IMAGES/$i" > "$1/$i"
 			fi
-		elif test "$i" == super.img || test "$i" == super_1.img; then
-			"$otatools/bin/build_super_image" "$outdir/target_files.zip" "$1/super.img"
-		elif [[ $i == super_*.img ]] && test "$i" != "super_empty.img"; then
-			:
+		elif [[ "${#super_files[@]}" != 0 && $i == super*.img ]]; then
+			: # already done before
 		else
 			ln "$dir/factory_image/$i" "$1/$i"
 		fi
@@ -1997,7 +2093,23 @@ function make_factory_zip {
 
 	local zip="$(realpath "$1")"
 	rm -f "$zip"
-	factory_entries="$(sed -re 's/\/super_1.img$/\/super.img/; /\/super_[0-9]+.img$/d' "$dir/factory.list")"
+
+	factory_entries="$(
+		local super_inserted=
+		while IFS= read -r entry; do
+			local base
+			base="$(basename "$entry")"
+			if [[ -e "$outdir/factory/$factory_name"/super_1.img || -e "$outdir/factory/$factory_name"/super.img ]] && [[ "$base" == super*.img ]]; then
+				if test -z "$super_inserted"; then
+					(cd "$outdir/factory" && ls -1 "$factory_name"/super*.img 2>/dev/null | grep -vE '/super_empty.img$' | sort -V)
+					super_inserted=1
+				fi
+			else
+				echo "$entry"
+			fi
+		done < "$dir/factory.list"
+	)"
+
 	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries) || exit 1
 }
 
