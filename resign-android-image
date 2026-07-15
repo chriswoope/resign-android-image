@@ -1804,6 +1804,9 @@ function make_target_files_zip {
 # needs out_target_files.zip
 function make_ota_unchecked {
 	local extra_ota=()
+	if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
+		extra_ota+=( "--disable_ublk" )
+	fi
 	ls -1 "$dir/ota_payload"|while read i; do
 		if ! unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
 			local b="$(basename "$f" .img)"
