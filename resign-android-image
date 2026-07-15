@@ -384,7 +384,7 @@ function git_clone_ref
 	local ref="$2"
 	shift 2
 	make_dir "$dir" do_git_clone --branch "$ref" "$@"
-	( cd "$dir" && git checkout "$ref" && git pull --rebase ) || exit 1
+	( cd "$dir" && git fetch --tags && git checkout "$ref" && git pull --rebase ) || exit 1
 }
 
 function download
