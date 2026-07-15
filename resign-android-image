@@ -396,7 +396,10 @@ android=
 
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
-	if test "$build" -ge 2025121000; then
+	if test "$build" -ge 2026061800; then
+		branch=17
+		android=170
+	elif test "$build" -ge 2025121000; then
 		branch=16-qpr2
 		android=162
 	elif test "$build" -ge 2025111800; then
