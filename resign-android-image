@@ -504,6 +504,20 @@ make_file "$otatools/bin/aapt2" make_aapt2_wrapper
 export PATH="$otatools/bin:$PATH"
 export ANDROID_HOST_OUT="$otatools"
 
+debugfs="$otatools/bin/debugfs_static"
+if ! test -x "$debugfs"; then
+	debugfs=/sbin/debugfs
+fi
+
+blkid="$otatools/bin/blkid_static"
+if ! test -x "$blkid"; then
+	blkid="$(which blkid)"
+fi
+
+fsckerofs="$otatools/bin/fsck.erofs"
+if ! test -x "$fsckerofs"; then
+	fsckerofs="$(which fsck.erofs)"
+fi
 
 if false; then
 	extract_android_ota_payload="$var_dir/android-prepare-vendor/scripts/extract_android_ota_payload/extract_android_ota_payload.py"
@@ -1147,7 +1161,11 @@ function make_original_apk_cert_hashes {
 						fi
 					fi
 					mkdir -p "$outr/APEX"
-					debugfs -R "rdump / $outr/APEX" "$outr/apex_payload.img" 2>/dev/null
+					if [[ $(dd if="$outr/apex_payload.img" bs=4 skip=256 count=1 status=none 2>/dev/null) == $'\xe2\xe1\xf5\xe0' ]]; then
+						"$fsckerofs" --extract="$outr/APEX" "$outr/apex_payload.img" || exit 1
+					else
+						"$debugfs" -R "rdump / $outr/APEX" "$outr/apex_payload.img" 2>/dev/null || exit 1
+					fi
 					(
 						cd "$outr"
 						sudo find ./APEX -iname '*.apk'|while IFS= read -r j; do
@@ -1233,19 +1251,6 @@ function patch_apex {
 	local apex="$3"
 	local cmd="$4"
 	shift 4
-
-	local debugfs="$otatools/bin/debugfs_static"
-	if ! test -x "$debugfs"; then
-		debugfs=/sbin/debugfs
-	fi
-	local blkid="$otatools/bin/blkid_static"
-	if ! test -x "$blkid"; then
-		blkid="$(which blkid)"
-	fi
-	local fsckerofs="$otatools/bin/fsck.erofs_static"
-	if ! test -x "$fsckerofs"; then
-		fsckerofs="$(which fsck.erofs)"
-	fi
 
 	type="$("$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" info --print-type "$apex")"
 	if test "$type" == COMPRESSED; then
