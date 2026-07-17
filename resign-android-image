@@ -1503,6 +1503,10 @@ PAYLOAD_MINOR_VERSION=4
 EOF
 }
 
+function make_dummy_image {
+	echo "x" > "$1"
+}
+
 function make_target_files_intermediates {
 	make_dir "$outdir/target_files_intermediates" make_target_files_intermediates_base
 	make_file "$outdir/certs_mac.txt" make_certs_mac
@@ -1514,17 +1518,20 @@ function make_target_files_intermediates {
 	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
 	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config
-	mkdir -p "$outdir/target_files_intermediates/IMAGES"
-	for i in dtbo boot init_boot; do
-		make_file "$outdir/target_files_intermediates/IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+	mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
+	for i in dtbo; do
+		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+	done
+	for i in boot init_boot; do
+		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
 	done
 	for i in $image_parts; do
-		touch "$outdir/target_files_intermediates/IMAGES/$i.img"
+		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_dummy_image
 	done
 	if test "$build_method" == rebuild; then
 		cp -f "$dir/ota_meta/ab_partitions.txt" "$outdir/target_files_intermediates/META/ab_partitions.txt"
-	else
-		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
+#	else
+#		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
 	fi
 	touch "$1"
 }
@@ -1559,14 +1566,7 @@ function make_target_files_signed_zip {
 				generate_release_sh="$aosp/script/release.sh"
 			fi
 
-			# TODO: distinguish beetwen errors before add_image_... and after
-			if ! (sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 $KEY_MAP/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 KEY_MAP="$key_map" bash -x 2>&1 | tee "$outdir/sign_target_files.txt"; then
-				if test "$build_method" == resign && grep -qE '^\s*File "([^"]*/)?add_img_to_target_files.py", line [0-9]+, in AddImagesToTargetFiles\s*$' "$outdir/sign_target_files.txt"; then
-					echo "Expected failure: signed completed, sign_target_files_apk failed while trying to create images which we don't want"
-				else
-					exit 1
-				fi
-			fi
+			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 $KEY_MAP/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 KEY_MAP="$key_map" bash -x || exit 1
 		fi
 	}
 	with_temp_dir "$outdir/sign_target_files" go "$@"
