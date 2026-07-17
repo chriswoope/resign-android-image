@@ -649,7 +649,7 @@ function extract_image {
 	local img="$3"
 
 	local outr="$(realpath "$out")"
-	debugfs -R "rdump / $outr" "$img" 2>/dev/null
+	"$debugfs" -R "rdump / $outr" "$img" 2>/dev/null
 }
 
 function get_avbtool_vbmeta_opts {
@@ -950,7 +950,7 @@ EOF
 
 	local changed=
 	if test -s "$work/debugfs"; then
-		/sbin/debugfs -w "$img" < "$work/debugfs"
+		"$debugfs" -w "$img" < "$work/debugfs"
 		changed=1
 	fi
 
@@ -1842,7 +1842,7 @@ function check_images {
 		echo "Recovery otacerts.zip has wrong key!!!" >&2
 		exit 1
 	fi
-	echo "dump /system/etc/security/otacerts.zip $1/system_otacerts.zip"|/sbin/debugfs "$system" >&2
+	echo "dump /system/etc/security/otacerts.zip $1/system_otacerts.zip"|"$debugfs" "$system" >&2
 	mkdir "$1/system_otacerts" >&2
 	unzip -x -d "$1/system_otacerts" "$1/system_otacerts.zip" >&2
 	if ! cmp "$1/system_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
