@@ -1519,11 +1519,10 @@ function make_target_files_intermediates {
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
 	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config
 	mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
-	for i in dtbo; do
-		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
-	done
-	for i in boot init_boot; do
-		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+	for i in dtbo boot init_boot; do
+		if test -e "$dir/ota_payload/$i.img"; then
+			make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+		fi
 	done
 	for i in $image_parts; do
 		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_dummy_image
