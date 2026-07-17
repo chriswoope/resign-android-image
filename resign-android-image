@@ -1158,7 +1158,7 @@ function make_original_apk_cert_hashes {
 					rm -rf "$outr/APEX"
 				fi
 			done
-		)|sed -nre '/^\./x; /^Signer #1 certificate SHA-256 digest:/ {s/.* SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
+		)|sed -nre '/^\./x; /^.* certificate SHA-256 digest:/ {s/.* certificate SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
 	}
 	with_temp_dir "$outdir/apk_cert_hashes_tmp" go "$@"
 }
