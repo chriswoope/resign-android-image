@@ -1513,8 +1513,13 @@ function make_target_files_intermediates {
 	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
 	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config
-	mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
-	make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/dtbo.img" make_hardlink "$dir/ota_payload/dtbo.img"
+	mkdir -p "$outdir/target_files_intermediates/IMAGES"
+	for i in dtbo boot init_boot; do
+		make_file "$outdir/target_files_intermediates/IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+	done
+	for i in $image_parts; do
+		touch "$outdir/target_files_intermediates/IMAGES/$i.img"
+	done
 	if test "$build_method" == rebuild; then
 		cp -f "$dir/ota_meta/ab_partitions.txt" "$outdir/target_files_intermediates/META/ab_partitions.txt"
 	else
