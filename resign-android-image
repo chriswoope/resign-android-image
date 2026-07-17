@@ -1442,6 +1442,7 @@ EOF
 		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
 		if test -e "$dir/ota_payload/init_boot.img"; then
 			echo "init_boot=true" >> "$1"
+			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
 		fi
 	fi
 }
