@@ -1128,6 +1128,8 @@ function make_extract_ota_payload {
 	done
 
 	do_extract_ota_payload "$1" "$dir/ota/payload.bin"
+	mkdir -p "$1/META"
+	python3 "$data_dir/ota_payload_to_meta.py" "$dir/ota/payload.bin" "$1/META"
 }
 
 function make_extract_boot {
@@ -1440,6 +1442,7 @@ EOF
 	else
 		# TODO: properly create this instead of copying one from a raven build from source and hoping it works
 		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
+		cat "$dir/ota_payload/META/misc_info.txt" >> "$1"
 		if test -e "$dir/ota_payload/init_boot.img"; then
 			echo "init_boot=true" >> "$1"
 			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
@@ -1448,7 +1451,7 @@ EOF
 }
 
 function make_dynamic_partitions_info {
-	grep -E '^virtual_ab' "$data_dir/misc_info-raven.txt" > "$1"
+	cp "$dir"/ota_payload/META/dynamic_partitions_info.txt "$1"
 }
 
 function make_certs_mac {
