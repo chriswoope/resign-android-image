@@ -145,6 +145,7 @@ recovery_adb_root=
 allowbackup=
 adb_backup=
 cross_profile_localhost=
+always_screenshot=
 zip_opt="-6"
 dev_fast_sign=
 build_method=resign
@@ -190,6 +191,8 @@ while test "$#" != 0; do
 		adb_backup=1
 	elif test "$1" == "--cross-profile-localhost"; then
 		cross_profile_localhost=1
+	elif test "$1" == "--always-screenshot"; then
+		always_screenshot=1
 	elif test "$1" == "--replace-boot"; then
 		replace_boot="$2"
 		shift 1
@@ -1453,6 +1456,31 @@ function patch_loopback_checks {
 	fi
 }
 
+# make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other
+# app or policy request to block screen capture) are treated as non-secure: this is the single point
+# the window manager uses to mark a window's surface as secure, so screenshots, screen recording and
+# casting can then always capture every window
+function patch_window_secure {
+	local found=
+	local i
+	while IFS= read -r -d '' i; do
+		if grep -q -E '^\.method .*isSecureLocked\(\)Z$' "$i"; then
+			# keep the .method line, drop the body and insert one returning false before .end method
+			sed -i -re '/^\.method .*isSecureLocked\(\)Z$/,/^\.end method$/ {
+				/^\.method /b
+				/^\.end method$/! d
+				s|^|    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0\n\n|
+			}' "$i"
+			found=1
+		fi
+	done < <(find "$1" -name 'WindowState.smali' -print0)
+
+	if test -z "$found"; then
+		echo "Failed to find WindowState.isSecureLocked() to patch" >&2
+		exit 1
+	fi
+}
+
 function patch_service_connectivity {
 	local jar="$1/javalib/service-connectivity.jar"
 	if ! test -e "$jar"; then
@@ -1519,6 +1547,26 @@ function make_target_files_intermediates_base {
 			echo "Failed to find the tethering APEX containing service-connectivity.jar" >&2
 			exit 1
 		fi
+	fi
+
+	if test -n "$always_screenshot"; then
+		local jar="$outdir/target_files_extracted/SYSTEM/framework/services.jar"
+		if ! test -e "$jar"; then
+			echo "services.jar not found in the system image, cannot patch out secure windows" >&2
+			exit 1
+		fi
+		local sdk=
+		sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || sdk=
+		if test -z "$sdk"; then
+			echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
+			exit 1
+		fi
+		mkdir -p "$1/SYSTEM/framework"
+		# services.jar isn't APK-signed (its integrity comes from AVB), so patch it directly like a plain
+		# system file; the stale precompiled artifacts in /system/framework/oat no longer match the
+		# rewritten jar, so the runtime discards them and runs the patched dex instead
+		with_temp_dir "$outdir/patch-services-screenshot" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/services.jar patch_window_secure
+		mkdir_touch "$outdir/modded_paths/SYSTEM/framework/services.jar"
 	fi
 
 	if test -n "$allowbackup"; then
