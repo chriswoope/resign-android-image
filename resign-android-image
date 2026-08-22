@@ -820,7 +820,8 @@ function update_fs_image {
 				fi
 				b="$(basename "$p")"
 				if test "$b" == build.prop; then
-					diff -u "$orig" "$mod"
+					# diff exits with 1 when the files differ, which they always do here
+					diff -u "$orig" "$mod" || true
 				fi
 
 				files+=("$p")
