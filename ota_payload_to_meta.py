@@ -145,15 +145,12 @@ def main():
                 dynamic_partitions.append(partition)
 
     misc = [
-        "# Minimal fragment reconstructed from payload.bin.",
-        "# Merge with your existing synthesized misc_info.txt.",
         "ab_update=true",
         "use_dynamic_partitions=true",
     ]
     add_vabc(misc, meta)
 
     dynamic = [
-        "# Reconstructed from payload.bin.",
         "use_dynamic_partitions=true",
         "lpmake=lpmake",
     ]
