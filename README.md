@@ -114,6 +114,16 @@ By using --adb-backup, you can remedy the situation and disable this antifeature
 
 Security impact: attackers who gain access to ADB will be able to extract more data, including data that app developers consider to be especially sensitive
 
+## Localhost servers across user profiles
+
+Android 17 restricts applications from connecting to localhost servers that are listening in a different Android user profile. This is a backwards-compatibility breaking change: setups that rely on running a server in one profile and using it from another one, which worked on all previous Android versions, stop working after updating.
+
+By using --cross-profile-localhost, you can restore the pre-Android 17 behavior of allowing connections to localhost regardless of the profile the listening process happens to be running in.
+
+It works by decompiling service-connectivity.jar (in the tethering APEX, mounted at /apex/com.android.tethering/javalib/) with apktool, patching the smali code of BpfNetMaps$Dependencies.isLoopbackChecksEnabled() so that it returns false, which makes the connectivity service never install the eBPF loopback restrictions, and then reassembling and repacking the APEX.
+
+Security impact: applications can connect to localhost servers of other profiles, as they could before Android 17; this weakens the isolation between profiles for applications that listen on localhost without authenticating their clients
+
 ## AdAway or custom hosts file
 
 Android developers often release applications infested with advertisements for their own personal gain at your expense.

@@ -144,6 +144,7 @@ adb_root=
 recovery_adb_root=
 allowbackup=
 adb_backup=
+cross_profile_localhost=
 zip_opt="-6"
 dev_fast_sign=
 build_method=resign
@@ -183,6 +184,8 @@ while test "$#" != 0; do
 		allowbackup=1
 	elif test "$1" == "--adb-backup"; then
 		adb_backup=1
+	elif test "$1" == "--cross-profile-localhost"; then
+		cross_profile_localhost=1
 	elif test "$1" == "--replace-boot"; then
 		replace_boot="$2"
 		shift 1
@@ -527,8 +530,13 @@ else
 	git_clone "$var_dir/extract_android_ota_payload" https://github.com/cyxx/extract_android_ota_payload &
 fi
 
-apktool="$var_dir/apktool.jar"
-make_file "$var_dir/apktool.jar" download https://github.com/iBotPeaches/Apktool/releases/download/v2.6.1/apktool_2.6.1.jar
+# the version is part of the file name so that upgrading it doesn't keep using the old downloaded jar;
+# it must be new enough that the bundled smali can parse the dex files produced by recent Android
+# versions (2.6.1 and older cannot), but not so new that it requires a newer Java than the default
+# JRE of the distribution
+apktool_version=2.9.3
+apktool="$var_dir/apktool-$apktool_version.jar"
+make_file "$apktool" download "https://github.com/iBotPeaches/Apktool/releases/download/v$apktool_version/apktool_$apktool_version.jar"
 
 aosp="$var_dir/aosp-$os"
 mkdir -p "$aosp/build"
@@ -1324,6 +1332,7 @@ function patch_apk_apktool {
 
 	local resources=1
 	local opts=
+	local build_opts=
 	while true; do
 		if test "$1" == '-r'; then
 			opts="$opts -r"
@@ -1332,6 +1341,10 @@ function patch_apk_apktool {
 		elif test "$1" == '-s'; then
 			opts="$opts -s"
 			shift
+		elif test "$1" == '-api'; then
+			# needed for jars, since without a manifest apktool has no minSdkVersion to assemble the smali for
+			build_opts="$build_opts -api $2"
+			shift 2
 		else
 			break
 		fi
@@ -1354,7 +1367,7 @@ function patch_apk_apktool {
 	echo "If Java runs out of memory, try setting JAVA_OPTS=-Xmx4g or similar"
 	java -jar "$apktool" d $opts -p "$framework_dir" -o "$work/files" "$in_zip"
 	"$cmd" "$work/files" "$@"
-	java -jar "$apktool" b -p "$framework_dir" -o "$work/out.apk" "$work/files"
+	java -jar "$apktool" b $build_opts -p "$framework_dir" -o "$work/out.apk" "$work/files"
 	unzip -q -x -d "$work/out" "$work/out.apk"
 	work_r="$(realpath "$work")"
 	bsdtar -tf "$work/out.apk"|(cd "$work/out" && zip -0 -@ "$work_r/out0.apk")
@@ -1380,6 +1393,49 @@ function patch_adbd_in_root {
 function patch_seedvault {
 	# replace (flags & FLAG_ALLOW_BACKUP) with (FLAG_ALLOW_BACKUP)
 	find "$1" -name '*.smali' -type f -print0|xargs -0 sed -i -z -re 's|(iget [^,]+, [^,]+, Landroid/content/pm/ApplicationInfo;->flags:I\n\s*const [^,]+, 0x8000\n\s*)and-int/2addr ([^,]+), [^,[:space:]]+|\1const \2, 0x8000|g'
+}
+
+# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
+# introduced in Android 17 are never enforced
+function patch_loopback_checks {
+	local found=
+	local i
+	while IFS= read -r -d '' i; do
+		if grep -q -E '^\.method .*isLoopbackChecksEnabled\(\)Z$' "$i"; then
+			# keep the .method line, drop the body and insert one returning false before .end method
+			sed -i -re '/^\.method .*isLoopbackChecksEnabled\(\)Z$/,/^\.end method$/ {
+				/^\.method /b
+				/^\.end method$/! d
+				s|^|    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0\n\n|
+			}' "$i"
+			found=1
+		fi
+	done < <(find "$1" -name 'BpfNetMaps$Dependencies.smali' -print0)
+
+	if test -z "$found"; then
+		echo "Failed to find BpfNetMaps\$Dependencies.isLoopbackChecksEnabled() to patch" >&2
+		exit 1
+	fi
+}
+
+function patch_service_connectivity {
+	local jar="$1/javalib/service-connectivity.jar"
+	if ! test -e "$jar"; then
+		echo "service-connectivity.jar not found in the tethering APEX" >&2
+		exit 1
+	fi
+
+	local sdk=
+	sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || sdk=
+	if test -z "$sdk"; then
+		echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
+		exit 1
+	fi
+
+	# the jar is recreated by apktool, so restore its original permissions
+	local mode="$(stat -c %a "$jar")"
+	with_temp_dir "$outdir/patch-service-connectivity" patch_apk_apktool -api "$sdk" -r "$jar" "$jar" patch_loopback_checks
+	chmod "$mode" "$jar"
 }
 
 function patch_updater {
@@ -1412,6 +1468,21 @@ function make_target_files_intermediates_base {
 		if test -e "$outdir/target_files_extracted/SYSTEM/bin/adbd"; then
 			mkdir -p "$1/SYSTEM/bin"
 			patch_adbd {"$1","$outdir/target_files_extracted"}/SYSTEM/bin/adbd
+		fi
+	fi
+
+	if test -n "$cross_profile_localhost"; then
+		local patched=
+		for i in SYSTEM/apex/com.android.tethering.apex SYSTEM/apex/com.android.tethering.capex; do
+			if test -e "$outdir/target_files_extracted/$i"; then
+				mkdir -p "$1/SYSTEM/apex"
+				with_temp_dir "$outdir/patch-tethering-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_service_connectivity
+				patched=1
+			fi
+		done
+		if test -z "$patched"; then
+			echo "Failed to find the tethering APEX containing service-connectivity.jar" >&2
+			exit 1
 		fi
 	fi
 
