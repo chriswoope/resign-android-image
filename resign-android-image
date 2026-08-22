@@ -156,6 +156,7 @@ generate_keys=
 magisk=
 setx=
 hosts_url=
+version=
 sign_factory_images=ssh-keygen
 # must be as long as the original update URL
 orig_update_url="https://releases.grapheneos.org/"
@@ -175,6 +176,9 @@ while test "$#" != 0; do
 # functionality modifications
 	elif test "$1" == "--update-url"; then
 		update_url="$2"
+		shift
+	elif test "$1" == "--version"; then
+		version="$2"
 		shift
 	elif test "$1" == "--adb-root"; then
 		adb_root=1
@@ -237,6 +241,11 @@ while test "$#" != 0; do
 	fi
 	shift 1
 done
+
+if test -n "$version" && ! [[ $version =~ ^[0-9]{10}$ ]]; then
+	echo "Version must be a build number in the YYYYMMDDXX form, but is $version" >&2
+	exit 1
+fi
 
 if test "${#update_url}" != "${#orig_update_url}"; then
 	echo Currently update URL must be exactly "${#orig_update_url}" characters long since we binary patch it, but is "${#update_url}" characters long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen
@@ -630,7 +639,32 @@ function make_keys {
 }
 make_keys
 
-out_build="$build"
+out_build="${version:-$build}"
+out_factory_name="$device-$out_factory_word-$out_build"
+build_date_utc=
+if test "$out_build" != "$build"; then
+	# GrapheneOS build timestamps are the wall clock time of the release build run (the same for all
+	# devices of a release) and are not derived from the build number, so a version that was never
+	# built upstream has no timestamp to use and we have to synthesize one: use the last 100 seconds
+	# of the day of the version, one second per unit of its last two digits. This way timestamps are
+	# ordered like the build numbers they come from, are always later than those of the real releases
+	# of the same day or an earlier one, which are built during their own day, and always earlier
+	# than those of the real releases of a later day, which can thus always still be installed.
+	# The day must be taken in UTC because that's the timezone build numbers are assigned in (build
+	# 2026081300 was built at 03:27:33 UTC, 2025012701 at 04:48:18 UTC and 2025021000 at 06:01:10
+	# UTC, all on the day of their own build number, while in the local time of the GrapheneOS
+	# developers the first two would have belonged to the previous day). This makes being earlier
+	# than any later release exact rather than just likely, since a release built on a later day
+	# always has a timestamp past the end of the day of our version, no matter at what time of the
+	# day releases happen to be built; only being later than the release of the same day relies on
+	# no release ever being built in the last 100 seconds of a day, which leaves about 18 hours of
+	# margin at the times of the day at which releases are currently built.
+	if ! build_date_utc="$(date -u -d "${out_build:0:4}-${out_build:4:2}-${out_build:6:2}" +%s)"; then
+		echo "Version $out_build does not start with a valid YYYYMMDD date" >&2
+		exit 1
+	fi
+	build_date_utc="$((build_date_utc + 86400 - 100 + 10#${out_build:8}))"
+fi
 outdir="$dir/out_$build_method"
 
 mkdir -p "$outdir"
@@ -1667,11 +1701,20 @@ function make_target_files_signed {
 	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
 	# grep -vz BOOT|
 	prop_sed=""
+	if test "$out_build" != "$build"; then
+		# the build number appears both on its own and inside the fingerprints
+		prop_sed="$prop_sed; s/\b$build\b/$out_build/g"
+
+		# the updater only offers an update whose timestamp is greater than ro.build.date.utc of the
+		# running build (and update_engine and the recovery refuse to install an older one), so the
+		# timestamp must be replaced with the one synthesized for the version
+		prop_sed="$prop_sed; s/^([a-z0-9_.]*\.date\.utc)=.*/\1=$build_date_utc/; s/^([a-z0-9_.]*\.date)=.*/\1=$(date -u -d "@$build_date_utc")/"
+	fi
 	if test -n "$ro_debuggable"; then
 		prop_sed="$prop_sed; s/^ro.debuggable=.*/ro.debuggable=$ro_debuggable/"
 	fi
 	if test -n "$ro_secure"; then
-		prop_sed="; s/^ro.secure=.*/ro.secure=$ro_secure/"
+		prop_sed="$prop_sed; s/^ro.secure=.*/ro.secure=$ro_secure/"
 	fi
 	if test -n "$prop_sed"; then
 		find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -re "$prop_sed"
@@ -2121,10 +2164,11 @@ function make_factory_image {
 			ln "$dir/factory_image/$i" "$1/$i"
 		fi
 	done
+
 }
 
 function make_factory_unchecked {
-	local out="$1/$factory_name"
+	local out="$1/$out_factory_name"
 	mkdir "$out"
 	shift 1
 
@@ -2137,7 +2181,7 @@ function make_factory_unchecked {
 	if test -n "$factory_optimized"; then
 		ln "$outdir/factory_image"/* "$out"
 	else
-		local zip="$(realpath "$out/image-$device-$build.zip")"
+		local zip="$(realpath "$out/image-$device-$out_build.zip")"
 		# files in the zip must be in the proper order
 		factory_image_entries="$(<$dir/factory_image.list)"
 		(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries) || exit 1
@@ -2152,6 +2196,16 @@ function make_factory_unchecked {
 			fi
 		done
 	fi
+
+	if test "$out_build" != "$build"; then
+		# the flashing scripts refer to the build number, e.g. in the image zip name
+		# (sed -i replaces the file, so the linked originals are unaffected)
+		for i in flash-all.sh flash-all.bat script.txt; do
+			if test -e "$out/$i"; then
+				sed -i -e "s/$build/$out_build/g" "$out/$i"
+			fi
+		done
+	fi
 }
 
 function make_factory {
@@ -2159,8 +2213,8 @@ function make_factory {
 
 	result="$(set -e; with_temp_dir "$outdir/check_factory" check_factory)"
 	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
-		mkdir -p "$1/$factory_name"
-		ln --target-directory="$1/$factory_name" "$outdir/factory_unchecked/$factory_name"/*
+		mkdir -p "$1/$out_factory_name"
+		ln --target-directory="$1/$out_factory_name" "$outdir/factory_unchecked/$out_factory_name"/*
 	else
 		echo "Factory key check failed!!!"
 		exit 1
@@ -2170,7 +2224,7 @@ function make_factory {
 function check_factory {
 	mkdir "$1"/factory_image >&2
 	if test -n "$factory_optimized"; then
-		ln "$outdir/factory_unchecked/$factory_name"/* "$1/factory_image"
+		ln "$outdir/factory_unchecked/$out_factory_name"/* "$1/factory_image"
 		if test -e "$1/factory_image/super_1.img"; then
 			"$otatools/bin/simg2img" $(ls -1 "$1/factory_image"/super_*.img|sort -V) "$1/super.img" >&2
 		else
@@ -2180,7 +2234,7 @@ function check_factory {
 		"$otatools"/bin/lpunpack -p system_a "$1/super.img" "$1/lpunpack" >&2
 		mv "$1/lpunpack/system_a.img" "$1/system.img"
 	else
-		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$factory_name/image-$device-$build.zip" system.img vendor_boot.img >&2
+		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$out_factory_name/image-$device-$out_build.zip" system.img vendor_boot.img >&2
 		"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
 	fi
 	
@@ -2199,10 +2253,12 @@ function make_factory_zip {
 		local super_inserted=
 		while IFS= read -r entry; do
 			local base
+			# the build number appears in the directory name and in the image zip name
+			entry="${entry//"$build"/"$out_build"}"
 			base="$(basename "$entry")"
-			if [[ -e "$outdir/factory/$factory_name"/super_1.img || -e "$outdir/factory/$factory_name"/super.img ]] && [[ "$base" == super*.img ]]; then
+			if [[ -e "$outdir/factory/$out_factory_name"/super_1.img || -e "$outdir/factory/$out_factory_name"/super.img ]] && [[ "$base" == super*.img ]]; then
 				if test -z "$super_inserted"; then
-					(cd "$outdir/factory" && ls -1 "$factory_name"/super*.img 2>/dev/null | grep -vE '/super_empty.img$' | sort -V)
+					(cd "$outdir/factory" && ls -1 "$out_factory_name"/super*.img 2>/dev/null | grep -vE '/super_empty.img$' | sort -V)
 					super_inserted=1
 				fi
 			else
@@ -2217,15 +2273,15 @@ function make_factory_zip {
 function make_factory_zip_sig {
 	local key="$(realpath "$key_dir/factory.sec")"
 	if test "$sign_factory_images" == signify; then
-		(cd "$outdir/out"; sha256sum --tag "$device-$out_factory_word-$out_build.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+		(cd "$outdir/out"; sha256sum --tag "$out_factory_name.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
 	elif test "$sign_factory_images" == ssh-keygen; then
-		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$outdir/out/$device-$out_factory_word-$out_build.zip" > "$1" || exit 1
+		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$out_factory" > "$1" || exit 1
 	fi
 }
 
 
 out_ota="$outdir/out/$device-ota_update-$out_build.zip"
-out_factory="$outdir/out/$device-$out_factory_word-$out_build.zip"
+out_factory="$outdir/out/$out_factory_name.zip"
 
 if ! test -e "$out_ota" || ! test -e "$out_factory"; then
 	mkdir -p "$outdir/out"

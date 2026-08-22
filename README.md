@@ -35,6 +35,14 @@ Use --ota to generate an OTA, --factory-image to generate a factory image flasha
 
 You can use --generate-keys to automatically generate keys if the key directory doesn't exist.
 
+You can use --version to give the resigned images a version (build number) different from the one of the upstream build they are made from: the build number in the build.prop files (including the one embedded in the fingerprints) is replaced with it, and the generated OTA and factory images are named after it.
+
+The build timestamps (ro.\*.date.utc, plus the human readable ro.\*.date) are replaced with one synthesized from the version. This is necessary because the updater only offers an update whose timestamp in the release metadata is greater than ro.build.date.utc of the running build (the build number is only used to check that an incremental update applies to the running build), and update_engine and the recovery refuse to install a package older than the running build. It also means that you can install an older OS version over a newer one by giving it a version higher than the one currently running.
+
+Upstream timestamps cannot be reused or recomputed, since they are the wall clock time of the release build run (which is why reproducing a GrapheneOS build requires exporting the BUILD_DATETIME of the original build) and a version that upstream never built has no such time. Instead, since build numbers are YYYYMMDDXX, the timestamp used is the one of the last 100 seconds of the day of the version, one second per unit of XX. Timestamps synthesized this way are ordered like the build numbers they come from, are always later than those of the real releases of the same day or an earlier one, which are built during their own day, and always earlier than those of the real releases of a later day, which can thus always still be installed.
+
+The day is taken in UTC, which is the timezone build numbers are assigned in: the releases built at 03:27:33 UTC, 04:48:18 UTC and 06:01:10 UTC all have the build number of the UTC day they were built in, while in the local time of the GrapheneOS developers the first two would have belonged to the previous day. This is what makes being earlier than every later release hold exactly, rather than only for the times of the day at which releases happen to be built now.
+
 For debugging, use --keep to keep intermediate files and --keep-tmp to keep temporary files, --setx to show commands executed, --zip-opt 0 to speed up zipping during development.
 
 Read the rest of this document and the source code of the script to find out the other options.
