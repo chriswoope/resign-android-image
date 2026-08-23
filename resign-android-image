@@ -146,6 +146,8 @@ allowbackup=
 adb_backup=
 cross_profile_localhost=
 always_screenshot=
+no_location_ismock=
+record_anything=
 zip_opt="-6"
 dev_fast_sign=
 build_method=resign
@@ -193,6 +195,10 @@ while test "$#" != 0; do
 		cross_profile_localhost=1
 	elif test "$1" == "--always-screenshot"; then
 		always_screenshot=1
+	elif test "$1" == "--no-location-ismock"; then
+		no_location_ismock=1
+	elif test "$1" == "--record-anything"; then
+		record_anything=1
 	elif test "$1" == "--replace-boot"; then
 		replace_boot="$2"
 		shift 1
@@ -1481,6 +1487,86 @@ function patch_window_secure {
 	fi
 }
 
+# make injected mock/test-provider locations indistinguishable from real ones. The system server's mock
+# location provider marks every Location it injects by calling Location.setIsFromMockProvider(true),
+# which is the only thing that sets the HAS_MOCK_PROVIDER_MASK bit later read back by Location.isMock()
+# and Location.isFromMockProvider() and carried across the Binder parcel to every app. Delete those
+# calls so the bit is never set at the source, leaving nothing for an app to detect
+function patch_location_mock {
+	# matches the smali of a call to Location.setIsFromMockProvider(boolean), e.g.
+	#     invoke-virtual {v0, v1}, Landroid/location/Location;->setIsFromMockProvider(Z)V
+	local re='^[[:space:]]*invoke-virtual(/range)? \{[^}]*\}, Landroid/location/Location;->setIsFromMockProvider\(Z\)V$'
+	local found=
+	local i
+	while IFS= read -r -d '' i; do
+		if grep -qE "$re" "$i"; then
+			# '\#...#d' uses # as the address delimiter since the regex contains slashes
+			sed -i -re "\\#$re#d" "$i"
+			found=1
+		fi
+	done < <(find "$1" -name '*.smali' -type f -print0)
+
+	if test -z "$found"; then
+		echo "Failed to find any call to Location.setIsFromMockProvider() to patch out" >&2
+		exit 1
+	fi
+}
+
+# make every app's playback capturable through the AudioPlaybackCapture (MediaProjection) API regardless
+# of whether the app opted out. AudioAttributes.capturePolicyToFlags() is the single point that turns a
+# capture policy into the FLAG_NO_MEDIA_PROJECTION (0x400) and FLAG_NO_SYSTEM_CAPTURE (0x1000) attribute
+# flags that the audio server reads to refuse capture. Both ways of opting out funnel through it: an app
+# setting a policy on its own AudioAttributes via setAllowedCapturePolicy(), and the per-process policy
+# derived from the app's manifest android:allowAudioPlaybackCapture flag, which AudioService turns into
+# flags with this same method. Rewrite it to always clear both flags (i.e. behave as ALLOW_CAPTURE_BY_ALL
+# for everyone) so a recording app can capture the output of any app whose audio goes through the software
+# mixer, including VoIP/communication apps. Since framework.jar is loaded into every app process, this
+# clears the flags in the process that plays the audio, which is where the audio server takes them from.
+# (Audio of cellular phone calls travels a hardware path that never reaches the mixer and so cannot be
+# captured by any software change.)
+function patch_audio_capture_policy {
+	local found=
+	local i
+	while IFS= read -r -d '' i; do
+		if grep -q -E '^\.method .*capturePolicyToFlags\(II\)I$' "$i"; then
+			# keep the .method line, drop the body and insert one clearing both flags (p1 is the flags
+			# argument; -0x1401 == ~(0x400 | 0x1000)) and returning it before .end method
+			sed -i -re '/^\.method .*capturePolicyToFlags\(II\)I$/,/^\.end method$/ {
+				/^\.method /b
+				/^\.end method$/! d
+				s|^|    .locals 1\n\n    const v0, -0x1401\n\n    and-int/2addr p1, v0\n\n    return p1\n\n|
+			}' "$i"
+			found=1
+		fi
+	done < <(find "$1" -name 'AudioAttributes.smali' -print0)
+
+	if test -z "$found"; then
+		echo "Failed to find AudioAttributes.capturePolicyToFlags() to patch" >&2
+		exit 1
+	fi
+}
+
+# apply several smali patch functions in a single apktool decompile/rebuild pass: $1 is the extracted
+# smali directory, the remaining arguments are the patch function names to run against it in order
+function apply_patches {
+	local files="$1"
+	shift
+	local p
+	for p in "$@"; do
+		"$p" "$files"
+	done
+}
+
+# read ro.build.version.sdk from the extracted system image; apktool needs it to assemble patched smali.
+# sets the global get_build_sdk to the value, or errors out if it can't be read
+function get_build_sdk {
+	get_build_sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || get_build_sdk=
+	if test -z "$get_build_sdk"; then
+		echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
+		exit 1
+	fi
+}
+
 function patch_service_connectivity {
 	local jar="$1/javalib/service-connectivity.jar"
 	if ! test -e "$jar"; then
@@ -1488,12 +1574,8 @@ function patch_service_connectivity {
 		exit 1
 	fi
 
-	local sdk=
-	sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || sdk=
-	if test -z "$sdk"; then
-		echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
-		exit 1
-	fi
+	get_build_sdk
+	local sdk="$get_build_sdk"
 
 	# the jar is recreated by apktool, so restore its original permissions
 	local mode="$(stat -c %a "$jar")"
@@ -1549,24 +1631,46 @@ function make_target_files_intermediates_base {
 		fi
 	fi
 
+	# collect the smali patches to apply to services.jar and run them in a single apktool pass, since
+	# decompiling and rebuilding it is expensive and separate passes would each start from the original
+	# jar and clobber the others' output
+	local services_jar_patches=()
 	if test -n "$always_screenshot"; then
+		services_jar_patches+=(patch_window_secure)
+	fi
+	if test -n "$no_location_ismock"; then
+		services_jar_patches+=(patch_location_mock)
+	fi
+	if test "${#services_jar_patches[@]}" != 0; then
 		local jar="$outdir/target_files_extracted/SYSTEM/framework/services.jar"
 		if ! test -e "$jar"; then
-			echo "services.jar not found in the system image, cannot patch out secure windows" >&2
+			echo "services.jar not found in the system image, cannot patch it" >&2
 			exit 1
 		fi
-		local sdk=
-		sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || sdk=
-		if test -z "$sdk"; then
-			echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
-			exit 1
-		fi
+		get_build_sdk
+		local sdk="$get_build_sdk"
 		mkdir -p "$1/SYSTEM/framework"
 		# services.jar isn't APK-signed (its integrity comes from AVB), so patch it directly like a plain
 		# system file; the stale precompiled artifacts in /system/framework/oat no longer match the
 		# rewritten jar, so the runtime discards them and runs the patched dex instead
-		with_temp_dir "$outdir/patch-services-screenshot" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/services.jar patch_window_secure
+		with_temp_dir "$outdir/patch-services" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/services.jar apply_patches "${services_jar_patches[@]}"
 		mkdir_touch "$outdir/modded_paths/SYSTEM/framework/services.jar"
+	fi
+
+	if test -n "$record_anything"; then
+		local jar="$outdir/target_files_extracted/SYSTEM/framework/framework.jar"
+		if ! test -e "$jar"; then
+			echo "framework.jar not found in the system image, cannot patch it" >&2
+			exit 1
+		fi
+		get_build_sdk
+		local sdk="$get_build_sdk"
+		mkdir -p "$1/SYSTEM/framework"
+		# like services.jar, framework.jar isn't APK-signed (integrity comes from AVB) so patch it directly;
+		# the stale precompiled artifacts under /system/framework/oat no longer match the rewritten jar, so
+		# the runtime discards them and runs the patched dex instead
+		with_temp_dir "$outdir/patch-framework" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/framework.jar apply_patches patch_audio_capture_policy
+		mkdir_touch "$outdir/modded_paths/SYSTEM/framework/framework.jar"
 	fi
 
 	if test -n "$allowbackup"; then
