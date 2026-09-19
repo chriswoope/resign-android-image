@@ -146,6 +146,7 @@ allowbackup=
 adb_backup=
 cross_profile_localhost=
 always_screenshot=
+always_screenshot_surfaceview=
 no_location_ismock=
 record_anything=
 zip_opt="-6"
@@ -195,6 +196,8 @@ while test "$#" != 0; do
 		cross_profile_localhost=1
 	elif test "$1" == "--always-screenshot"; then
 		always_screenshot=1
+	elif test "$1" == "--always-screenshot-surfaceview"; then
+		always_screenshot_surfaceview=1
 	elif test "$1" == "--no-location-ismock"; then
 		no_location_ismock=1
 	elif test "$1" == "--record-anything"; then
@@ -1439,27 +1442,61 @@ function patch_seedvault {
 	find "$1" -name '*.smali' -type f -print0|xargs -0 sed -i -z -re 's|(iget [^,]+, [^,]+, Landroid/content/pm/ApplicationInfo;->flags:I\n\s*const [^,]+, 0x8000\n\s*)and-int/2addr ([^,]+), [^,[:space:]]+|\1const \2, 0x8000|g'
 }
 
-# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
-# introduced in Android 17 are never enforced
-function patch_loopback_checks {
+# bodies to pass to patch_smali_method, with the lines separated by "\n" escapes because they are
+# interpolated into a sed replacement
+smali_return_false='    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0'
+smali_return_void='    .locals 0\n\n    return-void'
+smali_return_empty_list='    .locals 1\n\n    invoke-static {}, Ljava/util/Collections;->emptyList()Ljava/util/List;\n\n    move-result-object v0\n\n    return-object v0'
+
+# replace the body of a method in decompiled smali with a new one: $1 is the directory to search, $2 is
+# the name of the smali file to look in (as a find -name pattern), $3 is a regex matching the part of the
+# ".method" line after the modifiers (i.e. the name and the signature) and $4 is the new body. Errors out
+# if no matching method is found, so that the build fails loudly instead of silently producing an
+# unpatched image if Android renames or moves the code being patched
+function patch_smali_method {
+	local dir="$1"
+	local file="$2"
+	local sig="$3"
+	local body="$4"
+
+	# the signature is interpolated into sed addresses delimited with % and the body into the replacement
+	# of a s||| command, so the signature may not contain % and the body may not contain | or & (which sed
+	# would replace with the matched text). No JVM signature contains % and no body we write here contains
+	# either of the others, but check rather than silently corrupting the smali
+	if [[ $sig == *%* ]]; then
+		echo "Internal error: smali signature contains the sed delimiter: $sig" >&2
+		exit 1
+	fi
+	if [[ $body == *"|"* || $body == *"&"* ]]; then
+		echo "Internal error: smali body for $sig contains | or &: $body" >&2
+		exit 1
+	fi
+
 	local found=
 	local i
 	while IFS= read -r -d '' i; do
-		if grep -q -E '^\.method .*isLoopbackChecksEnabled\(\)Z$' "$i"; then
-			# keep the .method line, drop the body and insert one returning false before .end method
-			sed -i -re '/^\.method .*isLoopbackChecksEnabled\(\)Z$/,/^\.end method$/ {
+		if grep -q -E "^\.method .*$sig\$" "$i"; then
+			# keep the .method line, drop the body and insert the new one before .end method
+			sed -i -re "\\%^\.method .*$sig\$%,\\%^\.end method\$% {
 				/^\.method /b
-				/^\.end method$/! d
-				s|^|    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0\n\n|
-			}' "$i"
+				\\%^\.end method\$%! d
+				s|^|$body\n\n|
+			}" "$i"
 			found=1
 		fi
-	done < <(find "$1" -name 'BpfNetMaps$Dependencies.smali' -print0)
+	done < <(find "$dir" -name "$file" -type f -print0)
 
 	if test -z "$found"; then
-		echo "Failed to find BpfNetMaps\$Dependencies.isLoopbackChecksEnabled() to patch" >&2
+		# the signature is a regex, so strip the backslashes to name the method in the error message
+		echo "Failed to find ${file%.smali}.${sig//\\/} to patch" >&2
 		exit 1
 	fi
+}
+
+# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
+# introduced in Android 17 are never enforced
+function patch_loopback_checks {
+	patch_smali_method "$1" 'BpfNetMaps$Dependencies.smali' 'isLoopbackChecksEnabled\(\)Z' "$smali_return_false"
 }
 
 # make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other
@@ -1467,24 +1504,57 @@ function patch_loopback_checks {
 # the window manager uses to mark a window's surface as secure, so screenshots, screen recording and
 # casting can then always capture every window
 function patch_window_secure {
-	local found=
-	local i
-	while IFS= read -r -d '' i; do
-		if grep -q -E '^\.method .*isSecureLocked\(\)Z$' "$i"; then
-			# keep the .method line, drop the body and insert one returning false before .end method
-			sed -i -re '/^\.method .*isSecureLocked\(\)Z$/,/^\.end method$/ {
-				/^\.method /b
-				/^\.end method$/! d
-				s|^|    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0\n\n|
-			}' "$i"
-			found=1
-		fi
-	done < <(find "$1" -name 'WindowState.smali' -print0)
+	patch_smali_method "$1" WindowState.smali 'isSecureLocked\(\)Z' "$smali_return_false"
+}
 
-	if test -z "$found"; then
-		echo "Failed to find WindowState.isSecureLocked() to patch" >&2
-		exit 1
-	fi
+# make ActivityRecord.shouldUseAppThemeSnapshot() always return false so that the task snapshot used for
+# the recents/app switcher preview is always a real screenshot of the activity. An app can blank that
+# preview without setting FLAG_SECURE at all, by calling Activity.setRecentsScreenshotEnabled(false)
+# (Activity.setDisablePreviewScreenshots() before Android 13), which only sets the flag that this method
+# reads; the method also returns true for activities with a secure window, which patch_window_secure
+# already takes care of
+function patch_recents_screenshot {
+	patch_smali_method "$1" ActivityRecord.smali 'shouldUseAppThemeSnapshot\(\)Z' "$smali_return_false"
+}
+
+# make WindowManagerService.notifyScreenshotListeners() always return an empty list so that no app is ever
+# told that a screenshot of it was taken. Android 14 added Activity.registerScreenCaptureCallback(), which
+# apps use to log the user out or nag them for exercising control over their own device; this method is
+# where the window manager both dispatches the callback to the activities on the display and reports back
+# which ones it notified, so emptying it stops the notification at its source while leaving registration
+# working, so that nothing an app does throws
+function patch_screenshot_listeners {
+	patch_smali_method "$1" WindowManagerService.smali 'notifyScreenshotListeners\(I\)Ljava/util/List;' "$smali_return_empty_list"
+}
+
+# make WindowManagerService.registerScreenRecordingCallback() always return false so that no app is ever
+# told that the screen is being recorded. Android 15 added Activity.registerScreenRecordingCallback(), the
+# screen recording counterpart of the screenshot detection neutered by patch_screenshot_listeners, which
+# ScreenRecordingCallbackController implements by watching MediaProjection and calling
+# onScreenRecordingStateChanged() on every registered callback. The return value is the current recording
+# state, so returning false both refuses the registration and reports that no recording is in progress
+function patch_screen_recording_callback {
+	patch_smali_method "$1" WindowManagerService.smali 'registerScreenRecordingCallback\(Landroid/window/IScreenRecordingCallback;\)Z' "$smali_return_false"
+}
+
+# make SurfaceView.setSecure() a no-op. It is the only way an app can get a secure surface without setting
+# FLAG_SECURE on its window: it sets the SurfaceControl.SECURE flag on the SurfaceView's own surface
+# directly, in the app's own process, which is why this must be patched in framework.jar rather than
+# alongside patch_window_secure in services.jar. The other ways of setting that flag,
+# SurfaceControl.Builder.setSecure() and SurfaceControl.Transaction.setSecure(), are hidden API that
+# ordinary apps cannot reach.
+#
+# This is why it is a separate option from --always-screenshot rather than part of it: a player of
+# DRM-protected video calls SurfaceView.setSecure(true) precisely because a hardware DRM (Widevine L1)
+# secure decoder can only output into a surface whose SurfaceControl is secure, so taking that away makes
+# such playback fail or fall back to a software (L3) path with a lower resolution. There is no way to keep
+# only half of the flag: it is the same bit that makes the surface accept hardware-protected buffers and
+# that excludes it from screen capture. Removing it also doesn't make the protected video capturable
+# anyway, since a hardware-protected buffer is unreadable by the compositor no matter what any flag says;
+# what it does gain is capturing the surfaces of apps that use setSecure() with ordinary, unprotected
+# content, purely to stop the user from taking a screenshot
+function patch_surface_secure {
+	patch_smali_method "$1" SurfaceView.smali 'setSecure\(Z\)V' "$smali_return_void"
 }
 
 # make injected mock/test-provider locations indistinguishable from real ones. The system server's mock
@@ -1525,25 +1595,8 @@ function patch_location_mock {
 # (Audio of cellular phone calls travels a hardware path that never reaches the mixer and so cannot be
 # captured by any software change.)
 function patch_audio_capture_policy {
-	local found=
-	local i
-	while IFS= read -r -d '' i; do
-		if grep -q -E '^\.method .*capturePolicyToFlags\(II\)I$' "$i"; then
-			# keep the .method line, drop the body and insert one clearing both flags (p1 is the flags
-			# argument; -0x1401 == ~(0x400 | 0x1000)) and returning it before .end method
-			sed -i -re '/^\.method .*capturePolicyToFlags\(II\)I$/,/^\.end method$/ {
-				/^\.method /b
-				/^\.end method$/! d
-				s|^|    .locals 1\n\n    const v0, -0x1401\n\n    and-int/2addr p1, v0\n\n    return p1\n\n|
-			}' "$i"
-			found=1
-		fi
-	done < <(find "$1" -name 'AudioAttributes.smali' -print0)
-
-	if test -z "$found"; then
-		echo "Failed to find AudioAttributes.capturePolicyToFlags() to patch" >&2
-		exit 1
-	fi
+	# p1 is the flags argument and -0x1401 == ~(0x400 | 0x1000)
+	patch_smali_method "$1" AudioAttributes.smali 'capturePolicyToFlags\(II\)I' '    .locals 1\n\n    const v0, -0x1401\n\n    and-int/2addr p1, v0\n\n    return p1'
 }
 
 # apply several smali patch functions in a single apktool decompile/rebuild pass: $1 is the extracted
@@ -1565,6 +1618,29 @@ function get_build_sdk {
 		echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
 		exit 1
 	fi
+}
+
+# apply smali patches to one of the jars in /system/framework: $1 is the target_files directory being
+# built, $2 is the name of the jar and the remaining arguments are the patch functions to run against it.
+# Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
+# can be patched directly like a plain system file; the stale precompiled artifacts under
+# /system/framework/oat no longer match the rewritten jar, so the runtime discards them and runs the
+# patched dex instead
+function patch_framework_jar {
+	local out="$1"
+	local jar="$2"
+	shift 2
+
+	if ! test -e "$outdir/target_files_extracted/SYSTEM/framework/$jar"; then
+		echo "$jar not found in the system image, cannot patch it" >&2
+		exit 1
+	fi
+
+	get_build_sdk
+
+	mkdir -p "$out/SYSTEM/framework"
+	with_temp_dir "$outdir/patch-${jar%.jar}" patch_apk_apktool -api "$get_build_sdk" -r {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" apply_patches "$@"
+	mkdir_touch "$outdir/modded_paths/SYSTEM/framework/$jar"
 }
 
 function patch_service_connectivity {
@@ -1631,46 +1707,28 @@ function make_target_files_intermediates_base {
 		fi
 	fi
 
-	# collect the smali patches to apply to services.jar and run them in a single apktool pass, since
-	# decompiling and rebuilding it is expensive and separate passes would each start from the original
-	# jar and clobber the others' output
+	# collect the smali patches to apply to each of the jars in /system/framework and run each jar's
+	# patches in a single apktool pass, since decompiling and rebuilding a jar is expensive and separate
+	# passes would each start from the original jar and clobber the others' output
 	local services_jar_patches=()
+	local framework_jar_patches=()
 	if test -n "$always_screenshot"; then
-		services_jar_patches+=(patch_window_secure)
+		services_jar_patches+=(patch_window_secure patch_recents_screenshot patch_screenshot_listeners patch_screen_recording_callback)
+	fi
+	if test -n "$always_screenshot_surfaceview"; then
+		framework_jar_patches+=(patch_surface_secure)
 	fi
 	if test -n "$no_location_ismock"; then
 		services_jar_patches+=(patch_location_mock)
 	fi
-	if test "${#services_jar_patches[@]}" != 0; then
-		local jar="$outdir/target_files_extracted/SYSTEM/framework/services.jar"
-		if ! test -e "$jar"; then
-			echo "services.jar not found in the system image, cannot patch it" >&2
-			exit 1
-		fi
-		get_build_sdk
-		local sdk="$get_build_sdk"
-		mkdir -p "$1/SYSTEM/framework"
-		# services.jar isn't APK-signed (its integrity comes from AVB), so patch it directly like a plain
-		# system file; the stale precompiled artifacts in /system/framework/oat no longer match the
-		# rewritten jar, so the runtime discards them and runs the patched dex instead
-		with_temp_dir "$outdir/patch-services" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/services.jar apply_patches "${services_jar_patches[@]}"
-		mkdir_touch "$outdir/modded_paths/SYSTEM/framework/services.jar"
-	fi
-
 	if test -n "$record_anything"; then
-		local jar="$outdir/target_files_extracted/SYSTEM/framework/framework.jar"
-		if ! test -e "$jar"; then
-			echo "framework.jar not found in the system image, cannot patch it" >&2
-			exit 1
-		fi
-		get_build_sdk
-		local sdk="$get_build_sdk"
-		mkdir -p "$1/SYSTEM/framework"
-		# like services.jar, framework.jar isn't APK-signed (integrity comes from AVB) so patch it directly;
-		# the stale precompiled artifacts under /system/framework/oat no longer match the rewritten jar, so
-		# the runtime discards them and runs the patched dex instead
-		with_temp_dir "$outdir/patch-framework" patch_apk_apktool -api "$sdk" -r {"$1","$outdir/target_files_extracted"}/SYSTEM/framework/framework.jar apply_patches patch_audio_capture_policy
-		mkdir_touch "$outdir/modded_paths/SYSTEM/framework/framework.jar"
+		framework_jar_patches+=(patch_audio_capture_policy)
+	fi
+	if test "${#services_jar_patches[@]}" != 0; then
+		patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
+	fi
+	if test "${#framework_jar_patches[@]}" != 0; then
+		patch_framework_jar "$1" framework.jar "${framework_jar_patches[@]}"
 	fi
 
 	if test -n "$allowbackup"; then
