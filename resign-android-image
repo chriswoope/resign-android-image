@@ -552,10 +552,8 @@ else
 fi
 
 # the version is part of the file name so that upgrading it doesn't keep using the old downloaded jar;
-# it must be new enough that the bundled smali can parse the dex files produced by recent Android
-# versions (2.6.1 and older cannot), but not so new that it requires a newer Java than the default
-# JRE of the distribution
-apktool_version=2.9.3
+# need >=3.0.1 because it fixes a bug that causes debian.mime.types to be dropped from framework.jar, breaking Vanadium
+apktool_version=3.0.3
 apktool="$var_dir/apktool-$apktool_version.jar"
 make_file "$apktool" download "https://github.com/iBotPeaches/Apktool/releases/download/v$apktool_version/apktool_$apktool_version.jar"
 
@@ -1390,7 +1388,8 @@ function patch_apk_apktool {
 			shift
 		elif test "$1" == '-api'; then
 			# needed for jars, since without a manifest apktool has no minSdkVersion to assemble the smali for
-			build_opts="$build_opts -api $2"
+			# unsupported in apktool 3.0.x
+			#build_opts="$build_opts -api $2"
 			shift 2
 		else
 			break
