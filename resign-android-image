@@ -2058,6 +2058,11 @@ function make_target_files_signed {
 
 	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
 
+	apply_modifications "$1"
+}
+
+# make the changes that the options ask for to the files in the target files directory $1
+function apply_modifications {
 	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n\n/'
 	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
 	# grep -vz BOOT|
