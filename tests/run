@@ -1,0 +1,213 @@
+#!/bin/bash
+set -euo pipefail
+
+# End to end tests of resign-android-image: each test resigns a real release with some options, in a
+# work directory of its own, and checks what it built with tools other than the ones the script
+# checks its own output with.
+#
+# Usage: tests/run [OPTIONS] [TEST...] [-- RESIGN_OPTIONS...]
+#
+#   --work DIR            the directory to make the work directories of the tests in, which needs
+#                         about 32GB of free space for each test (default: ~/resign-android-image-tests)
+#   --download-cache DIR  where to keep the downloaded upstream images, which is passed on to
+#                         resign-android-image (default: ~/.cache/resign-android-image)
+#   --device DEVICE       the device to resign a release of (default: raven)
+#   --build BUILD         the release to resign (default: the current stable release of the device)
+#   --keep                keep the work directories of the tests that pass too
+#
+# TEST is the name of a test to run, all of them by default: the tests are listed with --list.
+# RESIGN_OPTIONS are passed on to every run of resign-android-image, e.g. --no-unshare in a container.
+# A test that fails leaves its work directory, with the output of resign-android-image in log.
+
+repo="$(realpath "$(dirname "$0")/..")"
+otatools="$HOME/.resign-android-image/otatools/bin"
+
+work_root="$HOME/resign-android-image-tests"
+download_cache="${XDG_CACHE_HOME:-$HOME/.cache}/resign-android-image"
+device=raven
+build=
+keep=
+tests=()
+resign_options=()
+
+all_tests=(basic modifications)
+
+while test "$#" != 0; do
+	case "$1" in
+		--work) work_root="$2"; shift ;;
+		--download-cache) download_cache="$2"; shift ;;
+		--device) device="$2"; shift ;;
+		--build) build="$2"; shift ;;
+		--keep) keep=1 ;;
+		--list) printf '%s\n' "${all_tests[@]}"; exit 0 ;;
+		--) shift; resign_options=("$@"); break ;;
+		-*) echo "Unknown option $1" >&2; exit 1 ;;
+		*)
+			if ! [[ " ${all_tests[*]} " == *" $1 "* ]]; then
+				echo "Unknown test $1" >&2
+				exit 1
+			fi
+			tests+=("$1")
+			;;
+	esac
+	shift
+done
+if test "${#tests[@]}" == 0; then
+	tests=("${all_tests[@]}")
+fi
+
+if test -z "$build"; then
+	# the channel files hold the build number, the build timestamp, the device and the channel
+	read -r build _ < <(curl -fsS "https://releases.grapheneos.org/$device-stable")
+	wait $!
+fi
+if ! [[ $build =~ ^[0-9]{10}$ ]]; then
+	echo "Invalid build number $build" >&2
+	exit 1
+fi
+
+function fail {
+	echo "$*" >&2
+	exit 1
+}
+
+# resign the build into the work directory of the test with the given options, and set out to the
+# directory of its output
+out=
+function resign {
+	"$repo/resign-android-image" "$work/build" "$work/keys" grapheneos "$device" "$build" --generate-keys --download-cache "$download_cache" "${resign_options[@]}" "$@" > "$work/log" 2>&1 || fail "resign-android-image failed, see $work/log"
+	out="$work/build/out_resign/out"
+}
+
+# extract the images of OTA $1 into directory $2, only those of the partitions $3 if given, one
+# partition per process, reading the payload where it is in the OTA, at the offset its metadata gives
+function extract_ota {
+	mkdir -p "$2"
+	local offset partitions
+	offset="$(unzip -p "$1" META-INF/com/android/metadata|sed -nre 's/^ota-property-files=(.*,)?payload\.bin:([0-9]+):.*/\2/p')"
+	partitions="${3:-}"
+	if test -z "$partitions"; then
+		python3 "$repo/extract_android_ota_manifest/extract_android_ota_manifest.py" "$1" "$2.manifest"
+		partitions="$(< "$2.manifest/ab_partitions.txt")"
+	fi
+	xargs -d '\n' -P "$(nproc)" -I {} "$otatools/ota_extractor" -payload "$1" -payload_offset "$offset" -output_dir "$2" -partitions {} 2>/dev/null <<< "$partitions"
+}
+
+# check that OTA $1 is signed with the generated key rather than with the upstream one, and that the
+# images in it that verified boot checks are signed with the generated AVB key
+function check_ota_signed {
+	"$otatools/check_ota_package_signature" "$work/keys/releasekey.x509.pem" "$1" > /dev/null 2>&1 || fail "$1 is not signed with the generated key"
+	if "$otatools/check_ota_package_signature" "$repo/grapheneos-otacerts/$device.pem" "$1" > /dev/null 2>&1; then
+		fail "$1 is signed with the upstream key"
+	fi
+
+	extract_ota "$1" "$work/ota"
+	# which checks every image that vbmeta has a descriptor of against it too
+	"$otatools/avbtool" verify_image --image "$work/ota/vbmeta.img" --key "$work/keys/avb.pem" > "$work/avbtool.log" 2>&1 || fail "The images of $1 are not signed with the generated AVB key, see $work/avbtool.log"
+}
+
+# print the contents of file $2 in ext4 image $1
+function image_file {
+	"$otatools/debugfs_static" -R "cat $2" "$1" 2>/dev/null
+}
+
+# print the value of property $3 in the build.prop file $2 of ext4 image $1
+function image_prop {
+	image_file "$1" "$2"|sed -nre "s/^${3//./\\.}=//p"
+}
+
+# check the update server metadata generated for the OTA of build $1 with timestamp $2
+function check_metadata {
+	local channel
+	for channel in stable beta alpha testing; do
+		test "$(< "$out/$device-$channel")" == "$1 $2 $device $channel" || fail "The metadata of the $channel channel is wrong: $(< "$out/$device-$channel")"
+	done
+}
+
+function test_basic {
+	resign --ota --factory-zip
+
+	local ota="$out/$device-ota_update-$build.zip"
+	check_ota_signed "$ota"
+	check_metadata "$build" "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.date.utc)"
+	test "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.version.incremental)" == "$build" || fail "The system image is not of build $build"
+
+	local factory="$out/$device-install-$build.zip"
+	ssh-keygen -Y check-novalidate -n "factory images" -f "$work/keys/id_ed25519.pub" -s "$factory.sig" < "$factory" > /dev/null 2>&1 || fail "$factory is not signed with the generated key"
+	cmp -s <(unzip -p "$factory" "$device-install-$build/avb_pkmd.bin") "$work/keys/avb_pkmd.bin" || fail "$factory doesn't have the generated AVB key to lock the bootloader with"
+}
+
+function test_modifications {
+	# a version the build never had, with the timestamp synthesized from it
+	local version="${build::8}99"
+	if test "$version" == "$build"; then
+		version="${build::8}98"
+	fi
+	local timestamp="$(($(date -u -d "${version::4}-${version:4:2}-${version:6:2}" +%s) + 86400 - 100 + 10#${version:8}))"
+
+	# an ADB public key is the base64 of the key followed by the name of the host
+	printf '%s test@resign-android-image\n' "$(head -c 524 /dev/urandom|base64 -w 0)" > "$work/adbkey.pub"
+
+	resign --ota --version "$version" --adb-root --adb-key "$work/adbkey.pub" --adb-at-boot --allowbackup --adb-backup --cross-profile-localhost --always-screenshot --always-screenshot-surfaceview --no-location-ismock --record-anything
+
+	local ota="$out/$device-ota_update-$version.zip"
+	check_ota_signed "$ota"
+	check_metadata "$version" "$timestamp"
+
+	local system="$work/ota/system.img"
+	test "$(image_prop "$system" /system/build.prop ro.build.version.incremental)" == "$version" || fail "The system image is not of version $version"
+	test "$(image_prop "$system" /system/build.prop ro.build.date.utc)" == "$timestamp" || fail "The build timestamp is not the one synthesized for version $version"
+	image_prop "$work/ota/vendor.img" /build.prop ro.vendor.build.fingerprint|grep -qw "$version" || fail "The vendor fingerprint doesn't have version $version"
+
+	grep -qxF -f "$work/adbkey.pub" <(image_file "$system" /adb_keys) || fail "/adb_keys doesn't have the ADB key"
+	image_file "$system" /system/etc/init/resign-adb.rc|grep -q '^on early-init' || fail "There is no init script turning ADB on at boot"
+	# the compat changes can be in either of these
+	local compat="$(image_file "$system" /system/etc/compatconfig/services-platform-compat-config.xml; image_file "$system" /system/etc/compatconfig/framework-platform-compat-config.xml)"
+	grep -qE 'enableSinceTargetSdk="1"\s+id="183147249"' <<< "$compat" || fail "IGNORE_ALLOW_BACKUP_IN_D2D is not enabled for every app"
+	grep -qE 'enableSinceTargetSdk="1"\s+id="180523564"' <<< "$compat" || fail "IGNORE_FULL_BACKUP_CONTENT_IN_D2D is not enabled for every app"
+	grep -qE 'enableSinceTargetSdk="99"\s+id="171032338"' <<< "$compat" || fail "RESTRICT_ADB_BACKUP is not disabled for every app"
+
+	# the patched files are built into the image rather than left as they were
+	extract_ota "$download_cache/$device-ota_update-$build.zip" "$work/original" system
+	local jar
+	for jar in services framework; do
+		if cmp -s <(image_file "$system" "/system/framework/$jar.jar") <(image_file "$work/original/system.img" "/system/framework/$jar.jar"); then
+			fail "$jar.jar was not patched"
+		fi
+	done
+}
+
+failed=()
+for t in "${tests[@]}"; do
+	work="$work_root/$t"
+	# a directory the tests didn't make is not deleted, in case the path was wrong
+	if test -e "$work" && ! test -e "$work/.resign-android-image-test"; then
+		echo "$work exists but was not made by the tests, not deleting it" >&2
+		exit 1
+	fi
+	rm -rf "$work"
+	mkdir -p "$work"
+	touch "$work/.resign-android-image-test"
+
+	echo "RUNNING $t in $work"
+	start="$SECONDS"
+	set +e
+	( set -e; "test_$t" )
+	status="$?"
+	set -e
+	if test "$status" == 0; then
+		echo "PASSED $t in $((SECONDS - start))s"
+		if test -z "$keep"; then
+			rm -rf "$work"
+		fi
+	else
+		echo "FAILED $t in $((SECONDS - start))s"
+		failed+=("$t")
+	fi
+done
+
+if test "${#failed[@]}" != 0; then
+	echo "FAILED tests: ${failed[*]}"
+	exit 1
+fi
+echo "All tests passed"
