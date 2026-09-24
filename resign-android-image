@@ -1672,13 +1672,21 @@ function make_target_files_intermediates {
 	touch "$1"
 }
 
+# zip the target files directory $2 into $1 with the files stored uncompressed, with soong_zip as a
+# normal build does, which is several times faster than zip
+function zip_target_files {
+	local zip="$(realpath "$1")"
+	rm -f "$zip"
+	# the list of the files is read as a response file, in which a single quoted name can hold any
+	# character
+	(cd "$2" && find . -mindepth 1 -printf '%P\0'|sed -z "s/'/'\\\\''/g; s/^/'/; s/\$/'/"|tr '\0' '\n'|"$otatools/bin/soong_zip" -d -L 0 -o "$zip" -C . -r /dev/stdin)
+}
+
 function make_target_files_intermediates_zip {
 	make_file "$outdir/target_files_intermediates.done" make_target_files_intermediates
 	discard "$outdir/target_files_extracted"
 
-	local zip="$(realpath "$1")"
-	rm -f "$zip"
-	(cd "$outdir/target_files_intermediates"; zip -q -y -0 -r "$zip" *)
+	zip_target_files "$1" "$outdir/target_files_intermediates"
 }
 
 function make_target_files_signed_zip {
@@ -1987,9 +1995,7 @@ function make_target_files_zip {
 
 		make_file "$outdir/target_files/META/care_map.pb" make_care_map
 
-		local zip="$(realpath "$1")"
-		rm -f "$zip"
-		(cd "$outdir/target_files"; zip -q -y -0 -r "$zip" *) || exit 1
+		zip_target_files "$1" "$outdir/target_files"
 	else
 		make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
 		discard "$outdir/target_files_intermediates.zip"
