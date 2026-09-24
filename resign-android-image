@@ -553,15 +553,17 @@ else
 fi
 
 # the OTA and the factory images are downloaded into the work directory and discarded once extracted,
-# unless there is a cache to keep them in, so that they are downloaded only once for any number of
-# work directories
+# unless there is a cache to keep them in, so that they are downloaded and verified only once for any
+# number of work directories; the verified ones are marked by a file next to them
 if test -n "$download_cache"; then
 	mkdir -p "$download_cache"
 	ota_zip="$download_cache/${ota_url##*/}.zip"
 	factory_zip_dir="$download_cache"
+	factory_zip_ok="$download_cache/$factory_name.zip.ok"
 else
 	ota_zip="$dir/ota.zip"
 	factory_zip_dir="$dir/factory_zip"
+	factory_zip_ok="$dir/factory_zip.ok"
 fi
 
 function discard_download
@@ -886,7 +888,7 @@ function extract_root_and_system {
 }
 
 function make_extract_ota {
-	make_file "$dir/ota.zip.ok" download_ota
+	make_file "$ota_zip.ok" download_ota
 
 	# the payload is read where it is in the zip
 	unzip -q -d "$1" "$ota_zip" -x payload.bin
@@ -2113,7 +2115,7 @@ function do_ln_dir {
 function extract_factory_image {
 	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory_image.list"; then
 		if ! test -e "$dir/factory" || ! test -e "$dir/factory.list"; then
-			make_file "$dir/factory_zip.ok" download_factory
+			make_file "$factory_zip_ok" download_factory
 
 			make_dir "$dir/factory" do_unzip "$factory_zip_dir/$factory_name.zip"
 			make_file "$dir/factory.list" do_unzip_list "$factory_zip_dir/$factory_name.zip"
@@ -2373,7 +2375,7 @@ out_factory="$outdir/out/$out_factory_name.zip"
 if ! test -e "$out_ota" || ! test -e "$out_factory"; then
 	mkdir -p "$outdir/out"
 	if test -n "$parallel"; then
-		make_file "$dir/factory_zip.ok" download_factory &
+		make_file "$factory_zip_ok" download_factory &
 	fi
 
 	make_file "$outdir/target_files.zip" make_target_files_zip
