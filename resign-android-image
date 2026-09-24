@@ -1533,12 +1533,45 @@ function patch_adbd {
 		cp -a "$2" "$1"
 	fi
 
-	patch="$(mktemp)"
-	echo -n -e '\x20\x00\x80\x52' > "$patch" # mov w0,#0x1
-	# non-LLVM objdump fails to annotate calls to the PLT with the symbol name
-	llvm-objdump -d "$2"|sed -nre 's/^\s*([0-9a-f]+):\s*[0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f] [0-9a-f][0-9a-f]\s+bl\s+\0x[0-9a-f]+\s+<__android_log_is_debuggable@plt>$/\1/p'|while read i; do
-		dd if="$patch" of="$1" bs=1 count=4 seek="$((0x$i))" conv=notrunc
-	done
+	# the calls are found by their address in memory, which lld doesn't keep equal to their offset in
+	# the file, so the loadable segments are needed to turn one into the other
+	local -a seg_off=() seg_addr=() seg_size=()
+	local type off addr size
+	while read -r type off addr _ size _; do
+		if test "$type" == LOAD; then
+			seg_off+=("$off")
+			seg_addr+=("$addr")
+			seg_size+=("$size")
+		fi
+	done < <(llvm-readelf -lW "$2")
+	wait $!
+
+	# non-LLVM objdump fails to annotate calls to the PLT with the symbol name, and LLVM 17 and later
+	# print an AArch64 instruction as a single word rather than as four bytes
+	local call_re='^\s*([0-9a-f]+):\s*([0-9a-f]{8}|[0-9a-f]{2}( [0-9a-f]{2}){3})\s+bl\s+0x[0-9a-f]+\s+<__android_log_is_debuggable@plt>$'
+	local -i patched=0
+	local call i
+	while read -r call; do
+		for i in "${!seg_addr[@]}"; do
+			if (( 0x$call >= seg_addr[i] && 0x$call < seg_addr[i] + seg_size[i] )); then
+				# mov w0,#0x1
+				printf '\x20\x00\x80\x52'|dd of="$1" bs=1 seek=$((0x$call - seg_addr[i] + seg_off[i])) conv=notrunc status=none
+				patched+=1
+			fi
+		done
+	done < <(llvm-objdump -d "$2"|sed -nre "s/$call_re/\1/p")
+	wait $!
+
+	# an adbd left unpatched builds and boots fine, and only refuses to restart as root on the device,
+	# so a change in the disassembly or in adbd must make the build fail instead
+	if test "$patched" == 0; then
+		echo "Found no call to __android_log_is_debuggable to patch in $2" >&2
+		exit 1
+	fi
+	if llvm-objdump -d "$1"|grep -E "$call_re" >&2; then
+		echo "Patching $1 left the calls to __android_log_is_debuggable above in place" >&2
+		exit 1
+	fi
 }
 
 function patch_adbd_in_root {
