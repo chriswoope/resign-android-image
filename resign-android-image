@@ -1565,6 +1565,16 @@ patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' 
 #     and-int/2addr v2, v3
 patch_seedvault=(replace $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
 
+# have the system server come up believing that USB ADB is enabled, so that ADB keeps working once it
+# takes the USB gadget over from init, which it otherwise immediately takes the ADB function away from.
+# AdbService.systemReady() sets the field holding that belief from the persist.sys.usb.config property
+# and then writes what it decided to the adb_enabled setting, so turning ADB on the way the framework
+# expects would enable USB debugging in /data for good; assigning the field alone touches neither, so
+# ADB is on for as long as this boot lasts, which is all that debugging a boot needs, and the next boot
+# starts from whatever the settings say again. The original body also restores wireless debugging from
+# its own property, which is lost: it has to be enabled again in the settings after every boot
+patch_adb_at_boot=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\niput-boolean v0, p0, Lcom/android/server/adb/AdbService;.mIsAdbUsbEnabled:Z\nreturn-void')
+
 # apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
@@ -1718,6 +1728,9 @@ EOF
 	fi
 	if test -n "$record_anything"; then
 		framework_jar_patches+=("${patch_audio_capture_policy[@]}")
+	fi
+	if test -n "$adb_at_boot"; then
+		services_jar_patches+=("${patch_adb_at_boot[@]}")
 	fi
 	if test "${#services_jar_patches[@]}" != 0; then
 		patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
