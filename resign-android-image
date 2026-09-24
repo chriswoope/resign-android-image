@@ -1412,11 +1412,48 @@ function patch_apk_apktool {
 
 	echo "If Java runs out of memory, try setting JAVA_OPTS=-Xmx4g or similar"
 	java -jar "$apktool" d $opts -p "$framework_dir" -o "$work/files" "$in_zip"
+	if test -z "$resources"; then
+		# a real copy rather than hardlinks, so that the comparison below also sees in-place edits
+		cp -a "$work/files" "$work/orig_files"
+	fi
 	"$cmd" "$work/files" "$@"
+
+	# without resources, only the dex files are something apktool is needed for, so find out which ones the
+	# patch changed (before building, since that writes into the decoded directory)
+	local -A changed_dex=()
+	if test -z "$resources"; then
+		local p name
+		for p in "$work/files"/* "$work/orig_files"/*; do
+			name="${p##*/}"
+			if ! diff -r -q "$work/orig_files/$name" "$work/files/$name" >/dev/null; then
+				case "$name" in
+					smali) changed_dex[classes.dex]=1;;
+					smali_*) changed_dex["${name#smali_}.dex"]=1;;
+					*) echo "Patching $in_zip changed $name, which can't be carried over without resources" >&2; exit 1;;
+				esac
+			fi
+		done
+		if test "${#changed_dex[@]}" == 0; then
+			echo "Patching $in_zip didn't change any of its code" >&2
+			exit 1
+		fi
+	fi
+
 	java -jar "$apktool" b $build_opts -p "$framework_dir" -o "$work/out.apk" "$work/files"
-	unzip -q -x -d "$work/out" "$work/out.apk"
 	work_r="$(realpath "$work")"
-	bsdtar -tf "$work/out.apk"|(cd "$work/out" && zip -0 -@ "$work_r/out0.apk")
+	mkdir "$work/out"
+	if test -n "$resources"; then
+		unzip -q -x -d "$work/out" "$work/out.apk"
+		bsdtar -tf "$work/out.apk"|(cd "$work/out" && zip -0 -@ "$work_r/out0.apk")
+	else
+		# replace only the changed dex files in a copy of the original, so that everything the patch didn't
+		# touch (the other dex files, Java resources, the manifest, entry order and compression) stays
+		# byte-identical instead of depending on apktool faithfully reproducing it (it didn't always: apktool
+		# before 3.0.1 dropped debian.mime.types from framework.jar)
+		unzip -q -d "$work/out" "$work/out.apk" "${!changed_dex[@]}"
+		cp "$in_zip" "$work/out0.apk"
+		(cd "$work/out" && zip -q -0 "$work_r/out0.apk" "${!changed_dex[@]}")
+	fi
 	rm -f "$out"
 	"$otatools/bin/zipalign" -f -p 4 "$work_r/out0.apk" "$out"
 }
