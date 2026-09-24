@@ -14,10 +14,10 @@
 #                          \1... to refer to the groups the regex captured
 # CODE is instructions separated by newlines, assembled by the small assembler below; a register is
 # named vN, or pN for the N-th argument register as in smali. The new bytecode must fit in the old
-# one and the rest of the old one is filled with nops. A class or a method can only be named by an
-# instruction if the dex file already refers to it, since a reference cannot be added without moving
-# everything that follows it, so CODE can offer several bodies separated by a line holding "or" and
-# the first one the dex file has every reference for is the one that gets assembled.
+# one and the rest of the old one is filled with nops. A class, a method or a field can only be named
+# by an instruction if the dex file already refers to it, since a reference cannot be added without
+# moving everything that follows it, so CODE can offer several bodies separated by a line holding
+# "or" and the first one the dex file has every reference for is the one that gets assembled.
 #
 # The names of the dex files that changed are printed, and an edit that matches nothing anywhere is
 # an error, so that the build fails loudly instead of silently producing an unpatched image if
@@ -44,6 +44,7 @@ INSNS = {
     "const/4": (0x12, "11n"),
     "const/16": (0x13, "21s"),
     "new-instance": (0x22, "21c"),
+    "iput-boolean": (0x5c, "22c"),
     "invoke-direct": (0x70, "35c"),
     "invoke-static": (0x71, "35c"),
     "and-int/2addr": (0xb7, "12x"),
@@ -55,8 +56,8 @@ METHOD_RE = re.compile(r"([0-9a-f]+): +\|\[[0-9a-f]+\] (\S+)")
 # and then each instruction as its own offset, its code units and its disassembly, e.g.
 #     00010c: 1a00 0500                              |0000: const-string v0, "x" // string@0005
 INSN_RE = re.compile(r"([0-9a-f]+): [0-9a-f. ]+\|[0-9a-f]+: (.*)")
-# where an instruction referring to a class or a method ends with it and its index in the dex
-REF_RE = re.compile(r", (\S+) // (?:type|method)@([0-9a-f]+)$")
+# where an instruction referring to a class, a method or a field ends with it and its index in the dex
+REF_RE = re.compile(r", (\S+) // (?:type|method|field)@([0-9a-f]+)$")
 
 
 def fail(message):
@@ -130,8 +131,9 @@ def outs(insns):
 
 
 def missing(insns, refs):
-    """Return the classes and methods the instructions name that the dex file does not refer to"""
-    return [ref for _, _, fmt, _, ref in insns if fmt in ("21c", "35c") and ref not in refs]
+    """Return the classes, methods and fields the instructions name that the dex file does not refer
+    to"""
+    return [ref for _, _, fmt, _, ref in insns if fmt in ("21c", "22c", "35c") and ref not in refs]
 
 
 def literal(text, bits):
@@ -160,6 +162,9 @@ def encode(insns, method, refs):
             out += bytes((opcode, method.register(regs[0], 8))) + struct.pack("<H", literal(ref, 16))
         elif fmt == "21c":
             out += bytes((opcode, method.register(regs[0], 8))) + struct.pack("<H", refs[ref])
+        elif fmt == "22c":
+            out += bytes((opcode, method.register(regs[1], 4) << 4 | method.register(regs[0], 4)))
+            out += struct.pack("<H", refs[ref])
         elif fmt == "35c":
             # the argument registers are one nibble each, the fifth of them going next to the count
             if len(regs) > 5:
