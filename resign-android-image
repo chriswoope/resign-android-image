@@ -592,7 +592,8 @@ fi
 
 blkid="$otatools/bin/blkid_static"
 if ! test -x "$blkid"; then
-	blkid="$(which blkid)"
+	# by path, like debugfs, since /sbin is only in the PATH of root and of sudo
+	blkid=/sbin/blkid
 fi
 
 fsckerofs="$otatools/bin/fsck.erofs"
