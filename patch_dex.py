@@ -22,8 +22,11 @@
 # moving everything that follows it, so CODE can offer several bodies separated by a line holding
 # "or" and the first one the dex file has every reference for is the one that gets assembled.
 #
-# An edit that matches nothing anywhere is an error, so that the build fails loudly instead of
-# silently producing an unpatched image if Android renames or moves the code being patched.
+# An edit that matches nothing anywhere is an error, and so is a method edit whose name matches more
+# than the one method it is meant to patch, so that the build fails loudly instead of silently
+# producing an unpatched or over-patched image if Android renames, moves or duplicates the code being
+# patched. What was patched is reported, and the patched dex file is checked to differ from the
+# original one only where an edit meant to write.
 
 import bisect
 import hashlib
@@ -65,6 +68,11 @@ REF_RE = re.compile(r", (\S+) // (?:type|method|field)@([0-9a-f]+)$")
 
 def fail(message):
     sys.exit(f"patch_dex.py: {message}")
+
+
+def count(number, what):
+    """Return the number followed by what, made plural unless there is one of it"""
+    return f"{number} {what}" + ("" if number == 1 else "s")
 
 
 class Method:
@@ -322,8 +330,9 @@ def spans(op, target, method):
     return out
 
 
-def replace(dex, method, refs, op, code, start, end):
-    """Replace the bytecode of a method between start and end, filling what is left with nops"""
+def replace(dex, method, refs, op, code, start, end, changes):
+    """Replace the bytecode of a method between start and end, filling what is left with nops, and
+    record in changes every range of the dex file that is written"""
     bodies = [parse(body) for body in code.split("\nor\n")]
     insns = next((body for body in bodies if not missing(body, refs)), None)
     if insns is None:
@@ -344,10 +353,12 @@ def replace(dex, method, refs, op, code, start, end):
         # than registers, and debug info only needs each register it names to stay below the count)
         method.registers = needed
         struct.pack_into("<H", dex, method.offset, needed)
+        changes.append((method.offset, method.offset + 2))
     # a call also needs outs_size to declare at least as many argument registers as it passes
     if outs(insns) > method.outs:
         method.outs = outs(insns)
         struct.pack_into("<H", dex, method.offset + 4, method.outs)
+        changes.append((method.offset + 4, method.offset + 6))
 
     body, widths = encode(insns, method, refs)
     if len(body) > end - start:
@@ -357,6 +368,7 @@ def replace(dex, method, refs, op, code, start, end):
         # anything else could leave a branch into the replaced run pointing inside an instruction
         fail(f"a replacement inside a method must use single code unit instructions: {code}")
     dex[start:end] = body.ljust(end - start, b"\0")
+    changes.append((start, end))
 
     if op == "method":
         # the replacement ends in a return and a nop never throws, so the try blocks of the method
@@ -372,9 +384,11 @@ def replace(dex, method, refs, op, code, start, end):
             # non-overlapping, so give each of them one of the nops of its own
             for i in range(method.tries):
                 struct.pack_into("<IH", dex, tries + i * 8, units + i, 1)
+                changes.append((tries + i * 8, tries + i * 8 + 6))
             for offset, width, address in handlers:
                 if 0 < address < units:
                     dex[offset:offset + width] = leb128(units, width)
+                    changes.append((offset, offset + width))
 
 
 def dexes(path, data):
@@ -417,9 +431,25 @@ def dexes(path, data):
     return out
 
 
+def check(path, before, after, changes):
+    """Fail unless the only bytes of the dex file that changed are the ones that were meant to, so
+    that a write landing anywhere else stops the build rather than leaving a subtly broken dex"""
+    if len(before) != len(after):
+        fail(f"{path} is {len(after)} bytes after patching instead of {len(before)}")
+    # blanking what was meant to change leaves two identical files if nothing else did
+    masked = bytearray(before), bytearray(after)
+    for start, end in changes:
+        for one in masked:
+            one[start:end] = bytes(end - start)
+    if masked[0] != masked[1]:
+        at = next(i for i in range(len(after)) if masked[0][i] != masked[1][i])
+        fail(f"patching {path} changed the byte at {at:#x}, which no edit was meant to touch")
+
+
 def patch(path, dex, edits, matched):
-    """Apply the edits to the contents of one dex file, recording which matched, and return whether
-    they changed"""
+    """Apply the edits to the contents of one dex file, recording where each of them matched, and
+    return whether they changed"""
+    before = bytes(dex)
     logical = ranges(path, dex)
     starts = [start for start, _ in logical]
     methods, refs = disassemble(path, dex, starts)
@@ -427,29 +457,30 @@ def patch(path, dex, edits, matched):
     if methods and not any(method.insns for method in methods):
         fail(f"no instruction of {path} could be read back from its disassembly")
 
-    changed = False
+    changes = []
     for i, (op, target, code) in enumerate(edits):
         for method in methods:
             for start, end, match in spans(op, target, method):
                 replace(dex, method, refs[method.index], op,
-                        match.expand(code) if match else code, start, end)
-                matched[i] = True
-                changed = True
+                        match.expand(code) if match else code, start, end, changes)
+                matched[i].append((method.name, os.path.basename(path)))
 
-    if changed:
+    if changes:
         for start, end in logical:
             # the SHA-1 signature of everything past it up to the end of the logical dex and then
             # the Adler-32 checksum of everything past the checksum, which includes the signature,
             # have to be recomputed, or the runtime rejects the dex
             dex[start + 12:start + 32] = hashlib.sha1(dex[start + 32:end]).digest()
             dex[start + 8:start + 12] = struct.pack("<I", zlib.adler32(dex[start + 12:end]))
-    return changed
+            changes += [(start + 8, start + 12), (start + 12, start + 32)]
+        check(path, before, dex, changes)
+    return bool(changes)
 
 
 def patch_zip(path, edits, names):
     """Apply the edits to the dex files of a zip, writing back the ones that changed where they are.
     Nothing is written unless every edit matched something, so that a failure leaves the zip alone"""
-    matched = [False] * len(edits)
+    matched = [[] for _ in edits]
     # the zip is patched where it is, so it has to be written to even though the file it was copied
     # from can be read-only, as the files of an APEX payload are
     mode = os.stat(path).st_mode
@@ -472,15 +503,23 @@ def patch_zip(path, edits, names):
 
                 if not patch(dump, dex, edits, matched):
                     continue
-                if len(dex) != size:
-                    fail(f"{name} of {path} is {len(dex)} bytes after patching instead of {size}")
                 data[start:start + size] = dex
                 for crc in crcs:
                     struct.pack_into("<I", data, crc, zlib.crc32(dex))
 
-        for target, ok in zip(names, matched):
-            if not ok:
+        for (op, _, _), target, where in zip(edits, names, matched):
+            if not where:
                 fail(f"failed to find {target} to patch")
+            if op == "method":
+                # the name of a method is matched with its package and enclosing classes left out,
+                # so more than one match means it now names something else as well
+                if len(where) != 1:
+                    fail(f"{target} names {count(len(where), 'method')} rather than the one it is "
+                         "meant to patch: " + ", ".join(f"{name} in {dex}" for name, dex in where))
+                print(f"patch_dex.py: patched {where[0][0]} in {where[0][1]} of {path}", file=sys.stderr)
+            else:
+                print(f"patch_dex.py: patched {count(len(where), 'instruction run')} in "
+                      f"{count(len(set(where)), 'method')} of {path}", file=sys.stderr)
 
         f.seek(0)
         f.write(data)
