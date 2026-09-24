@@ -146,6 +146,8 @@ ro_debuggable=
 ro_secure=
 adb_root=
 recovery_adb_root=
+adb_keys=()
+adb_at_boot=
 allowbackup=
 adb_backup=
 cross_profile_localhost=
@@ -192,6 +194,11 @@ while test "$#" != 0; do
 		adb_root=1
 	elif test "$1" == "--recovery-adb-root"; then
 		recovery_adb_root=1
+	elif test "$1" == "--adb-key"; then
+		adb_keys+=("$2")
+		shift 1
+	elif test "$1" == "--adb-at-boot"; then
+		adb_at_boot=1
 	elif test "$1" == "--allowbackup"; then
 		allowbackup=1
 	elif test "$1" == "--adb-backup"; then
@@ -260,6 +267,32 @@ done
 
 if test -n "$version" && ! [[ $version =~ ^[0-9]{10}$ ]]; then
 	echo "Version must be a build number in the YYYYMMDDXX form, but is $version" >&2
+	exit 1
+fi
+
+# the keys given with --adb-key, read here rather than after a long build so that a bad file fails now
+adb_keys_content=
+for i in "${adb_keys[@]}"; do
+	while IFS= read -r k || test -n "$k"; do
+		if test -n "$k"; then
+			# an ADB public key is the base64 of the key, optionally followed by a comment naming the
+			# host: refuse anything else rather than baking in a file adbd will silently ignore, which
+			# is what an SSH public key or a private key would be
+			if ! [[ $k =~ ^[A-Za-z0-9+/]+=*( .*)?$ ]]; then
+				echo "$i is not an ADB public key file like the ~/.android/adbkey.pub of an ADB host: $k" >&2
+				exit 1
+			fi
+			adb_keys_content="$adb_keys_content$k"$'\n'
+		fi
+	done < "$i"
+done
+
+if test -n "$adb_at_boot" && test -z "$adb_keys_content"; then
+	echo "--adb-at-boot without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there" >&2
+fi
+
+if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
+	echo "--adb-key and --adb-at-boot add files to the system image, which $build_method doesn't rebuild" >&2
 	exit 1
 fi
 
@@ -371,6 +404,16 @@ function mkdir_touch
 {
 	mkdir -p "$(dirname "$1")"
 	touch "$1"
+}
+
+# write a modded_paths marker for a file that doesn't exist in the original image and has to be created
+# in it, rather than for one that is only rewritten in place: $1 is the path of the marker and the rest
+# is the mode, the owner, the group and the SELinux context to create the file with, since there is no
+# original file to take them from
+function mkdir_new_file
+{
+	mkdir -p "$(dirname "$1")"
+	echo "$2 $3 $4 $5" > "$1"
 }
 
 function do_unzip
@@ -1588,6 +1631,60 @@ function make_target_files_intermediates_base {
 			mkdir -p "$1/SYSTEM/bin"
 			patch_adbd {"$1","$outdir/target_files_extracted"}/SYSTEM/bin/adbd
 		fi
+	fi
+
+	if test -n "$adb_keys_content"; then
+		# adbd only ever looks for keys in /adb_keys and in /data/misc/adb/adb_keys, and the latter is
+		# wiped along with the user data and can only be written by a device that boots far enough to
+		# show the authorization dialog, so the keys go in the former, which on a system-as-root device
+		# is a file at the root of the system image. Its SELinux context is the one the policy of the
+		# build gives it, which is also how we check that this Android version still reads the file
+		local context="$(sed -nre 's|^/adb_keys\s+(\S+)\s*$|\1|p' "$outdir/target_files_extracted/SYSTEM/etc/selinux/plat_file_contexts")"
+		if test -z "$context"; then
+			echo "The SELinux file contexts have no entry for /adb_keys, so adbd would not be allowed to read it" >&2
+			exit 1
+		fi
+		mkdir -p "$1/ROOT"
+		# in the unlikely case that the build ships keys of its own, keep them
+		if test -e "$outdir/target_files_extracted/ROOT/adb_keys"; then
+			cat "$outdir/target_files_extracted/ROOT/adb_keys" > "$1/ROOT/adb_keys"
+		fi
+		printf '%s' "$adb_keys_content" >> "$1/ROOT/adb_keys"
+		mkdir_new_file "$outdir/modded_paths/ROOT/adb_keys" 644 0 0 "$context"
+	fi
+
+	if test -n "$adb_at_boot"; then
+		# the USB-C port setting of GrapheneOS is stored in a property, whose name is checked here so
+		# that a rename doesn't silently leave the data lines cut for the whole of the boot to debug
+		if ! grep -q -w persist.security.usb_mode "$outdir/target_files_extracted/SYSTEM/etc/selinux/plat_property_contexts"; then
+			echo "Warning: the SELinux property contexts have no entry for persist.security.usb_mode, so this build may take the USB-C port mode from something else" >&2
+		fi
+		mkdir -p "$1/SYSTEM/etc/init"
+		# init parses every .rc file in /system/etc/init
+		cat > "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
+# ADB before first unlock, added by resign-android-image --adb-at-boot
+
+# turn ADB on as early as possible, so that a boot that hangs before the system server is up can be
+# debugged as well. This sets sys.usb.config rather than persist.sys.usb.config so that nothing is
+# written to /data and the framework, which reads the persistent property once at boot to decide
+# whether USB debugging is on, keeps using and showing the setting chosen in Settings
+on early-init
+    setprop sys.usb.config adb
+
+# and again once the persistent properties have been read from /data, since the rule that mirrors
+# persist.sys.usb.config into sys.usb.config has just turned ADB back off
+on boot
+    setprop sys.usb.config adb
+    # the USB-C port setting of GrapheneOS: 3 is "charging-only when locked, except before first
+    # unlock", while the default of 2 cuts the USB data lines whenever the device is locked, which
+    # includes the whole of a boot that never reaches an unlock
+    setprop persist.security.usb_mode 3
+
+# the device has been unlocked, so the boot worked and the debugging access is not needed any more
+on property:sys.user.0.ce_available=true
+    stop adbd
+EOF
+		mkdir_new_file "$outdir/modded_paths/SYSTEM/etc/init/resign-adb.rc" 644 0 0 u:object_r:system_file:s0
 	fi
 
 	if test -n "$cross_profile_localhost"; then

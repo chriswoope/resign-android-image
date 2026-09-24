@@ -104,6 +104,20 @@ Note that no "su" binary is shipped.
 
 Security impact: an exploit can potentially become persistent by enabling network ADB and whitelisting their own keys; exploits that somehow allow unauthorized ADB access will now give root to the attacker
 
+## ADB before first unlock
+
+A device that fails to complete the boot process cannot be debugged over ADB at all: ADB is off until it is enabled in the settings, the host has to be authorized in a dialog on a screen that a broken boot may never reach, and the GrapheneOS USB-C port setting disables the USB data lines while the device is locked, which it is for the whole of a boot.
+
+By using --adb-key, you can bake an ADB public key into the image, so that the host holding the matching private key is authorized with no dialog on the device. The argument is a key file in the format of the ~/.android/adbkey.pub of an ADB host, and the option can be repeated to authorize several hosts. The keys are written to /adb_keys, which is one of the only two paths adbd reads keys from; the other one is in /data, which is wiped along with the user data and can only be written by a device that boots.
+
+By using --adb-at-boot, you can have ADB turned on during boot by an init script installed in /system/etc/init. The script sets sys.usb.config at early-init, before everything a broken boot can hang on, and again at boot, since loading the persistent properties from /data turns it back off in between. It also sets the GrapheneOS USB-C port setting (the persist.security.usb_mode property) to "charging-only when locked, except before first unlock", because its default of "charging-only when locked" cuts the USB data lines whenever the device is locked, which includes the whole of a boot that never reaches an unlock; note that this pins the setting, which is set again at every boot no matter what was chosen in Settings.
+
+Only the non-persistent sys.usb.config property is set, so that nothing is written to /data: the framework decides at boot whether USB debugging is on by looking at persist.sys.usb.config, and then writes that decision to the adb_enabled setting, so setting the persistent property instead would permanently turn on USB debugging.
+
+Once the device is unlocked for the first time, the boot has evidently worked, and the init script stops adbd again.
+
+Security impact: anyone holding the private key of a baked in ADB public key can get a shell, a root one with --adb-root, on a device that hasn't been unlocked since it booted; the USB attack surface of the device is also exposed while it is in that state, rather than being disabled along with the data lines
+
 ## Ignore allowbackup and `<full-backup-content><exclude>`
 
 The Android upstream OS contains antifeatures called "allowbackup=false" and "`<full-backup-content><exclude>`" that let application developers arbitrarily decide that the OS should not allow you to backup your own files that happen to be in the directory designated as their application's data directory.
