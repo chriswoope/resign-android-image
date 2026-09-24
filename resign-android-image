@@ -20,114 +20,7 @@ shift 5
 
 signify=signify-openbsd
 
-if test "$#" != 0 && test "$1" != "--no-unshare"; then
-	deb=()
-
-	if ! which zip >/dev/null; then
-		deb+=(zip)
-	fi
-
-	if ! which unzip >/dev/null; then
-		deb+=(unzip)
-	fi
-
-	# used internally by some tool
-	if ! which cgpt >/dev/null; then
-		deb+=(cgpt)
-	fi
-
-	if ! which cpio >/dev/null; then
-		deb+=(cpio)
-	fi
-
-	if ! which openssl >/dev/null; then
-		deb+=(openssl)
-	fi
-
-	if ! which java >/dev/null; then
-		deb+=(default-jre-headless)
-	fi
-
-	if ! which "$signify" >/dev/null; then
-		deb+=(signify-openbsd)
-	fi
-
-	if ! which git >/dev/null; then
-		deb+=(git)
-	fi
-
-	if ! which python3 >/dev/null; then
-		deb+=(python3)
-	fi
-
-	if ! which python >/dev/null; then
-		deb+=(python-is-python3)
-	fi
-
-	if ! test -e /usr/lib/python3/dist-packages/google/protobuf; then
-		deb+=(python3-protobuf)
-	fi
-
-	if ! which unshare >/dev/null; then
-		deb+=(util-linux)
-	fi
-
-	if ! which bsdtar >/dev/null; then
-		deb+=(libarchive-tools)
-	fi
-
-	if ! test -e /sbin/debugfs; then
-		deb+=(e2fsprogs)
-	fi
-
-	if ! which gcc >/dev/null; then
-		deb+=(gcc)
-	fi
-
-	if ! test -e /usr/include/errno.h; then
-		deb+=(libc6-dev)
-	fi
-
-	if ! which dexdump >/dev/null; then
-		deb+=(dexdump)
-	fi
-
-	if ! which llvm-objdump >/dev/null; then
-		deb+=(llvm)
-	fi
-
-	if ! which secilc >/dev/null; then
-		deb+=(secilc)
-	fi
-
-	if ! which curl >/dev/null; then
-		deb+=(curl)
-	fi
-
-	if ! which wget >/dev/null; then
-		deb+=(wget)
-	fi
-
-	if ! which xzcat >/dev/null; then
-		deb+=(xz-utils)
-	fi
-
-	if ! which xxd >/dev/null; then
-		deb+=(xxd)
-	fi
-
-	if ! which simg2simg >/dev/null; then
-		deb+=(android-sdk-libsparse-utils)
-	fi
-
-	if test "${#deb[@]}" != 0; then
-		sudo apt-get -y install "${deb[@]}"
-	fi
-
-	exec sudo unshare -m -- sudo -u "$USER" "$0" "$dir" "$key_dir" "$os" "$device" "$build" --no-unshare "$@"
-else
-	shift 1
-fi
+args=("$@")
 
 # vbmeta: only resign vbmeta
 # resign: resign apks and rebuild the images from their files as a normal build does
@@ -170,6 +63,8 @@ sign_factory_images=ssh-keygen
 # must be as long as the original update URL
 orig_update_url="https://releases.grapheneos.org/"
 update_url="https://noupdateurlset.invalid./"
+unshare=1
+unshared=
 
 while test "$#" != 0; do
 	if test "$1" == "-v"; then
@@ -181,6 +76,11 @@ while test "$#" != 0; do
 		want_discard=
 	elif test "$1" == "--keep-tmp"; then
 		keep_tmp=1
+	elif test "$1" == "--no-unshare"; then
+		unshare=
+	elif test "$1" == "--unshared"; then
+		# internal, passed to the script rerun in its own mount namespace
+		unshared=1
 
 # functionality modifications
 	elif test "$1" == "--update-url"; then
@@ -308,12 +208,128 @@ if test -z "$build_ota" || test -n "$build_factory" || test -z "$build_factory_z
 	parallel=
 fi
 
-# this is mainly why we unshare the mount namespace
+# install the dependencies and rerun the script in a mount namespace of its own, unless that is where
+# it already runs
+if test -z "$unshared"; then
+	deb=()
+
+	if ! which zip >/dev/null; then
+		deb+=(zip)
+	fi
+
+	if ! which unzip >/dev/null; then
+		deb+=(unzip)
+	fi
+
+	# used internally by some tool
+	if ! which cgpt >/dev/null; then
+		deb+=(cgpt)
+	fi
+
+	if ! which cpio >/dev/null; then
+		deb+=(cpio)
+	fi
+
+	if ! which openssl >/dev/null; then
+		deb+=(openssl)
+	fi
+
+	if ! which java >/dev/null; then
+		deb+=(default-jre-headless)
+	fi
+
+	if ! which "$signify" >/dev/null; then
+		deb+=(signify-openbsd)
+	fi
+
+	if ! which git >/dev/null; then
+		deb+=(git)
+	fi
+
+	if ! which python3 >/dev/null; then
+		deb+=(python3)
+	fi
+
+	if ! which python >/dev/null; then
+		deb+=(python-is-python3)
+	fi
+
+	if ! test -e /usr/lib/python3/dist-packages/google/protobuf; then
+		deb+=(python3-protobuf)
+	fi
+
+	if ! which unshare >/dev/null; then
+		deb+=(util-linux)
+	fi
+
+	if ! which bsdtar >/dev/null; then
+		deb+=(libarchive-tools)
+	fi
+
+	if ! test -e /sbin/debugfs; then
+		deb+=(e2fsprogs)
+	fi
+
+	if ! which gcc >/dev/null; then
+		deb+=(gcc)
+	fi
+
+	if ! test -e /usr/include/errno.h; then
+		deb+=(libc6-dev)
+	fi
+
+	if ! which dexdump >/dev/null; then
+		deb+=(dexdump)
+	fi
+
+	if ! which llvm-objdump >/dev/null; then
+		deb+=(llvm)
+	fi
+
+	if ! which secilc >/dev/null; then
+		deb+=(secilc)
+	fi
+
+	if ! which curl >/dev/null; then
+		deb+=(curl)
+	fi
+
+	if ! which wget >/dev/null; then
+		deb+=(wget)
+	fi
+
+	if ! which xzcat >/dev/null; then
+		deb+=(xz-utils)
+	fi
+
+	if ! which xxd >/dev/null; then
+		deb+=(xxd)
+	fi
+
+	if ! which simg2simg >/dev/null; then
+		deb+=(android-sdk-libsparse-utils)
+	fi
+
+	if test "${#deb[@]}" != 0; then
+		sudo apt-get -y install "${deb[@]}"
+	fi
+
+	if test -n "$unshare"; then
+		exec sudo unshare -m -- sudo -u "$USER" "$0" "$dir" "$key_dir" "$os" "$device" "$build" --unshared "${args[@]}"
+	fi
+fi
+
 mkdir -p "$dir/tmp"
-sudo chown root: "$dir/tmp"
-sudo chmod 1777 "$dir/tmp"
-sudo mount --bind "$dir/tmp" /tmp
-sudo mount --bind "$dir/tmp" /var/tmp
+if test -n "$unshare"; then
+	# this is mainly why we unshare the mount namespace
+	sudo chown root: "$dir/tmp"
+	sudo chmod 1777 "$dir/tmp"
+	sudo mount --bind "$dir/tmp" /tmp
+	sudo mount --bind "$dir/tmp" /var/tmp
+else
+	# only the tools that take the temporary directory from TMPDIR put their temporary files there then
+	export TMPDIR="$(realpath "$dir/tmp")"
+fi
 
 function with_temp
 {

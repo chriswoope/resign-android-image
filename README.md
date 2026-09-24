@@ -31,6 +31,8 @@ This script is intended for personal use or internal use in an organization. You
 
 The script is designed to run on Debian 11 and may work on Ubuntu and will most likely slight modifications for any other distribution; it should automatically download and install all dependencies. It can work incrementally and needs about 16GB (have 32GB free to be safe) of disk space and 15-30 minutes to do a full resign; 4GB of RAM is enough, but I'm not sure what the minimum RAM is.
 
+It reruns itself with sudo in a mount namespace of its own, in which the tmp directory of the work directory is mounted over /tmp and /var/tmp, so that the large temporary files of the build go into the work directory. Where that isn't possible, such as in a container, use --no-unshare to run it as it is, with TMPDIR set to that directory instead, which only the tools that take the temporary directory from TMPDIR follow.
+
 Use --ota to generate an OTA, --factory-image to generate a factory image flashable payload, and --factory-zip to generate a factory image.
 
 You can use --generate-keys to automatically generate keys if the key directory doesn't exist.
