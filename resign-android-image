@@ -1478,195 +1478,48 @@ function patch_adbd_in_root {
 	done
 }
 
-function patch_seedvault {
-	# replace (flags & FLAG_ALLOW_BACKUP) with (FLAG_ALLOW_BACKUP)
-	find "$1" -name '*.smali' -type f -print0|xargs -0 sed -i -z -re 's|(iget [^,]+, [^,]+, Landroid/content/pm/ApplicationInfo;->flags:I\n\s*const [^,]+, 0x8000\n\s*)and-int/2addr ([^,]+), [^,[:space:]]+|\1const \2, 0x8000|g'
-}
+# bodies of the methods replaced below, as instructions for patch_dex.py
+dex_return_false=$'const/4 v0, 0\nreturn v0'
+dex_return_void='return-void'
+# an allocated list first, since the caller of a method that used to return a list it had just built can
+# expect to be able to modify it, and the immutable one only if the dex doesn't refer to ArrayList
+dex_return_empty_list=$'new-instance v0, Ljava/util/ArrayList;\ninvoke-direct {v0}, Ljava/util/ArrayList;.<init>:()V\nreturn-object v0\nor\ninvoke-static {}, Ljava/util/Collections;.emptyList:()Ljava/util/List;\nmove-result-object v0\nreturn-object v0'
 
-# bodies to pass to patch_smali_method, with the lines separated by "\n" escapes because they are
-# interpolated into a sed replacement
-smali_return_false='    .locals 1\n\n    const/4 v0, 0x0\n\n    return v0'
-smali_return_void='    .locals 0\n\n    return-void'
-smali_return_empty_list='    .locals 1\n\n    invoke-static {}, Ljava/util/Collections;->emptyList()Ljava/util/List;\n\n    move-result-object v0\n\n    return-object v0'
-
-# replace the body of a method in decompiled smali with a new one: $1 is the directory to search, $2 is
-# the name of the smali file to look in (as a find -name pattern), $3 is a regex matching the part of the
-# ".method" line after the modifiers (i.e. the name and the signature) and $4 is the new body. Errors out
-# if no matching method is found, so that the build fails loudly instead of silently producing an
-# unpatched image if Android renames or moves the code being patched
-function patch_smali_method {
-	local dir="$1"
-	local file="$2"
-	local sig="$3"
-	local body="$4"
-
-	# the signature is interpolated into sed addresses delimited with % and the body into the replacement
-	# of a s||| command, so the signature may not contain % and the body may not contain | or & (which sed
-	# would replace with the matched text). No JVM signature contains % and no body we write here contains
-	# either of the others, but check rather than silently corrupting the smali
-	if [[ $sig == *%* ]]; then
-		echo "Internal error: smali signature contains the sed delimiter: $sig" >&2
-		exit 1
-	fi
-	if [[ $body == *"|"* || $body == *"&"* ]]; then
-		echo "Internal error: smali body for $sig contains | or &: $body" >&2
-		exit 1
-	fi
-
-	local found=
-	local i
-	while IFS= read -r -d '' i; do
-		if grep -q -E "^\.method .*$sig\$" "$i"; then
-			# keep the .method line, drop the body and insert the new one before .end method
-			sed -i -re "\\%^\.method .*$sig\$%,\\%^\.end method\$% {
-				/^\.method /b
-				\\%^\.end method\$%! d
-				s|^|$body\n\n|
-			}" "$i"
-			found=1
-		fi
-	done < <(find "$dir" -name "$file" -type f -print0)
-
-	if test -z "$found"; then
-		# the signature is a regex, so strip the backslashes to name the method in the error message
-		echo "Failed to find ${file%.smali}.${sig//\\/} to patch" >&2
-		exit 1
-	fi
-}
-
-# bytecode and register count to pass to patch_jar_dex_method: "const/4 v0, 0; return v0", i.e. return
-# false, which uses a single register (v0)
-dex_return_false=12000f00
-dex_return_false_regs=1
-
-# replace the bytecode of a method in the dex files of a jar by binary-patching them in place rather than
-# disassembling and reassembling them, so that nothing but the method changes: $1 is a work directory, $2
-# is the jar (which is replaced), $3 is the method as dexdump -d names it, i.e. "Class.name:signature"
-# with the package left out (any package matches), $4 is the new bytecode as hex and $5 is the number of
-# registers it uses. The new bytecode must fit in the old one, and the rest of the old one is overwritten
-# with nops; registers_size is raised if the bytecode needs more registers than the method declares. Errors
-# out if no matching method is found, so that the build fails loudly instead of silently producing an
-# unpatched image if Android renames or moves the code being patched
-function patch_jar_dex_method {
+# patch the code in the dex files of a jar or an APK by binary-patching them in place rather than
+# disassembling and reassembling them with apktool, so that nothing but the patched instructions changes:
+# $1 is a work directory, $2 is the zip to write, $3 is the zip to patch and the remaining arguments are
+# the edits to apply, three arguments each, as documented in patch_dex.py
+function patch_dex_in_zip {
 	local work="$1"
-	local jar="$2"
-	local method="$3"
-	local code="$4"
-	local regs="$5"
+	local out="$2"
+	local in_zip="$3"
+	shift 3
 
 	mkdir "$work/dex"
-	unzip -q -d "$work/dex" "$jar" 'classes*.dex'
+	unzip -q -d "$work/dex" "$in_zip" 'classes*.dex'
 
+	# the edits are passed on stdin since there can be any number of them, and the names of the dex files
+	# that were patched are read back, since those are the only ones that need replacing in the zip
 	local patched=()
-	local dex offsets
-	for dex in "$work/dex"/classes*.dex; do
-		# dexdump prints the offset of each method's code item before its disassembly, e.g.
-		#     0000fc:                                        |[0000fc] a.b.C.isLoopbackChecksEnabled:()Z
-		# (the method is passed through the environment since awk -v would interpret backslash escapes)
-		mapfile -t offsets < <(dexdump -d "$dex" | m="$method" awk '
-			/^[0-9a-f]+: +\|\[[0-9a-f]+\] / {
-				s = $0
-				sub(/^[^[]*\[/, "", s)
-				off = substr(s, 1, index(s, "]") - 1)
-				name = substr(s, index(s, "]") + 2)
-				if (name == ENVIRON["m"] || substr(name, length(name) - length(ENVIRON["m"])) == "." ENVIRON["m"])
-					print off
-			}')
-		if ! wait $!; then
-			echo "Failed to disassemble $dex from $jar" >&2
-			exit 1
-		fi
-		if test "${#offsets[@]}" == 0; then
-			continue
-		fi
-
-		# the code item is registers_size, ins_size, outs_size and tries_size as 16-bit values followed by
-		# debug_info_off and insns_size (in 16-bit units) as 32-bit values and then the bytecode
-		python3 - "$dex" "$code" "$regs" "${offsets[@]}" <<'EOF'
-import hashlib, struct, sys, zlib
-
-path, code, need_regs, offsets = sys.argv[1], bytes.fromhex(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
-with open(path, "rb") as f:
-	dex = bytearray(f.read())
-if dex[:4] != b"dex\n" or not dex[4:7].isdigit() or dex[7] != 0:
-	sys.exit(f"{path} is not a dex file")
-version = int(dex[4:7])
-
-# code item offsets are relative to the whole file (before 041 there is a single dex whose header is at the
-# start, so this is the same as relative to that header), so the bytecode can be patched before recomputing
-# the signatures and checksums
-for offset in offsets:
-	offset = int(offset, 16)
-	registers, _, _, _, _, insns = struct.unpack_from("<HHHHII", dex, offset)
-	# the new bytecode has to fit where the old method was; the leftover is filled with nops below
-	if len(code) > insns * 2:
-		sys.exit(f"The method at {offset:#x} in {path} is too small: {insns} code units, but the replacement needs {len(code) // 2}")
-	# raise registers_size if the bytecode needs more registers than the method declares. Growing it shifts
-	# any parameters (which occupy the highest-numbered registers) upwards, but the whole instruction stream
-	# is being replaced, so nothing refers to them by their old numbers: try_items reference code offsets
-	# rather than registers, and debug info only requires each register it mentions to stay below the count
-	if registers < need_regs:
-		struct.pack_into("<H", dex, offset, need_regs)
-	# a replacement that ends in a return never throws, so any try blocks become unreachable dead code; the
-	# code items past the bytecode are untouched and insns_size is unchanged, and every filled unit is a
-	# single code unit, so their try ranges and handler addresses stay in bounds and instruction-aligned
-	dex[offset + 16:offset + 16 + insns * 2] = code.ljust(insns * 2, b"\0")
-
-# recompute a logical dex's SHA-1 signature (over everything past it up to the end of that dex) and then its
-# Adler-32 checksum (over everything past the checksum, which includes the signature), or the runtime rejects it
-def sign(start, end):
-	dex[start + 12:start + 32] = hashlib.sha1(dex[start + 32:end]).digest()
-	dex[start + 8:start + 12] = struct.pack("<I", zlib.adler32(dex[start + 12:end]))
-
-if version in (35, 37, 38, 39, 40):
-	sign(0, len(dex))
-elif version >= 41:
-	# 041 introduced a container format that concatenates several logical dexes into one file: each keeps a
-	# full header, but header_size grows to 0x78 for the added container_size (the whole file's size) and
-	# header_offset (this header's own offset) fields, file_size becomes the logical dex's own size so the
-	# dexes tile the container, and each dex is signed over its own range only
-	container_size, = struct.unpack_from("<I", dex, 0x70)
-	if container_size != len(dex):
-		sys.exit(f"{path} declares a container size of {container_size:#x} but is {len(dex):#x} bytes")
-	off = 0
-	while off < len(dex):
-		if dex[off:off + 4] != b"dex\n":
-			sys.exit(f"{path} has no dex header at offset {off:#x}")
-		file_size, header_size = struct.unpack_from("<II", dex, off + 0x20)
-		header_offset, = struct.unpack_from("<I", dex, off + 0x74)
-		if header_size < 0x78 or header_offset != off or not 0 < file_size <= len(dex) - off:
-			sys.exit(f"{path} has a malformed dex header at offset {off:#x}")
-		sign(off, off + file_size)
-		off += file_size
-else:
-	sys.exit(f"{path} is a dex file of unsupported version {version:03d}")
-
-with open(path, "wb") as f:
-	f.write(dex)
-EOF
-		patched+=("${dex##*/}")
-	done
-
-	if test "${#patched[@]}" == 0; then
-		echo "Failed to find $method in $jar to patch" >&2
+	mapfile -t patched < <(printf '%s\0' "$@"|python3 "$data_dir/patch_dex.py" "$work/dex")
+	if ! wait $!; then
+		echo "Failed to patch the dex files of $in_zip" >&2
 		exit 1
 	fi
 
 	# replace only the patched dex files in a copy of the original, keeping them stored uncompressed
-	cp "$jar" "$work/out0.jar"
-	local out0_r="$(realpath "$work/out0.jar")"
-	(cd "$work/dex" && zip -q -0 "$out0_r" "${patched[@]}")
-	rm -f "$jar"
-	"$otatools/bin/zipalign" -f -p 4 "$work/out0.jar" "$jar"
+	cp "$in_zip" "$work/out0.zip"
+	local out0_r="$(realpath "$work/out0.zip")"
+	(cd "$work/dex" && printf '%s\n' "${patched[@]}"|zip -q -0 -@ "$out0_r")
+	rm -f "$out"
+	"$otatools/bin/zipalign" -f -p 4 "$work/out0.zip" "$out"
 }
 
 # make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other
 # app or policy request to block screen capture) are treated as non-secure: this is the single point
 # the window manager uses to mark a window's surface as secure, so screenshots, screen recording and
 # casting can then always capture every window
-function patch_window_secure {
-	patch_smali_method "$1" WindowState.smali 'isSecureLocked\(\)Z' "$smali_return_false"
-}
+patch_window_secure=(method 'WindowState.isSecureLocked:()Z' "$dex_return_false")
 
 # make ActivityRecord.shouldUseAppThemeSnapshot() always return false so that the task snapshot used for
 # the recents/app switcher preview is always a real screenshot of the activity. An app can blank that
@@ -1674,9 +1527,7 @@ function patch_window_secure {
 # (Activity.setDisablePreviewScreenshots() before Android 13), which only sets the flag that this method
 # reads; the method also returns true for activities with a secure window, which patch_window_secure
 # already takes care of
-function patch_recents_screenshot {
-	patch_smali_method "$1" ActivityRecord.smali 'shouldUseAppThemeSnapshot\(\)Z' "$smali_return_false"
-}
+patch_recents_screenshot=(method 'ActivityRecord.shouldUseAppThemeSnapshot:()Z' "$dex_return_false")
 
 # make WindowManagerService.notifyScreenshotListeners() always return an empty list so that no app is ever
 # told that a screenshot of it was taken. Android 14 added Activity.registerScreenCaptureCallback(), which
@@ -1684,9 +1535,7 @@ function patch_recents_screenshot {
 # where the window manager both dispatches the callback to the activities on the display and reports back
 # which ones it notified, so emptying it stops the notification at its source while leaving registration
 # working, so that nothing an app does throws
-function patch_screenshot_listeners {
-	patch_smali_method "$1" WindowManagerService.smali 'notifyScreenshotListeners\(I\)Ljava/util/List;' "$smali_return_empty_list"
-}
+patch_screenshot_listeners=(method 'WindowManagerService.notifyScreenshotListeners:(I)Ljava/util/List;' "$dex_return_empty_list")
 
 # make WindowManagerService.registerScreenRecordingCallback() always return false so that no app is ever
 # told that the screen is being recorded. Android 15 added Activity.registerScreenRecordingCallback(), the
@@ -1694,9 +1543,7 @@ function patch_screenshot_listeners {
 # ScreenRecordingCallbackController implements by watching MediaProjection and calling
 # onScreenRecordingStateChanged() on every registered callback. The return value is the current recording
 # state, so returning false both refuses the registration and reports that no recording is in progress
-function patch_screen_recording_callback {
-	patch_smali_method "$1" WindowManagerService.smali 'registerScreenRecordingCallback\(Landroid/window/IScreenRecordingCallback;\)Z' "$smali_return_false"
-}
+patch_screen_recording_callback=(method 'WindowManagerService.registerScreenRecordingCallback:(Landroid/window/IScreenRecordingCallback;)Z' "$dex_return_false")
 
 # make SurfaceView.setSecure() a no-op. It is the only way an app can get a secure surface without setting
 # FLAG_SECURE on its window: it sets the SurfaceControl.SECURE flag on the SurfaceView's own surface
@@ -1714,34 +1561,17 @@ function patch_screen_recording_callback {
 # anyway, since a hardware-protected buffer is unreadable by the compositor no matter what any flag says;
 # what it does gain is capturing the surfaces of apps that use setSecure() with ordinary, unprotected
 # content, purely to stop the user from taking a screenshot
-function patch_surface_secure {
-	patch_smali_method "$1" SurfaceView.smali 'setSecure\(Z\)V' "$smali_return_void"
-}
+patch_surface_secure=(method 'SurfaceView.setSecure:(Z)V' "$dex_return_void")
 
 # make injected mock/test-provider locations indistinguishable from real ones. The system server's mock
 # location provider marks every Location it injects by calling Location.setIsFromMockProvider(true),
 # which is the only thing that sets the HAS_MOCK_PROVIDER_MASK bit later read back by Location.isMock()
-# and Location.isFromMockProvider() and carried across the Binder parcel to every app. Delete those
-# calls so the bit is never set at the source, leaving nothing for an app to detect
-function patch_location_mock {
-	# matches the smali of a call to Location.setIsFromMockProvider(boolean), e.g.
-	#     invoke-virtual {v0, v1}, Landroid/location/Location;->setIsFromMockProvider(Z)V
-	local re='^[[:space:]]*invoke-virtual(/range)? \{[^}]*\}, Landroid/location/Location;->setIsFromMockProvider\(Z\)V$'
-	local found=
-	local i
-	while IFS= read -r -d '' i; do
-		if grep -qE "$re" "$i"; then
-			# '\#...#d' uses # as the address delimiter since the regex contains slashes
-			sed -i -re "\\#$re#d" "$i"
-			found=1
-		fi
-	done < <(find "$1" -name '*.smali' -type f -print0)
-
-	if test -z "$found"; then
-		echo "Failed to find any call to Location.setIsFromMockProvider() to patch out" >&2
-		exit 1
-	fi
-}
+# and Location.isFromMockProvider() and carried across the Binder parcel to every app. Replace every one
+# of those calls with nops so the bit is never set at the source, leaving nothing for an app to detect;
+# what is left behind is the code computing the arguments of the call into registers that nothing reads
+# any more, which is harmless. The disassembly of such a call looks like
+#     invoke-virtual {v0, v1}, Landroid/location/Location;.setIsFromMockProvider:(Z)V // method@1234
+patch_location_mock=(replace 'invoke-virtual(/range)? \{[^}]*\}, Landroid/location/Location;\.setIsFromMockProvider:\(Z\)V.*' '')
 
 # make every app's playback capturable through the AudioPlaybackCapture (MediaProjection) API regardless
 # of whether the app opted out. AudioAttributes.capturePolicyToFlags() is the single point that turns a
@@ -1755,34 +1585,20 @@ function patch_location_mock {
 # clears the flags in the process that plays the audio, which is where the audio server takes them from.
 # (Audio of cellular phone calls travels a hardware path that never reaches the mixer and so cannot be
 # captured by any software change.)
-function patch_audio_capture_policy {
-	# p1 is the flags argument and -0x1401 == ~(0x400 | 0x1000)
-	patch_smali_method "$1" AudioAttributes.smali 'capturePolicyToFlags\(II\)I' '    .locals 1\n\n    const v0, -0x1401\n\n    and-int/2addr p1, v0\n\n    return p1'
-}
+# p1 is the flags argument and -0x1401 == ~(0x400 | 0x1000)
+patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' $'const/16 v0, -0x1401\nand-int/2addr p1, v0\nreturn p1')
 
-# apply several smali patch functions in a single apktool decompile/rebuild pass: $1 is the extracted
-# smali directory, the remaining arguments are the patch function names to run against it in order
-function apply_patches {
-	local files="$1"
-	shift
-	local p
-	for p in "$@"; do
-		"$p" "$files"
-	done
-}
+# make every app backupable regardless of whether its manifest says android:allowBackup="false", by
+# replacing (applicationInfo.flags & FLAG_ALLOW_BACKUP) with the flag itself wherever Seedvault tests it,
+# so that the test always passes. 0x8000 doesn't fit in the literal of an and-int instruction, so it is
+# always loaded into a register first and the and can always be turned into a move of that register:
+#     iget v2, v4, Landroid/content/pm/ApplicationInfo;.flags:I // field@0123
+#     const v3, #float 0.000000 // #00008000
+#     and-int/2addr v2, v3
+patch_seedvault=(replace $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
 
-# read ro.build.version.sdk from the extracted system image; apktool needs it to assemble patched smali.
-# sets the global get_build_sdk to the value, or errors out if it can't be read
-function get_build_sdk {
-	get_build_sdk="$(read_prop "$outdir/target_files_extracted/SYSTEM" ro.build.version.sdk)" || get_build_sdk=
-	if test -z "$get_build_sdk"; then
-		echo "Failed to read ro.build.version.sdk, which is needed to assemble the patched smali" >&2
-		exit 1
-	fi
-}
-
-# apply smali patches to one of the jars in /system/framework: $1 is the target_files directory being
-# built, $2 is the name of the jar and the remaining arguments are the patch functions to run against it.
+# apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
+# built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
 # can be patched directly like a plain system file; the stale precompiled artifacts under
 # /system/framework/oat no longer match the rewritten jar, so the runtime discards them and runs the
@@ -1797,10 +1613,8 @@ function patch_framework_jar {
 		exit 1
 	fi
 
-	get_build_sdk
-
 	mkdir -p "$out/SYSTEM/framework"
-	with_temp_dir "$outdir/patch-${jar%.jar}" patch_apk_apktool -api "$get_build_sdk" -r {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" apply_patches "$@"
+	with_temp_dir "$outdir/patch-${jar%.jar}" patch_dex_in_zip {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" "$@"
 	mkdir_touch "$outdir/modded_paths/SYSTEM/framework/$jar"
 }
 
@@ -1814,7 +1628,7 @@ function patch_service_connectivity {
 	# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
 	# introduced in Android 17 are never enforced; the jar is recreated, so restore its original permissions
 	local mode="$(stat -c %a "$jar")"
-	with_temp_dir "$outdir/patch-service-connectivity" patch_jar_dex_method "$jar" 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false" "$dex_return_false_regs"
+	with_temp_dir "$outdir/patch-service-connectivity" patch_dex_in_zip "$jar" "$jar" method 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
 	chmod "$mode" "$jar"
 }
 
@@ -1866,22 +1680,22 @@ function make_target_files_intermediates_base {
 		fi
 	fi
 
-	# collect the smali patches to apply to each of the jars in /system/framework and run each jar's
-	# patches in a single apktool pass, since decompiling and rebuilding a jar is expensive and separate
-	# passes would each start from the original jar and clobber the others' output
+	# collect the dex edits to apply to each of the jars in /system/framework and run each jar's edits in
+	# a single pass, since separate passes would each start from the original jar and clobber the others'
+	# output
 	local services_jar_patches=()
 	local framework_jar_patches=()
 	if test -n "$always_screenshot"; then
-		services_jar_patches+=(patch_window_secure patch_recents_screenshot patch_screenshot_listeners patch_screen_recording_callback)
+		services_jar_patches+=("${patch_window_secure[@]}" "${patch_recents_screenshot[@]}" "${patch_screenshot_listeners[@]}" "${patch_screen_recording_callback[@]}")
 	fi
 	if test -n "$always_screenshot_surfaceview"; then
-		framework_jar_patches+=(patch_surface_secure)
+		framework_jar_patches+=("${patch_surface_secure[@]}")
 	fi
 	if test -n "$no_location_ismock"; then
-		services_jar_patches+=(patch_location_mock)
+		services_jar_patches+=("${patch_location_mock[@]}")
 	fi
 	if test -n "$record_anything"; then
-		framework_jar_patches+=(patch_audio_capture_policy)
+		framework_jar_patches+=("${patch_audio_capture_policy[@]}")
 	fi
 	if test "${#services_jar_patches[@]}" != 0; then
 		patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
@@ -1893,7 +1707,7 @@ function make_target_files_intermediates_base {
 	if test -n "$allowbackup"; then
 		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
 			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
-			with_temp_dir "$outdir/patch_seedvault" patch_apk_apktool -r {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk patch_seedvault
+			with_temp_dir "$outdir/patch_seedvault" patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
 			mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Seedvault/Seedvault.apk"
 			echo "unlink /system/priv-app/Seedvault/oat" >> "$outdir/debugfs/system"
 		fi
