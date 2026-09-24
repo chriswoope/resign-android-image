@@ -128,7 +128,7 @@ Android 17 restricts applications from connecting to localhost servers that are 
 
 By using --cross-profile-localhost, you can restore the pre-Android 17 behavior of allowing connections to localhost regardless of the profile the listening process happens to be running in.
 
-It works by decompiling service-connectivity.jar (in the tethering APEX, mounted at /apex/com.android.tethering/javalib/) with apktool, patching the smali code of BpfNetMaps$Dependencies.isLoopbackChecksEnabled() so that it returns false, which makes the connectivity service never install the eBPF loopback restrictions, and then reassembling and repacking the APEX.
+It works by overwriting the bytecode of BpfNetMaps$Dependencies.isLoopbackChecksEnabled() in service-connectivity.jar (in the tethering APEX, mounted at /apex/com.android.tethering/javalib/) so that it returns false, which makes the connectivity service never install the eBPF loopback restrictions, and then repacking the APEX. The dex file is patched in place, so nothing but that one method changes.
 
 Security impact: applications can connect to localhost servers of other profiles, as they could before Android 17; this weakens the isolation between profiles for applications that listen on localhost without authenticating their clients
 
