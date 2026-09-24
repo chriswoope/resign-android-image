@@ -867,47 +867,6 @@ function make_extract_ota_payload {
 	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$dir/ota/payload.bin"
 }
 
-function make_original_apk_cert_hashes {
-	function go {
-		outr="$(realpath "$1")"
-		(
-			cd "$3"
-			find . -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|while IFS= read -r i; do
-				echo "$i"
-				"$otatools/bin/apksigner" verify --print-certs "$i" || exit 1
-				if unzip -q -l "$i" apex_pubkey >/dev/null; then
-					if ! unzip -q -p "$i" apex_payload.img > "$outr/apex_payload.img" 2>/dev/null; then
-						if ! unzip -q -p "$i" original_apex > "$outr/original_apex"; then
-							echo "Unable to unpack APEX $i" >&2
-							exit 1
-						else
-							if ! unzip -q -p "$outr/original_apex" apex_payload.img > "$outr/apex_payload.img"; then
-								echo "Unable to unpack original APEX $i" >&2
-								exit 1
-							fi
-						fi
-					fi
-					mkdir -p "$outr/APEX"
-					if [[ $(dd if="$outr/apex_payload.img" bs=4 skip=256 count=1 status=none 2>/dev/null) == $'\xe2\xe1\xf5\xe0' ]]; then
-						"$fsckerofs" --extract="$outr/APEX" "$outr/apex_payload.img" || exit 1
-					else
-						"$debugfs" -R "rdump / $outr/APEX" "$outr/apex_payload.img" 2>/dev/null || exit 1
-					fi
-					(
-						cd "$outr"
-						sudo find ./APEX -iname '*.apk'|while IFS= read -r j; do
-							echo "$j"
-							"$otatools/bin/apksigner" verify --print-certs "$j"
-						done
-					) || exit 1
-					rm -rf "$outr/APEX"
-				fi
-			done
-		)|sed -nre '/^\./x; /^.* certificate SHA-256 digest:/ {s/.* certificate SHA-256 digest: //; G; s/(.*)\n(.*)/\2 \1/p}' |sort > "$2"
-	}
-	with_temp_dir "$outdir/apk_cert_hashes_tmp" go "$@"
-}
-
 function make_target_files_extracted {
 	make_dir "$dir/ota_payload" make_extract_ota_payload
 	discard "$dir/ota/payload.bin"
@@ -968,7 +927,6 @@ function make_target_files_extracted {
 		make_dir "$outdir/boot_inputs" make_boot_inputs
 	fi
 
-	make_file "$outdir/apk_cert_hashes.txt" make_original_apk_cert_hashes "$outdir/target_files_extracted"
 	touch "$1"
 }
 
@@ -1598,14 +1556,8 @@ function make_product_security {
 }
 
 
-function make_apkcerts {
-	join -a 1 -1 2 -o '1.1,2.2' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|grep 'apk ') <(cut -d ' ' -f 1,3 "$outdir/certs.txt")|sed -nre '/[^ ]*\/([^/ ]*) $/ {s|[^ ]*/([^/ ]*) $|name="\1" certificate="PRESIGNED" private_key="" partition=""|p; b;}; s|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" certificate="build/make/target/product/security/\2.x509.pem" private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
-}
-
-function make_apexkeys {
-	# these entries aren't actually used because they are overridden by generate-release.sh arguments
-	# if an error happens because it tries to read apk_dummy_public_key from disk, then probably the generate-release.sh being used is wrong, perhaps because we need to set branch=/android= properly for a new android version
-	join -a 1 -1 2 -o '1.1,2.3' <(sort -k 2 "$outdir/apk_cert_hashes.txt"|sed -nre 's/\.capex /.apex /; /.apex /p') "$outdir/certs.txt"|sed -nre '/[^ ]*\/([^/ ]*) $/ {s|[^ ]*/([^/ ]*) $|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="PRESIGNED" container_private_key="PRESIGNED" partition=""|p; b;}; s|[^ ]*/([^/ ]*) ([a-z].*)|name="\1" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" container_certificate="build/make/target/product/security/\2.x509.pem" container_private_key="build/make/target/product/security/\2.pk8" partition=""|p' > "$1"
+function make_apk_keys {
+	python3 "$data_dir/target_files_inputs.py" apk-keys "$outdir/target_files_extracted" "$outdir/certs.txt" "$1"
 }
 
 function make_otakeys {
@@ -1650,8 +1602,10 @@ function make_target_files_intermediates {
 	make_file "$outdir/certs.txt" make_certs
 	make_dir "$outdir/product_security" make_product_security
 	mkdir -p "$outdir/target_files_intermediates/META"
-	make_file "$outdir/target_files_intermediates/META/apkcerts.txt" make_apkcerts
-	make_file "$outdir/target_files_intermediates/META/apexkeys.txt" make_apexkeys
+	make_dir "$outdir/apk_keys" make_apk_keys
+	for i in apkcerts.txt apexkeys.txt; do
+		make_file "$outdir/target_files_intermediates/META/$i" make_hardlink "$outdir/apk_keys/$i"
+	done
 	make_file "$outdir/target_files_intermediates/META/dynamic_partitions_info.txt" make_dynamic_partitions_info
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
 	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config

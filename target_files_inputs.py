@@ -31,6 +31,11 @@
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
+#     target_files_inputs.py apk-keys TARGET_FILES CERTS META
+#         write to the META directory the apkcerts.txt and apexkeys.txt files naming the key that
+#         each APK and APEX in the TARGET_FILES directory, and each APK in the payload of an APEX, is
+#         to be signed with: the one whose certificate it is signed with in the CERTS file, or none if
+#         it is signed with a key that isn't there, to leave it signed as it is
 #
 # The SELinux labels of the files of a filesystem image come from the file_contexts of the SELinux
 # policy in the image, which is what a normal build labels the files with, so that files added to the
@@ -39,6 +44,7 @@
 # than assumed) has its original label pinned by an extra entry matching exactly its path.
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -49,6 +55,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 # the partitions whose images are built from a directory of the target files with the same name in
 # upper case and are mounted at the directory of their own name, with the system one holding the root
@@ -65,6 +72,7 @@ POLICY_FILE_CONTEXTS = (
 )
 
 EXT4_MAGIC = 0xEF53
+EROFS_MAGIC = 0xE0F5E1E2
 EXT4_ROOT_INO = 2
 
 INCOMPAT_FILETYPE = 0x2
@@ -100,11 +108,12 @@ def fail(message):
 
 
 class Ext4:
-    """The metadata of the files of an ext4 image, read straight out of the image."""
+    """The files of an ext4 image, read straight out of the image, which starts at offset in the file."""
 
-    def __init__(self, path):
+    def __init__(self, path, offset=0):
         self.path = path
         self.image = open(path, "rb")
+        self.offset = offset
         sb = self.read(1024, 1024)
         if struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
             fail(f"{path} is not an ext4 image")
@@ -123,7 +132,7 @@ class Ext4:
         self.descs = self.read((first_data_block + 1) * self.block_size, groups * self.desc_size)
 
     def read(self, offset, size):
-        self.image.seek(offset)
+        self.image.seek(self.offset + offset)
         data = self.image.read(size)
         if len(data) != size:
             fail(f"{self.path} is truncated")
@@ -175,25 +184,32 @@ class Ext4:
                 logical, length, start_hi, start_lo = struct.unpack_from("<IHHI", node, entry)
                 yield logical, length, start_hi << 32 | start_lo
 
+    def data(self, ino, raw):
+        """The contents of the file with inode number ino, which must not be stored inline."""
+        flags = struct.unpack_from("<I", raw, 0x20)[0]
+        if flags & INLINE_DATA_FL:
+            fail(f"{self.path}: the contents of inode {ino} are inline, which is not supported")
+        if not flags & EXTENTS_FL:
+            fail(f"{self.path}: inode {ino} uses block maps, which are not supported")
+        size = struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
+        data = bytearray(size)
+        for logical, length, start in self.extents(ino, raw[0x28:0x28 + 60]):
+            # an uninitialized extent, whose length has the top bit set, reads as zeroes
+            if length <= 32768:
+                chunk = self.read(start * self.block_size, min(length * self.block_size,
+                                                               size - logical * self.block_size))
+                data[logical * self.block_size:logical * self.block_size + len(chunk)] = chunk
+        return bytes(data)
+
     def dir_entries(self, ino, raw, xattrs):
         """The names and inode numbers of the entries of the directory with inode number ino."""
-        flags = struct.unpack_from("<I", raw, 0x20)[0]
-        blocks = raw[0x28:0x28 + 60]
-        if flags & INLINE_DATA_FL:
+        if struct.unpack_from("<I", raw, 0x20)[0] & INLINE_DATA_FL:
             # the inode holds the number of the parent directory and then the first entries, and the
             # rest of the entries are in an extended attribute
-            regions = [blocks[4:], xattrs.get(XATTR_INLINE_DATA, b"")]
-        elif flags & EXTENTS_FL:
-            size = struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
-            data = bytearray(size)
-            for logical, length, start in self.extents(ino, blocks):
-                # an uninitialized extent, whose length has the top bit set, reads as zeroes
-                if length <= 32768:
-                    chunk = self.read(start * self.block_size, length * self.block_size)
-                    data[logical * self.block_size:logical * self.block_size + len(chunk)] = chunk
-            regions = [bytes(data[i:i + self.block_size]) for i in range(0, size, self.block_size)]
+            regions = [raw[0x28 + 4:0x28 + 60], xattrs.get(XATTR_INLINE_DATA, b"")]
         else:
-            fail(f"{self.path}: directory inode {ino} uses block maps, which are not supported")
+            data = self.data(ino, raw)
+            regions = [data[i:i + self.block_size] for i in range(0, len(data), self.block_size)]
         for region in regions:
             offset = 0
             while offset + 8 <= len(region):
@@ -248,9 +264,9 @@ class Ext4:
             "label": os.fsdecode(xattrs[XATTR_SELINUX][:-1]),
         }
 
-    def files(self):
-        """The metadata of every file, by path relative to the root, which is "" itself."""
-        files = {}
+    def walk(self):
+        """The path relative to the root, which is "" itself, the inode number, the inode and the
+        metadata of every file."""
         paths = {}
         pending = [("", EXT4_ROOT_INO)]
         while pending:
@@ -260,14 +276,170 @@ class Ext4:
             paths[ino] = path
             raw = self.inode(ino)
             xattrs = self.xattrs(ino, raw)
-            files[path] = self.metadata(ino, raw, xattrs)
-            if files[path]["type"] == "d":
+            metadata = self.metadata(ino, raw, xattrs)
+            yield path, ino, raw, metadata
+            if metadata["type"] == "d":
                 for name, entry_ino in self.dir_entries(ino, raw, xattrs):
                     # mke2fs creates lost+found in every image it builds
                     if path == "" and name == b"lost+found":
                         continue
                     pending.append((os.path.join(path, os.fsdecode(name)), entry_ino))
-        return files
+
+    def files(self):
+        """The metadata of every file, by path relative to the root."""
+        return {path: metadata for path, _, _, metadata in self.walk()}
+
+
+APK_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
+# the IDs of the blocks of the APK signature schemes v2, v3 and v3.1 in the APK signing block
+APK_SIGNATURE_SCHEMES = (0x7109871A, 0xF05368C0, 0x1B93AD61)
+
+# where the keys named in apkcerts.txt and apexkeys.txt are, which the signing maps to the keys it
+# signs with
+KEY_PATH = "build/make/target/product/security/"
+
+
+def length_prefixed(data):
+    """The items of a sequence of items prefixed by their 32 bit length, as the APK signing block holds."""
+    offset = 0
+    while offset < len(data):
+        size = struct.unpack_from("<I", data, offset)[0]
+        if offset + 4 + size > len(data):
+            raise ValueError("truncated length-prefixed item")
+        yield data[offset + 4:offset + 4 + size]
+        offset += 4 + size
+
+
+def apk_certificates(name, apk):
+    """The DER certificate that the APK or APEX whose contents are apk is signed with."""
+    eocd = apk.rfind(b"PK\x05\x06", max(0, len(apk) - 65536 - 22))
+    if eocd < 0:
+        fail(f"{name} is not a zip file")
+    central_directory = struct.unpack_from("<I", apk, eocd + 16)[0]
+    certificates = set()
+    # the signing block of the schemes from v2 on, which ends with its size and its magic right
+    # before the central directory
+    if central_directory >= 24 and apk[central_directory - 16:central_directory] == APK_SIG_BLOCK_MAGIC:
+        block_size = struct.unpack_from("<Q", apk, central_directory - 24)[0]
+        pairs = apk[central_directory - block_size:central_directory - 24]
+        offset = 0
+        while offset < len(pairs):
+            size, scheme = struct.unpack_from("<QI", pairs, offset)
+            if scheme in APK_SIGNATURE_SCHEMES:
+                # a sequence of signers, each starting with the signed data, which holds the digests
+                # and then the certificates, the first of which is the one of the signer
+                for signers in length_prefixed(pairs[offset + 12:offset + 8 + size]):
+                    for signer in length_prefixed(signers):
+                        signed_data = length_prefixed(next(length_prefixed(signer)))
+                        next(signed_data)
+                        certificates.add(next(length_prefixed(next(signed_data))))
+            offset += 8 + size
+    if not certificates:
+        # only signed with the JAR signing of v1, whose signature is a PKCS #7 one
+        with zipfile.ZipFile(io.BytesIO(apk)) as z:
+            for entry in z.namelist():
+                if re.fullmatch(r"META-INF/[^/]*\.(RSA|DSA|EC)", entry):
+                    der = subprocess.run(["openssl", "pkcs7", "-inform", "DER", "-print_certs", "-outform", "DER"],
+                                         input=z.read(entry), check=True, stdout=subprocess.PIPE).stdout
+                    certificates.add(der)
+    if len(certificates) != 1:
+        fail(f"{name} is signed with {len(certificates)} certificates rather than one")
+    return certificates.pop()
+
+
+def zip_member(path, member, tmp):
+    """The path and the offset in it of the contents of member of the zip file at path, extracted to a
+    file in tmp unless stored uncompressed."""
+    with zipfile.ZipFile(path) as z:
+        info = z.getinfo(member)
+        if info.compress_type == zipfile.ZIP_STORED:
+            with open(path, "rb") as f:
+                f.seek(info.header_offset)
+                header = f.read(30)
+            name_size, extra_size = struct.unpack_from("<HH", header, 26)
+            return path, info.header_offset + 30 + name_size + extra_size
+        return z.extract(info, tempfile.mkdtemp(dir=tmp)), 0
+
+
+def apex_apks(apex, tmp):
+    """The path and the contents of every APK in the payload of the APEX or compressed APEX apex."""
+    with zipfile.ZipFile(apex) as z:
+        # a compressed APEX holds the original one as a whole
+        if "original_apex" in z.namelist():
+            apex = z.extract("original_apex", tempfile.mkdtemp(dir=tmp))
+    image, offset = zip_member(apex, "apex_payload.img", tmp)
+    with open(image, "rb") as f:
+        f.seek(offset + 1024)
+        superblock = f.read(1024)
+    if struct.unpack_from("<H", superblock, 0x38)[0] == EXT4_MAGIC:
+        payload = Ext4(image, offset)
+        for path, ino, raw, metadata in payload.walk():
+            if metadata["type"] == "f" and path.endswith(".apk"):
+                yield path, payload.data(ino, raw)
+    elif struct.unpack_from("<I", superblock, 0)[0] == EROFS_MAGIC:
+        out = tempfile.mkdtemp(dir=tmp)
+        if offset:
+            with zipfile.ZipFile(apex) as z:
+                image = z.extract("apex_payload.img", out)
+        subprocess.run(["fsck.erofs", f"--extract={out}/payload", image], check=True, stdout=subprocess.DEVNULL)
+        for root, _, names in os.walk(out + "/payload"):
+            for name in names:
+                if name.endswith(".apk"):
+                    with open(os.path.join(root, name), "rb") as f:
+                        yield os.path.relpath(os.path.join(root, name), out + "/payload"), f.read()
+    else:
+        fail(f"the payload of {apex} is neither an ext4 nor an erofs image")
+
+
+def apk_keys(target_files, certs, meta):
+    """Write to the directory meta the apkcerts.txt and apexkeys.txt files of the target files
+    directory target_files, which name the key that each APK and APEX has been signed with, as found
+    by the certificate it is signed with in the certs file, whose lines hold the SHA-256 digest of a
+    certificate, the certificate and the name of its key."""
+    keys = {}
+    with open(certs) as f:
+        for line in f:
+            digest, _, key = line.split()
+            keys[digest] = key
+
+    apks = {}
+    apexes = {}
+
+    def add(found, name, where, apk):
+        key = keys.get(hashlib.sha256(apk_certificates(where, apk)).hexdigest())
+        if found.setdefault(name, (key, where))[0] != key:
+            fail(f"{where} and {found[name][1]} have the same name but are signed with different keys, "
+                 "which target files cannot hold")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for root, dirs, names in os.walk(target_files):
+            dirs.sort()
+            for name in sorted(names):
+                path = os.path.join(root, name)
+                if name.endswith((".apex", ".capex")):
+                    with open(path, "rb") as f:
+                        # the signing names a compressed APEX after the APEX it holds
+                        add(apexes, re.sub(r"\.capex$", ".apex", name), path, f.read())
+                    for inner, apk in apex_apks(path, tmp):
+                        add(apks, os.path.basename(inner), f"{path}:{inner}", apk)
+                elif name.endswith(".apk"):
+                    with open(path, "rb") as f:
+                        add(apks, name, path, f.read())
+
+    # an APK or APEX signed with any other key is left signed as it is
+    def certificate(prefix, key, presigned_private_key):
+        if key is None:
+            return f'{prefix}certificate="PRESIGNED" {prefix}private_key="{presigned_private_key}"'
+        return f'{prefix}certificate="{KEY_PATH}{key}.x509.pem" {prefix}private_key="{KEY_PATH}{key}.pk8"'
+
+    with text(os.path.join(meta, "apkcerts.txt"), "w") as f:
+        for name, (key, _) in sorted(apks.items()):
+            f.write(f'name="{name}" {certificate("", key, "")} partition=""\n')
+    with text(os.path.join(meta, "apexkeys.txt"), "w") as f:
+        for name, (key, _) in sorted(apexes.items()):
+            # the payload keys are the ones the release script gives for each APEX
+            f.write(f'name="{name}" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" '
+                    f'{certificate("container_", key, "PRESIGNED")} partition=""\n')
 
 
 def partition_prefix(partition):
@@ -760,9 +932,12 @@ def main():
         boot_verify(args[1], args[2])
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
+    elif len(args) == 4 and args[0] == "apk-keys":
+        apk_keys(args[1], args[2], args[3])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
-             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE")
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
+             "apk-keys TARGET_FILES CERTS META")
 
 
 if __name__ == "__main__":
