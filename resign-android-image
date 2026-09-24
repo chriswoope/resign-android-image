@@ -1389,6 +1389,10 @@ function make_target_files_extracted {
 	touch "$1"
 }
 
+function deapexer {
+	"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" "$@"
+}
+
 function patch_apex {
 	local work="$1"
 	local out="$2"
@@ -1396,14 +1400,14 @@ function patch_apex {
 	local cmd="$4"
 	shift 4
 
-	type="$("$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" info --print-type "$apex")"
+	type="$(deapexer info --print-type "$apex")"
 	if test "$type" == COMPRESSED; then
-		"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" decompress --input "$apex" --output "$work"/original.apex
+		deapexer decompress --input "$apex" --output "$work"/original.apex
 	else
 		ln "$apex" "$work"/original.apex
 	fi
 
-	"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" extract "$work"/original.apex "$work"/payload
+	deapexer extract "$work"/original.apex "$work"/payload
 	for i in apex_manifest.pb apex_manifest.json lost+found; do
 		if test -d "$work/payload/$i"; then
 			rmdir "$work/payload/$i"
