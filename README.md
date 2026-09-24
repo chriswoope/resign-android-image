@@ -35,6 +35,8 @@ It reruns itself with sudo in a mount namespace of its own, in which the tmp dir
 
 Use --ota to generate an OTA, --factory-image to generate a factory image flashable payload, and --factory-zip to generate a factory image.
 
+The upstream OTA and factory images are downloaded into the work directory and deleted once extracted, unless --keep is given; use --download-cache DIR to download them into DIR instead and keep them there, so that they are downloaded only once for any number of work directories.
+
 You can use --generate-keys to automatically generate keys if the key directory doesn't exist.
 
 You can use --version to give the resigned images a version (build number) different from the one of the upstream build they are made from: the build number in the build.prop files (including the one embedded in the fingerprints) is replaced with it, and the generated OTA and factory images are named after it.
