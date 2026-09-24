@@ -800,6 +800,32 @@ function update_fs_image {
 			shift 3
 		done
 
+		# write $1 over the blocks of $2, writing only the blocks that differ, reading the blocks past
+		# the end of $2 as zeroes and then growing it to the size of $1. Only writing what differs
+		# means that a block that is already right is never written, which matters because the image
+		# has the shared_blocks feature patched out below and so a write to a block that e2fsdroid
+		# shared with another file would change that file too, and that a block that the file has a
+		# hole for is only allocated if it has to hold something other than zeroes. dd conv=sparse
+		# skips every zeroed block of the input instead, which leaves the previous contents of the
+		# block behind rather than zeroing it
+		function write_blocks {
+			python3 -c '
+import sys
+
+BLOCK = 4096
+
+with open(sys.argv[1], "rb") as src, open(sys.argv[2], "r+b") as dst:
+    at = 0
+    while block := src.read(BLOCK):
+        dst.seek(at)
+        if block != dst.read(len(block)).ljust(len(block), b"\0"):
+            dst.seek(at)
+            dst.write(block)
+        at += len(block)
+    dst.truncate(at)
+' "$1" "$2"
+		}
+
 		fs_features=
 		block_count=1
 		free_blocks=0
@@ -1038,9 +1064,8 @@ function update_fs_image {
 					times="$(stat -c '%X %Y %Z' -- "$orig")"
 				fi
 
-				# the dd options must be exactly like these so that we don't try to allocate any new blocks if size doesn't increase
 				# note that the file has either 0 size in the modded or orig_size != mod_size case, or otherwise it has size orig_size = mod_size
-				dd if="$mod" of="$orig" bs=4096 conv=notrunc,sparse >/dev/null
+				write_blocks "$mod" "$orig"
 				read atime mtime ctime <<<"$times"
 				touch -d "@$mtime" -m -- "$orig"
 				touch -d "@$atime" -a -- "$orig"
