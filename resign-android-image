@@ -1593,10 +1593,13 @@ version = int(dex[4:7])
 # the signatures and checksums
 for offset in offsets:
 	offset = int(offset, 16)
-	registers, _, _, tries, _, insns = struct.unpack_from("<HHHHII", dex, offset)
-	# the replacement bytecode only uses v0; with no tries, no exception handler can jump into the nops
-	if registers < 1 or tries != 0 or len(code) > insns * 2:
-		sys.exit(f"The method at {offset:#x} in {path} can't be replaced: {registers} registers, {tries} tries, {insns} code units")
+	registers, _, _, _, _, insns = struct.unpack_from("<HHHHII", dex, offset)
+	# the replacement bytecode only uses v0 and never throws, so any try blocks become dead code: their
+	# handlers are unreachable, and since insns_size is unchanged and every unit left behind (const/4,
+	# return, nop) is a one-unit instruction, the try ranges and handler addresses that follow the bytecode
+	# stay in bounds and instruction-aligned, so they need no fixup
+	if registers < 1 or len(code) > insns * 2:
+		sys.exit(f"The method at {offset:#x} in {path} can't be replaced: {registers} registers, {insns} code units")
 	dex[offset + 16:offset + 16 + insns * 2] = code.ljust(insns * 2, b"\0")
 
 # recompute a logical dex's SHA-1 signature (over everything past it up to the end of that dex) and then its
