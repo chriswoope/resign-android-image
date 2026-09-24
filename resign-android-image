@@ -1577,18 +1577,20 @@ function patch_jar_dex_method {
 		fi
 
 		# the code item is registers_size, ins_size, outs_size and tries_size as 16-bit values followed by
-		# debug_info_off and insns_size (in 16-bit units) as 32-bit values and then the bytecode. After
-		# patching, the SHA-1 signature of everything past it and then the Adler-32 checksum of everything
-		# past the checksum itself must be recomputed, or the runtime rejects the dex
+		# debug_info_off and insns_size (in 16-bit units) as 32-bit values and then the bytecode
 		python3 - "$dex" "$code" "${offsets[@]}" <<'EOF'
 import hashlib, struct, sys, zlib
 
 path, code, offsets = sys.argv[1], bytes.fromhex(sys.argv[2]), sys.argv[3:]
 with open(path, "rb") as f:
 	dex = bytearray(f.read())
-# newer versions (041+) can contain several dex files each with their own header, so refuse them
-if dex[:4] != b"dex\n" or dex[4:8] not in (b"035\0", b"037\0", b"038\0", b"039\0", b"040\0"):
-	sys.exit(f"{path} is not a dex file of a supported version")
+if dex[:4] != b"dex\n" or not dex[4:7].isdigit() or dex[7] != 0:
+	sys.exit(f"{path} is not a dex file")
+version = int(dex[4:7])
+
+# code item offsets are relative to the whole file (before 041 there is a single dex whose header is at the
+# start, so this is the same as relative to that header), so the bytecode can be patched before recomputing
+# the signatures and checksums
 for offset in offsets:
 	offset = int(offset, 16)
 	registers, _, _, tries, _, insns = struct.unpack_from("<HHHHII", dex, offset)
@@ -1596,8 +1598,36 @@ for offset in offsets:
 	if registers < 1 or tries != 0 or len(code) > insns * 2:
 		sys.exit(f"The method at {offset:#x} in {path} can't be replaced: {registers} registers, {tries} tries, {insns} code units")
 	dex[offset + 16:offset + 16 + insns * 2] = code.ljust(insns * 2, b"\0")
-dex[12:32] = hashlib.sha1(dex[32:]).digest()
-dex[8:12] = struct.pack("<I", zlib.adler32(dex[12:]))
+
+# recompute a logical dex's SHA-1 signature (over everything past it up to the end of that dex) and then its
+# Adler-32 checksum (over everything past the checksum, which includes the signature), or the runtime rejects it
+def sign(start, end):
+	dex[start + 12:start + 32] = hashlib.sha1(dex[start + 32:end]).digest()
+	dex[start + 8:start + 12] = struct.pack("<I", zlib.adler32(dex[start + 12:end]))
+
+if version in (35, 37, 38, 39, 40):
+	sign(0, len(dex))
+elif version >= 41:
+	# 041 introduced a container format that concatenates several logical dexes into one file: each keeps a
+	# full header, but header_size grows to 0x78 for the added container_size (the whole file's size) and
+	# header_offset (this header's own offset) fields, file_size becomes the logical dex's own size so the
+	# dexes tile the container, and each dex is signed over its own range only
+	container_size, = struct.unpack_from("<I", dex, 0x70)
+	if container_size != len(dex):
+		sys.exit(f"{path} declares a container size of {container_size:#x} but is {len(dex):#x} bytes")
+	off = 0
+	while off < len(dex):
+		if dex[off:off + 4] != b"dex\n":
+			sys.exit(f"{path} has no dex header at offset {off:#x}")
+		file_size, header_size = struct.unpack_from("<II", dex, off + 0x20)
+		header_offset, = struct.unpack_from("<I", dex, off + 0x74)
+		if header_size < 0x78 or header_offset != off or not 0 < file_size <= len(dex) - off:
+			sys.exit(f"{path} has a malformed dex header at offset {off:#x}")
+		sign(off, off + file_size)
+		off += file_size
+else:
+	sys.exit(f"{path} is a dex file of unsupported version {version:03d}")
+
 with open(path, "wb") as f:
 	f.write(dex)
 EOF
