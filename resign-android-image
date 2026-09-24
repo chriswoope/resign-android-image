@@ -1416,15 +1416,29 @@ function patch_apex {
 
 	unzip -q -x -d "$work/apex" "$work"/original.apex
 
+	# apexer takes the SELinux file contexts, the uid, gid and mode of every file and the type of the
+	# filesystem to build from the build info of the original APEX, which is the only thing that can
+	# restore what extracting the payload dropped: deapexer restores neither the owners nor the
+	# extended attributes, so without it the repacked APEX would silently lose every SELinux label
+	# (which is how the bpf programs of the tethering APEX are allowed to be loaded) and the setuid
+	# bit and owner of files like its bin/for-system/clatd
+	if ! test -e "$work/apex/apex_build_info.pb"; then
+		echo "$apex has no apex_build_info.pb, so it cannot be repacked without losing the file contexts and ownership of its payload" >&2
+		exit 1
+	fi
+
 	args=()
 	if test -e "$work/apex/apex_manifest.json"; then
 		args+=(--manifest_json "$work/apex/apex_manifest.json")
 	fi
-	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
+	# apexer always signs the payload with SHA256_RSA4096, which fails with a 2048 bit AVB key, so
+	# pass the algorithm of the key on to avbtool, which takes the last --algorithm it is given
+	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --signing_args "--algorithm $(get_avb_algorithm)" --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
 
 	cp "$work/original.apex" "$work/modded.apex"
 	modded_apex_r="$(realpath "$work/modded.apex")"
 	(cd "$work" && zip -0 "$modded_apex_r" apex_payload.img)
+	# apexd mounts the payload out of the APEX where it is, so it has to stay page aligned in it
 	"$otatools/bin/zipalign" -f 4096 "$work/modded.apex" "$work/aligned.apex"
 
 	if test "$type" == COMPRESSED; then
@@ -1433,7 +1447,7 @@ function patch_apex {
 		cp -a "$work"/aligned.apex "$aligned_tmp"
 		"$otatools/bin/apex_compression_tool" compress --apex_compression_tool_path "$otatools/bin:$PATH" --input "$aligned_tmp" --output "$work/out.apex"
 	else
-		ln "$work"/modded.apex "$work/out.apex"
+		ln "$work"/aligned.apex "$work/out.apex"
 	fi
 	ln -f "$work/out.apex" "$out"
 }
