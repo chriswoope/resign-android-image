@@ -76,7 +76,7 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(libarchive-tools)
 	fi
 
-	if ! test -e /sbin/resize2fs >/dev/null; then
+	if ! test -e /sbin/debugfs; then
 		deb+=(e2fsprogs)
 	fi
 
@@ -120,10 +120,6 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(android-sdk-libsparse-utils)
 	fi
 
-	if ! which attr >/dev/null; then
-		deb+=(attr)
-	fi
-
 	if test "${#deb[@]}" != 0; then
 		sudo apt-get -y install "${deb[@]}"
 	fi
@@ -134,9 +130,8 @@ else
 fi
 
 # vbmeta: only resign vbmeta
-# resign: resign apks and replace them in the images
+# resign: resign apks and rebuild the images from their files as a normal build does
 # rebuild: rebuild images
-# rebuild_images: resign apks and rebuild the filesystem images from their files as a normal build does
 
 image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm system_dlkm"
 
@@ -165,9 +160,6 @@ record_anything=
 zip_opt="-6"
 dev_fast_sign=
 build_method=resign
-loop_method=
-loop_mount="sudo mount -o loop,ro"
-loop_umount="sudo umount"
 replace_boot=
 generate_keys=
 magisk=
@@ -257,8 +249,6 @@ while test "$#" != 0; do
 	elif test "$1" == "--rebuild"; then
 		build_method=rebuild
 		echo "--rebuild is incomplete and broken" >&2
-	elif test "$1" == "--rebuild-images"; then
-		build_method=rebuild_images
 	elif test "$1" == "--zip-opt"; then
 		zip_opt="-$2"
 		shift 1
@@ -270,9 +260,6 @@ while test "$#" != 0; do
 	elif test "$1" == "--dev-fast-sign"; then
 		# remove all APEXes, CAPEXes and APKs to make signing very fast during development of this script
 		dev_fast_sign=1
-	elif test "$1" == "--guestmount"; then
-		loop_method=guestmount
-		loop_mount="sudo guestmount -o allow_other -r -m /dev/sda -a"
 	else
 		echo "Error: unrecognized parameter $1" 2>&1
 		exit 1
@@ -306,7 +293,7 @@ if test -n "$adb_at_boot" && test -z "$adb_keys_content$adb_any_key"; then
 	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
 fi
 
-if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign && test "$build_method" != rebuild_images; then
+if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
 	echo "--adb-key, --adb-at-boot and --adb-until-unlock add files to the system image, which $build_method doesn't rebuild" >&2
 	exit 1
 fi
@@ -415,28 +402,12 @@ function discard
 	fi
 }
 
-function mkdir_touch
-{
-	mkdir -p "$(dirname "$1")"
-	touch "$1"
-}
-
 # make a file that is about to be written in place a copy of its own, rather than one of the hard links
 # that the target files share with the files extracted from the images, which would be written too
 function own_file
 {
 	cp -a -- "$1" "$1.own"
 	mv -f -- "$1.own" "$1"
-}
-
-# write a modded_paths marker for a file that doesn't exist in the original image and has to be created
-# in it, rather than for one that is only rewritten in place: $1 is the path of the marker and the rest
-# is the mode, the owner, the group and the SELinux context to create the file with, since there is no
-# original file to take them from
-function mkdir_new_file
-{
-	mkdir -p "$(dirname "$1")"
-	echo "$2 $3 $4 $5" > "$1"
 }
 
 function do_unzip
@@ -741,7 +712,7 @@ if test "$out_build" != "$build"; then
 fi
 outdir="$dir/out_$build_method"
 
-# the images that the signing builds, or adds a footer to, for rebuild_images
+# the images that the signing builds, or adds a footer to, for resign
 signed_images="$image_parts vbmeta boot init_boot vendor_boot dtbo pvmfw"
 
 mkdir -p "$outdir"
@@ -775,474 +746,8 @@ function get_avbtool_vbmeta_opts {
 	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Rollback Index:\s*(.*)/--rollback_index \1/p; s/^\s*Rollback Index Location:\s*(.*)/--rollback_index_location \1/p'
 }
 
-function get_avbtool_descriptor_opts {
-	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Rollback Index:\s*(.*)/--rollback_index \1/p; s/^\s*Rollback Index Location:\s*(.*)/--rollback_index_location \1/p; s/^\s*Hash Algorithm:\s*(.*)/--hash_algorithm \1/p; s/^\s*Partition Name:\s*(.*)/--partition_name \1/p; s/^\s*Salt:\s*(.*)/--salt \1/p; s/^\s*Prop: (.*) -> '\''(.*)'\''/--prop \1:\2/p'
-}
-
 function get_avbtool_partitions {
 	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Partition Name:\s*(.*)/\1/p'
-}
-
-# will change build.prop files
-# $1 is a work directory, $2 is the image to write, $3 is a debugfs script to run on it, $4 is the image
-# to start from and the remaining arguments are the directories to write into it, three arguments each:
-# the directory holding the files, the directory holding their modded_paths markers and the directory of
-# the image they go in
-function update_fs_image {
-	local work="$1"
-	local img="$2"
-	local debugfs_script="$3"
-	local src="$4"
-	shift 4
-
-	mkdir "$work/mnt"
-	if test -e "$debugfs_script"; then
-		cp "$debugfs_script" "$work/debugfs"
-	else
-		touch "$work/debugfs"
-	fi
-
-	sudo bash $setx /dev/stdin "$otatools" "$loop_method" "$loop_mount" "$loop_umount" "$work" "$img" "$src" "$@" <<'EOF' || exit 1
-		set -e
-		set -o nounset
-		set -o pipefail
-		otatools="$1"
-		loop_method="$2"
-		loop_mount="$3"
-		loop_umount="$4"
-		work="$5"
-		img="$6"
-		src="$7"
-		shift 7
-
-		# what is left are the directories to write into the image, three arguments each
-		bases=()
-		moddeds=()
-		roots=()
-		while test "$#" != 0; do
-			bases+=("$1")
-			moddeds+=("$2")
-			roots+=("$3")
-			shift 3
-		done
-
-		# write $1 over the blocks of $2, writing only the blocks that differ, reading the blocks past
-		# the end of $2 as zeroes and then growing it to the size of $1. Only writing what differs
-		# means that a block that is already right is never written, which matters because the image
-		# has the shared_blocks feature patched out below and so a write to a block that e2fsdroid
-		# shared with another file would change that file too, and that a block that the file has a
-		# hole for is only allocated if it has to hold something other than zeroes. dd conv=sparse
-		# skips every zeroed block of the input instead, which leaves the previous contents of the
-		# block behind rather than zeroing it
-		function write_blocks {
-			python3 -c '
-import sys
-
-BLOCK = 4096
-
-with open(sys.argv[1], "rb") as src, open(sys.argv[2], "r+b") as dst:
-    at = 0
-    while block := src.read(BLOCK):
-        dst.seek(at)
-        if block != dst.read(len(block)).ljust(len(block), b"\0"):
-            dst.seek(at)
-            dst.write(block)
-        at += len(block)
-    dst.truncate(at)
-' "$1" "$2"
-		}
-
-		fs_features=
-		block_count=1
-		free_blocks=0
-		free_inodes=0
-		block_size=4096
-		reserved_gdt_blocks=0
-		blocks_per_group=32768
-		inodes_per_group=384
-		inode_blocks_per_group=12
-
-		eval $(/sbin/tune2fs -l "$src"|sed -nre 's/^Filesystem features:\s*([^'\'']**)$/fs_features='"'\1'"'/p; s/^Block count:\s*([0-9]+)$/block_count=\1/p; s/^Free blocks:\s*([0-9]+)$/free_blocks=\1/p; s/^Free inodes:\s*([0-9]+)$/free_inodes=\1/p; s/^Block size:\s*([0-9]+)$/block_size=\1/p; s/^Reserved GDT blocks:\s*([0-9]+)$/reserved_gdt_blocks=\1/p; s/^Blocks per group:\s*([0-9]+)$/blocks_per_group=\1/p; s/^Inodes per group:\s*([0-9]+)$/inodes_per_group=\1/p; s/^Inode blocks per group:\s*([0-9]+)$/inode_blocks_per_group=\1/p')
-
-		group_count="$((($block_count - 1) / $blocks_per_group + 1))"
-
-		extent_size=12
-		addr_size=4
-		desc_size=32
-		if grep -q -w "64bit" <<< "$fs_features"; then
-			addr_size=8
-			desc_size=64
-		fi
-
-		# superblock, inode bitmap, block bitmaps, block group descriptors, reserved GDT blocks
-		other_blocks_per_group="$((4 + ($blocks_per_group - 1) * $addr_size / $block_size + $reserved_gdt_blocks + ($group_count - 1) * $desc_size / $block_size))"
-
-		min_extent_nodes_per_block="$((($block_size - $extent_size) / $extent_size / 2))"
-
-		trap "$loop_umount $work/mnt" EXIT
-		if ! $loop_mount "$src" "$work/mnt"; then
-			echo "Failed to mount $src" >&2
-			exit 1
-		fi
-
-		files=()
-		file_dirs=()
-		use_tmp_dir=
-		extra_inodes=0
-		extra_data_blocks=0
-
-		for d in "${!bases[@]}"; do
-			base="${bases[d]}"
-			modded="${moddeds[d]}"
-			root="${roots[d]}"
-			while IFS= read -r p; do
-				mod="$base/$p"
-				orig="$work/mnt$root/$p"
-				if ! cmp -s "$orig" "$mod" 2>/dev/null; then
-					orig_size=-1
-					if test -e "$orig"; then
-						orig_size="$(stat -c %s "$orig")"
-					fi
-					mod_size="$(stat -c %s "$mod")"
-					if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
-						if test "$orig_size" == -1; then
-							if ! test -s "$modded/$p"; then
-								echo "File to patch or rewrite doesn't exist: $root/$p" >&2
-								exit 1
-							fi
-							echo "Creating $root/$p: size $mod_size" >&2
-						else
-							echo "Rewriting $root/$p: size $orig_size -> $mod_size" >&2
-							if test -z "$use_tmp_dir"; then
-								((extra_inodes+=1))
-								((extra_data_blocks+=2)) # overestimate: one for the directory filename, one for the directory itself
-								use_tmp_dir=1
-							fi
-						fi
-
-						file_blocks=0
-						file_extent_tree_blocks=0
-						if test "$mod_size" != 0; then
-							((file_blocks=(mod_size - 1) / block_size + 1))
-
-							current_blocks="$file_blocks"
-							while test "$current_blocks" -gt 4; do
-								((current_blocks=(file_extent_tree_blocks - 1) / min_extent_nodes_per_block + 1))
-								((file_extent_tree_blocks+=current_blocks))
-							done
-						fi
-
-						file_name_blocks=1
-						((extra_data_blocks+=file_blocks + file_extent_tree_blocks + file_name_blocks))
-						((extra_inodes+=1))
-					else
-						echo "Patching $root/$p: size $mod_size" >&2
-					fi
-					b="$(basename "$p")"
-					if test "$b" == build.prop; then
-						# diff exits with 1 when the files differ, which they always do here
-						diff -u "$orig" "$mod" || true
-					fi
-
-					files+=("$p")
-					file_dirs+=("$d")
-				fi
-			done < <(cd "$base" && find . -type f -print)
-		done
-
-		while ! $loop_umount "$work/mnt"; do sleep 1; done
-		sleep 1
-
-		if test "${#files[@]}" != 0; then
-			if test "$free_inodes" -lt "$extra_inodes"; then
-				((extra_inodes-=free_inodes))
-			else
-				extra_inodes=0
-			fi
-
-			if test "$free_blocks" -lt "$extra_data_blocks"; then
-				((extra_data_blocks-=free_blocks))
-			else
-				extra_data_blocks=0
-			fi
-
-			new_img_size=
-			if test "$extra_data_blocks" != 0 || test "$extra_inodes" != 0; then
-				echo "Resizing $src to add $extra_data_blocks data blocks and $extra_inodes inodes"
-				img_size="$("$otatools"/bin/avbtool info_image --image "$src"|sed -nre 's/^\s*Original image size:\s*([0-9]+).*/\1/p')"
-
-				inodes_per_block="$(($inodes_per_group / $inode_blocks_per_group))"
-				data_blocks_per_group="$(($blocks_per_group - $inode_blocks_per_group - $other_blocks_per_group))"
-
-				img_blocks="$((($img_size + $block_size - 1) / $block_size))"
-				img_groups="$((($img_blocks + $blocks_per_group - 1) / $blocks_per_group))"
-				img_blocks_to_full_group="$(($img_groups * $blocks_per_group - $img_blocks))"
-
-				inode_blocks_to_full_group=0
-				if test "$data_blocks_per_group" -lt "$img_blocks_to_full_group"; then
-					inode_blocks_to_full_group="$(($img_blocks_to_full_group - $data_blocks_per_group))"
-				fi
-				if test "$inode_blocks_per_group" -lt "$inode_blocks_to_full_group"; then
-					inode_blocks_to_full_group="$inode_blocks_per_group"
-				fi
-
-				extra_inode_blocks="$((($extra_inodes + $inodes_per_block - 1) / $inodes_per_block))"
-				inode_extra_blocks="$extra_inode_blocks"
-				if test "$extra_inode_blocks" -gt "$inode_blocks_to_full_group"; then
-					extra_inode_groups="$((($extra_inode_blocks - $inode_blocks_to_full_group + $inode_blocks_per_group - 1) / $inode_blocks_per_group))"
-					inode_extra_blocks="$(($extra_inode_blocks + $extra_inode_groups * ($blocks_per_group - $inode_blocks_per_group)))"
-				fi
-
-
-				data_blocks_to_full_group="$img_blocks_to_full_group"
-				if test "$data_blocks_per_group" -lt "$data_blocks_to_full_group"; then
-					data_blocks_to_full_group="$data_blocks_per_group"
-				fi
-
-				data_extra_blocks="$extra_data_blocks"
-				if test "$extra_data_blocks" -gt "$data_blocks_to_full_group"; then
-					extra_data_groups="$((($extra_data_blocks - $data_blocks_to_full_group + $data_blocks_per_group - 1) / $data_blocks_per_group))"
-					data_extra_blocks="$(($extra_data_blocks + $extra_data_groups * ($blocks_per_group - $data_blocks_per_group)))"
-				fi
-
-				extra_blocks="$data_extra_blocks"
-				if test "$inode_extra_blocks" -gt "$extra_blocks"; then
-					extra_blocks="$inode_extra_blocks"
-				fi
-
-				# used for safety and also because resize2fs seems to refuse to create block groups smaller than 50 blocks
-				margin_blocks="$(($other_blocks_per_group + 256))"
-				# in case we need a new group descriptor in each block group
-				gd_blocks="$group_count"
-				add_blocks="$(($extra_blocks + $gd_blocks + $margin_blocks))"
-				new_img_size="$(($img_size + $add_blocks * $block_size))"
-				echo "Adding $(($add_blocks * $block_size)) bytes = $add_blocks blocks = $extra_blocks extra blocks (max of $data_extra_blocks blocks for data and $inode_extra_blocks for inodes) + $gd_blocks GD blocks + $margin_blocks margin blocks"
-
-				# TODO: we should rebuild the care map if we are growing the partition!
-			fi
-
-			cp -a "$src" "$img"
-
-			if test -n "$new_img_size"; then
-				"$otatools/bin/avbtool" erase_footer --image "$img"
-				truncate -s "$new_img_size" "$img"
-				/sbin/resize2fs "$img"
-			fi
-
-			# patch out shared_blocks flag
-			# this means that writes might affect multiple files, but that's probably fine (we carefully truncate/overwrite properly)
-			dd if="$img" of="$work/features" skip=$((0x465)) bs=1 count=1 2>/dev/null
-			dd if=/dev/zero of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
-
-			if test "$loop_method" == "guestmount"; then
-				eval $(guestfish --listen -a "$img")
-				guestfish --remote launch : mount_options rw,noatime /dev/sda / : debug sh "echo 0 > /sys/fs/ext4/sda/reserved_clusters" : mount-local "$work/mnt"
-				guestfish --remote mount-local-run &
-			else
-				loop="$(mount -v -o loop,rw,noatime "$img" "$work/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
-				echo 0 > /sys/fs/ext4/"$loop"/reserved_clusters
-			fi
-
-			tmp_dir=
-			tmp_i=0
-
-			for i in "${!files[@]}"; do
-				p="${files[i]}"
-				d="${file_dirs[i]}"
-				base="${bases[d]}"
-				modded="${moddeds[d]}"
-				root="${roots[d]}"
-				mod="$base/$p"
-				orig="$work/mnt$root/$p"
-
-				tmp=
-
-				orig_size=-1
-				if test -e "$orig"; then
-					orig_size="$(stat -c %s "$orig")"
-				fi
-				mod_size="$(stat -c %s "$mod")"
-
-				if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
-					if test -e "$orig"; then
-						times="$(stat -c '%X %Y %Z' -- "$orig")"
-						if test -z "$tmp_dir"; then
-							tmp_dir="$(mktemp -d "$work/mnt/.tmp.XXXXXX")"
-						fi
-
-						tmp="$tmp_dir/$tmp_i"
-						((tmp_i+=1))
-						# we must move the file away since we cannot delete it as that might mark blocks shared with other files as free, result in a catastrophic random overwrite
-						mv "$orig" "$tmp"
-						cp -a --preserve=mode,ownership,timestamps,links,xattr,all --attributes-only "$tmp" "$orig"
-					else
-						touch "$orig"
-					fi
-					if test -s "$modded/$p"; then
-						times="$(stat -c '%X %Y %Z' -- "$work/mnt$root")"
-						read mode uid gid con rest < "$modded/$p"
-						touch "$orig"
-						chown "$uid:$gid" "$orig"
-						chmod "$mode" "$orig"
-						attr -q -S -s selinux -V "$con" "$orig"
-					fi
-				else
-					times="$(stat -c '%X %Y %Z' -- "$orig")"
-				fi
-
-				# note that the file has either 0 size in the modded or orig_size != mod_size case, or otherwise it has size orig_size = mod_size
-				write_blocks "$mod" "$orig"
-				read atime mtime ctime <<<"$times"
-				touch -d "@$mtime" -m -- "$orig"
-				touch -d "@$atime" -a -- "$orig"
-				echo "set_inode_field $root/$p ctime @$ctime" >> "$work/debugfs"
-				if test -n "$tmp"; then
-					tmp_rel="$(sed -e "s|^$work/mnt||" <<<"$tmp")"
-					# use unlink so that it doesn't free potentially shared blocks
-					echo "unlink $tmp_rel" >> "$work/debugfs"
-				fi
-			done
-
-			if test -n "$tmp_dir"; then
-				tmp_dir_rel="$(sed -e "s|^$work/mnt||" <<<"$tmp_dir")"
-				# rmdir is fine here, we can't have shared blocks in the directory
-				echo "rmdir $tmp_dir_rel" >> "$work/debugfs"
-			fi
-			while ! $loop_umount "$work/mnt"; do sleep 1; done
-		else
-			ln -f "$src" "$img"
-		fi
-
-		trap - EXIT
-EOF
-
-	local changed=
-	if test -s "$work/debugfs"; then
-		"$debugfs" -w "$img" < "$work/debugfs"
-		changed=1
-	fi
-
-	if test -e "$work/features"; then
-		dd if="$work/features" of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
-		rm -f "$work/features"
-		changed=1
-	fi
-
-	if test -n "$changed"; then
-		"$otatools/bin/avbtool" add_hashtree_footer --image "$img" $(get_avbtool_descriptor_opts "$src")
-	fi
-}
-
-function make_fs_image {
-	local out="$1"
-	local b="$2"
-	shift 2
-	with_temp_dir "$outdir/mntrw-$b" update_fs_image "$out" "$outdir/debugfs/$b" "$@"
-}
-
-# don't use toybox cpio since it's terrible (it dereferences symbolic links...)
-
-function unpack_ramdisk {
-	local imgr="$(realpath "$2")"
-	mkdir -p "$1"
-	cd "$1" && "$otatools/bin/lz4" -d "$imgr" -|cpio -i -d --preserve-modification-time || exit 0 # ignore mknod failure
-}
-
-function update_ramdisk {
-	mkdir -p "$1"
-	"$otatools/bin/lz4" -d "$2" -|(cd "$1" && cpio -i -d --preserve-modification-time --no-preserve-owner)
-	"$otatools/bin/lz4" -d "$2" -|cpio -t -n -v|"$data_dir"/cpio2mkbootfs.py "$1.fsc" "$1.nodes"
-
-	rdr="$(realpath "$1")"
-	(cd "$3" && find -type f|while IFS= read -r i; do
-		o="$rdr/$i"
-		if ! cmp -s "$i" "$o"; then
-			echo "Updating $i: $(stat -c %s "$o") -> $(stat -c %s "$i")"
-			times="$(stat -c '%X %Y %Z' -- "$o")"
-			dd if="$i" of="$o" bs=1M conv=notrunc
-			truncate -r "$i" "$o"
-			read atime mtime ctime <<<"$times"
-			touch -d "@$mtime" -m -- "$o"
-		fi
-	done) || exit 1
-
-	"$otatools/bin/mkbootfs" -f "$1.fsc" -n "$1.nodes" "$1"|"$otatools/bin/lz4" -f -l -12 --favor-decSpeed - "$2" || exit 1
-}
-
-function extract_boot_image {
-	local d="$2"
-	local img="$3"
-
-	local imgr="$(realpath "$img")"
-	(cd "$1" && "$otatools/bin/unpack_bootimg" --boot_img "$imgr" --out bootimg --format mkbootimg > mkbootimg_args) || exit 1
-	mkdir -p "$d"
-	if test -e "$1/bootimg/ramdisk"; then
-		for i in kernel cmdline; do
-			mv "$1/bootimg/$i" "$d"
-		done
-		unpack_ramdisk "$d/RAMDISK" "$1/bootimg/ramdisk"
-	else
-		for i in dtb bootconfig; do
-			mv "$1/bootimg/$i" "$d"
-		done
-		unpack_ramdisk "$d/RAMDISK" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_"
-		#unpack_ramdisk "$d/../VENDOR_DLKM/RAMDISK" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_dlkm"
-	fi
-}
-
-function update_boot_image {
-	local img="$2"
-	local src="$3"
-	local bootimg="$4"
-	local d="$5"
-
-	cp -a -r "$bootimg"/* "$1"
-	if test -e "$1/bootimg/ramdisk"; then
-		for i in kernel cmdline; do
-			cp -a "$d/$i" "$1/bootimg"
-		done
-		update_ramdisk "$1/bootimg/ramdisk.d" "$1/bootimg/ramdisk" "$d/RAMDISK"
-		(cd "$1" && sh -c "$otatools/bin/mkbootimg $(<mkbootimg_args) -o bootimg.img") || exit 1
-		mv "$1/bootimg.img" "$img"
-	else
-		for i in dtb bootconfig; do
-			cp -a "$d/$i" "$1/bootimg"
-		done
-		update_ramdisk "$1/bootimg/vendor-ramdisk-by-name/ramdisk_.d" "$1/bootimg/vendor-ramdisk-by-name/ramdisk_" "$d/RAMDISK"
-		(cd "$1" && sh -c "$otatools/bin/mkbootimg $(<mkbootimg_args) --vendor_boot bootimg.img") || exit 1
-		mv "$1/bootimg.img" "$img"
-	fi
-
-	"$otatools/bin/avbtool" add_hash_footer --image "$img" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
-}
-
-function make_boot_image {
-	local out="$1"
-	local b="$2"
-	shift 2
-	replace=
-	if test "$b" == boot && test -n "$replace_boot"; then
-		replace="$replace_boot"
-	fi
-	if test -n "$replace"; then
-		local src="$1"
-		cp -a "$replace" "$out"
-		"$otatools/bin/avbtool" add_hash_footer --image "$out" --partition_size "$(stat -c %s "$src")" $(get_avbtool_descriptor_opts "$src")
-	else
-		with_temp_dir "$outdir/mkbootimg-$b" update_boot_image "$out" "$@"
-	fi
-}
-
-function make_vbmeta {
-	local src="$2"
-	local imgs="$3"
-
-	local opts=()
-	for i in $(get_avbtool_partitions "$src"); do
-		opts+=("--include_descriptors_from_image" "$imgs/$i.img")
-	done
-
-	"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1" "${opts[@]}" $(get_avbtool_vbmeta_opts "$src")
 }
 
 function get_avb_algorithm {
@@ -1298,16 +803,6 @@ function make_extract_ota_payload {
 	do_extract_ota_payload "$1" "$dir/ota/payload.bin"
 	mkdir -p "$1/META"
 	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$dir/ota/payload.bin"
-}
-
-function make_extract_boot {
-	local work="$1"
-	local bootimg="$2"
-	shift 2
-
-	mkdir -p "$bootimg"
-	rm -rf "$bootimg"
-	make_dir "$bootimg" extract_boot_image "$work" "$@"
 }
 
 function make_original_apk_cert_hashes {
@@ -1399,12 +894,7 @@ function make_target_files_extracted {
 		with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query"
 	fi
 
-	ramdisk_part=boot
-	if test -e "$dir/ota_payload/init_boot.img"; then
-		ramdisk_part=init_boot
-	fi
-
-	if test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		# the owner, mode, capabilities and SELinux label of the files, which extracting the files
 		# doesn't keep and the images are going to be rebuilt with
 		mkdir -p "$outdir/fs_metadata"
@@ -1414,13 +904,6 @@ function make_target_files_extracted {
 			fi
 		done
 		make_dir "$outdir/boot_inputs" make_boot_inputs
-	else
-		for b in "$ramdisk_part" vendor_boot; do
-			if test -e "$dir/ota_payload/$b.img"; then
-				d="$(echo "$b"|tr a-z A-Z)"
-				make_dir "$outdir/target_files_extracted/$d" make_extract_boot "$outdir/bootimg/$b" "$dir/ota_payload/$b.img"
-			fi
-		done
 	fi
 
 	make_file "$outdir/apk_cert_hashes.txt" make_original_apk_cert_hashes "$outdir/target_files_extracted"
@@ -1759,7 +1242,6 @@ function patch_framework_jar {
 
 	mkdir -p "$out/SYSTEM/framework"
 	patch_dex_in_zip {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" "$@"
-	mkdir_touch "$outdir/modded_paths/SYSTEM/framework/$jar"
 }
 
 function patch_service_connectivity {
@@ -1785,13 +1267,9 @@ function patch_updater {
 function make_target_files_intermediates_base {
 	make_file "$outdir/target_files_extracted.done" make_target_files_extracted
 
-	mkdir -p "$outdir/debugfs"
-	rm -f "$outdir/debugfs"/*
-
 	if test "$update_url" != "$orig_update_url"; then
 		mkdir -p "$1/SYSTEM/priv-app/Updater"
 		with_temp_dir "$outdir/patch-updater" patch_apk_raw {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Updater/Updater.apk patch_updater
-		mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Updater/Updater.apk"
 	fi
 
 	if test -n "$adb_root"; then
@@ -1799,7 +1277,6 @@ function make_target_files_intermediates_base {
 			if test -e "$outdir/target_files_extracted/$i"; then
 				mkdir -p "$1/SYSTEM/apex"
 				with_temp_dir "$outdir/patch-adbd-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_adbd_in_root
-				mkdir_touch "$outdir/modded_paths/$i"
 			fi
 		done
 		if test -e "$outdir/target_files_extracted/SYSTEM/bin/adbd"; then
@@ -1812,10 +1289,9 @@ function make_target_files_intermediates_base {
 		# adbd only ever looks for keys in /adb_keys and in /data/misc/adb/adb_keys, and the latter is
 		# wiped along with the user data and can only be written by a device that boots far enough to
 		# show the authorization dialog, so the keys go in the former, which on a system-as-root device
-		# is a file at the root of the system image. Its SELinux context is the one the policy of the
-		# build gives it, which is also how we check that this Android version still reads the file
-		local context="$(sed -nre 's|^/adb_keys\s+(\S+)\s*$|\1|p' "$outdir/target_files_extracted/SYSTEM/etc/selinux/plat_file_contexts")"
-		if test -z "$context"; then
+		# is a file at the root of the system image. The SELinux policy of the build labeling it is how
+		# we check that this Android version still reads the file
+		if ! grep -qE '^/adb_keys\s' "$outdir/target_files_extracted/SYSTEM/etc/selinux/plat_file_contexts"; then
 			echo "The SELinux file contexts have no entry for /adb_keys, so adbd would not be allowed to read it" >&2
 			exit 1
 		fi
@@ -1825,7 +1301,6 @@ function make_target_files_intermediates_base {
 			cat "$outdir/target_files_extracted/ROOT/adb_keys" > "$1/ROOT/adb_keys"
 		fi
 		printf '%s' "$adb_keys_content" >> "$1/ROOT/adb_keys"
-		mkdir_new_file "$outdir/modded_paths/ROOT/adb_keys" 644 0 0 "$context"
 	fi
 
 	if test -n "$adb_at_boot"; then
@@ -1878,7 +1353,6 @@ on property:sys.user.0.ce_available=true
     stop adbd
 EOF
 		fi
-		mkdir_new_file "$outdir/modded_paths/SYSTEM/etc/init/resign-adb.rc" 644 0 0 u:object_r:system_file:s0
 	fi
 
 	if test -n "$cross_profile_localhost"; then
@@ -1887,7 +1361,6 @@ EOF
 			if test -e "$outdir/target_files_extracted/$i"; then
 				mkdir -p "$1/SYSTEM/apex"
 				with_temp_dir "$outdir/patch-tethering-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_service_connectivity
-				mkdir_touch "$outdir/modded_paths/$i"
 				patched=1
 			fi
 		done
@@ -1928,21 +1401,18 @@ EOF
 		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
 			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
 			patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
-			mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Seedvault/Seedvault.apk"
-			echo "unlink /system/priv-app/Seedvault/oat" >> "$outdir/debugfs/system"
 		fi
 	fi
 
 	cp -a -n -l --target-directory="$1" "$outdir/target_files_extracted"/*
 
-	if test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		cp -a -n -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
 		if test -n "$allowbackup"; then
-			# what resign unlinks from the image with debugfs
+			# its precompiled code no longer matches the patched APK
 			rm -rf "$1/SYSTEM/priv-app/Seedvault/oat"
 		fi
-		# the images are built out of these files by the signing, so the changes that resign makes to
-		# the signed files have to be made to these instead
+		# the images are built out of these files by the signing
 		apply_modifications "$1"
 	fi
 }
@@ -1969,7 +1439,7 @@ EOF
 		fi
 	fi
 
-	if test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		# have the signing build the filesystem images out of their files, as it does for a normal
 		# build, and give them the same hashtree footer as the original images
 		local dynamic=" $(sed -nre 's/^dynamic_partition_list=//p' "$dir/ota_payload/META/dynamic_partitions_info.txt") "
@@ -2092,10 +1562,6 @@ PAYLOAD_MINOR_VERSION=4
 EOF
 }
 
-function make_dummy_image {
-	echo "x" > "$1"
-}
-
 function make_copy {
 	cp -- "$2" "$1"
 }
@@ -2138,15 +1604,12 @@ function make_target_files_intermediates {
 			fi
 		fi
 	done
-	for i in $image_parts; do
-		make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_dummy_image
-	done
 	if test "$build_method" == rebuild; then
 		cp -f "$dir/ota_meta/ab_partitions.txt" "$outdir/target_files_intermediates/META/ab_partitions.txt"
 #	else
 #		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
 	fi
-	if test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		make_dir "$outdir/fs_expected" make_fs_config
 		# pvmfw may only be in the factory images, since it doesn't have to be updated by OTAs
 		local pvmfw="$dir/ota_payload/pvmfw.img"
@@ -2212,21 +1675,13 @@ function make_target_files_signed {
 	make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
 
 	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
-
-	if test "$build_method" == resign; then
-		apply_modifications "$1"
-	fi
 }
 
 # make the changes that the options ask for to the files in the target files directory $1
 function apply_modifications {
-	# the signing appends a newline to the build.prop files, so resign makes them end with the empty
-	# line they end with in the original images after it, and rebuild_images with a single newline before it
-	local ending='\n\n'
-	if test "$build_method" == rebuild_images; then
-		ending='\n'
-	fi
-	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/'"$ending"'/'
+	# the signing appends a newline to the build.prop files, so they are left with a single one for
+	# them to end with the empty line they end with in the original images
+	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n/'
 	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
 	# grep -vz BOOT|
 	prop_sed=""
@@ -2298,7 +1753,6 @@ function apply_modifications {
 	if test -n "$hosts_url"; then
 		own_file "$1/SYSTEM/etc/hosts"
 		curl "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
-		mkdir_touch "$outdir/modded_paths/SYSTEM/etc/hosts"
 	fi
 	if test "$(wc -l < "$sepolicy")" != 0; then
 		own_file "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
@@ -2328,7 +1782,6 @@ function apply_modifications {
 
 		# check the policy
 		secilc -m -M true -G -N -c 32 "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" -o /dev/null -f /dev/null
-		mkdir_touch "$outdir/modded_paths/SYSTEM/etc/selinux/plat_sepolicy.cil"
 	fi
 
 	if test -n "$magisk"; then
@@ -2337,7 +1790,7 @@ function apply_modifications {
 }
 
 function make_target_files_base {
-	if test "$build_method" == resign || test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		make_dir "$outdir/target_files_signed" make_target_files_signed
 		discard "$outdir/target_files_signed.zip"
 
@@ -2360,9 +1813,8 @@ function make_target_files_base {
 }
 
 # vbmeta: ota_payload -> [copy ota_payload images and make new vbmeta] -> target_files_intermediate -> target_files_intermediate.zip -> [ln] -> target_files_signed.zip -> [ln] -> target_files.zip
-# resign: ota_payload -> [extract apks from images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [integrate with ota_payload images] -> target_files -> target_files.zip
+# resign: ota_payload -> [extract files and their metadata from images, modify] -> target_files_intermediate -> target_files_intermediate.zip -> [sign and build images] -> target_files_signed.zip -> [integrate with the other ota_payload images] -> target_files -> target_files.zip
 # rebuild: ota_payload -> [unpack all images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [rename] -> target_files.zip
-# rebuild_images: ota_payload -> [extract files and their metadata from images, modify] -> target_files_intermediate -> target_files_intermediate.zip -> [sign and build filesystem images] -> target_files_signed.zip -> [integrate with ota_payload images] -> target_files -> target_files.zip
 
 function read_prop {
 	local i
@@ -2445,24 +1897,13 @@ function take_signed_image {
 }
 
 function make_target_files_zip {
-	if test "$build_method" == resign || test "$build_method" == rebuild_images; then
+	if test "$build_method" == resign; then
 		make_dir "$outdir/target_files" make_target_files_base
-
-		ramdisk_part=boot
-		if test -e "$dir/ota_payload/init_boot.img"; then
-			ramdisk_part=init_boot
-		fi
-
-		# the images that are built rather than taken as they are
-		local built="$image_parts vbmeta $ramdisk_part vendor_boot"
-		if test "$build_method" == rebuild_images; then
-			built="$signed_images"
-		fi
 
 		mkdir -p "$outdir/target_files/IMAGES"
 		ls -1 "$dir/ota_payload"|while read i; do
 			local done=
-			for j in $built; do
+			for j in $signed_images; do
 				if test "$i" == "$j.img"; then
 					done=1
 				fi
@@ -2472,46 +1913,11 @@ function make_target_files_zip {
 			fi
 		done || exit 1
 
-		if test "$build_method" == rebuild_images; then
-			for b in $built; do
-				if test -e "$dir/ota_payload/$b.img" || test -e "$outdir/target_files_signed/IMAGES/$b.img"; then
-					make_file "$outdir/target_files/IMAGES/$b.img" take_signed_image "$b"
-				fi
-			done
-		else
-			for b in $image_parts; do
-				if test -e "$dir/ota_payload/$b.img"; then
-					d="$(echo "$b"|tr a-z A-Z)"
-					if test -e "$outdir/target_files_signed/$d"; then
-						dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "")
-						if test "$b" == system; then
-							# the system image of a system-as-root device is the root filesystem, which the
-							# system partition is then mounted inside of, so its ROOT directory goes at the
-							# root of the image and its SYSTEM directory under /system
-							dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" /system
-								"$outdir/target_files_signed/ROOT" "$outdir/modded_paths/ROOT" "")
-						fi
-						make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "${dirs[@]}"
-					fi
-				fi
-			done
-
-			for b in "$ramdisk_part" vendor_boot; do
-				if test -e "$dir/ota_payload/$b.img"; then
-					d="$(echo "$b"|tr a-z A-Z)"
-					make_file "$outdir/target_files/IMAGES/$b.img" make_boot_image "$b" "$dir/ota_payload/$b.img" "$outdir/bootimg/$b" "$outdir/target_files_signed/$d"
-				fi
-			done
-		fi
-
-		if test "$android" -ge 130 && ! test -e "$outdir/target_files/IMAGES/pvmfw.img"; then
-			extract_factory_image
-			cp -a "$dir/factory_image/pvmfw.img" "$outdir/target_files/IMAGES/pvmfw.img"
-		fi
-
-		if test "$build_method" != rebuild_images; then
-			make_file "$outdir/target_files/IMAGES/vbmeta.img" make_vbmeta "$dir/ota_payload/vbmeta.img" "$outdir/target_files/IMAGES"
-		fi
+		for b in $signed_images; do
+			if test -e "$dir/ota_payload/$b.img" || test -e "$outdir/target_files_signed/IMAGES/$b.img"; then
+				make_file "$outdir/target_files/IMAGES/$b.img" take_signed_image "$b"
+			fi
+		done
 
 		discard "$outdir/target_files_signed"
 
