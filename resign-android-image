@@ -715,6 +715,10 @@ function get_avbtool_partitions {
 }
 
 # will change build.prop files
+# $1 is a work directory, $2 is the image to write, $3 is a debugfs script to run on it, $4 is the image
+# to start from and the remaining arguments are the directories to write into it, three arguments each:
+# the directory holding the files, the directory holding their modded_paths markers and the directory of
+# the image they go in
 function update_fs_image {
 	local work="$1"
 	local img="$2"
@@ -737,13 +741,21 @@ function update_fs_image {
 		loop_method="$2"
 		loop_mount="$3"
 		loop_umount="$4"
-		shift 4
+		work="$5"
+		img="$6"
+		src="$7"
+		shift 7
 
-		img="$2"
-		src="$3"
-		base="$4"
-		modded="$5"
-		root="$6"
+		# what is left are the directories to write into the image, three arguments each
+		bases=()
+		moddeds=()
+		roots=()
+		while test "$#" != 0; do
+			bases+=("$1")
+			moddeds+=("$2")
+			roots+=("$3")
+			shift 3
+		done
 
 		fs_features=
 		block_count=1
@@ -772,71 +784,78 @@ function update_fs_image {
 
 		min_extent_nodes_per_block="$((($block_size - $extent_size) / $extent_size / 2))"
 
-		trap "$loop_umount $1/mnt" EXIT
-		if ! $loop_mount "$src" "$1/mnt"; then
+		trap "$loop_umount $work/mnt" EXIT
+		if ! $loop_mount "$src" "$work/mnt"; then
 			echo "Failed to mount $src" >&2
 			exit 1
 		fi
 
 		files=()
+		file_dirs=()
 		use_tmp_dir=
 		extra_inodes=0
 		extra_data_blocks=0
 
-		while IFS= read -r p; do
-			mod="$base/$p"
-			orig="$1/mnt$root/$p"
-			if ! cmp -s "$orig" "$mod" 2>/dev/null; then
-				orig_size=-1
-				if test -e "$orig"; then
-					orig_size="$(stat -c %s "$orig")"
-				fi
-				mod_size="$(stat -c %s "$mod")"
-				if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
-					if test "$orig_size" == -1; then
-						if ! test -s "$modded/$p"; then
-							echo "File to patch or rewrite doesn't exist: $p" >&2
-							exit 1
+		for d in "${!bases[@]}"; do
+			base="${bases[d]}"
+			modded="${moddeds[d]}"
+			root="${roots[d]}"
+			while IFS= read -r p; do
+				mod="$base/$p"
+				orig="$work/mnt$root/$p"
+				if ! cmp -s "$orig" "$mod" 2>/dev/null; then
+					orig_size=-1
+					if test -e "$orig"; then
+						orig_size="$(stat -c %s "$orig")"
+					fi
+					mod_size="$(stat -c %s "$mod")"
+					if test -e "$modded/$p" || test "$orig_size" != "$mod_size"; then
+						if test "$orig_size" == -1; then
+							if ! test -s "$modded/$p"; then
+								echo "File to patch or rewrite doesn't exist: $root/$p" >&2
+								exit 1
+							fi
+							echo "Creating $root/$p: size $mod_size" >&2
+						else
+							echo "Rewriting $root/$p: size $orig_size -> $mod_size" >&2
+							if test -z "$use_tmp_dir"; then
+								((extra_inodes+=1))
+								((extra_data_blocks+=2)) # overestimate: one for the directory filename, one for the directory itself
+								use_tmp_dir=1
+							fi
 						fi
-						echo "Creating $p: size $mod_size" >&2
+
+						file_blocks=0
+						file_extent_tree_blocks=0
+						if test "$mod_size" != 0; then
+							((file_blocks=(mod_size - 1) / block_size + 1))
+
+							current_blocks="$file_blocks"
+							while test "$current_blocks" -gt 4; do
+								((current_blocks=(file_extent_tree_blocks - 1) / min_extent_nodes_per_block + 1))
+								((file_extent_tree_blocks+=current_blocks))
+							done
+						fi
+
+						file_name_blocks=1
+						((extra_data_blocks+=file_blocks + file_extent_tree_blocks + file_name_blocks))
+						((extra_inodes+=1))
 					else
-						echo "Rewriting $p: size $orig_size -> $mod_size" >&2
-						if test -z "$use_tmp_dir"; then
-							((extra_inodes+=1))
-							((extra_data_blocks+=2)) # overestimate: one for the directory filename, one for the directory itself
-							use_tmp_dir=1
-						fi
+						echo "Patching $root/$p: size $mod_size" >&2
+					fi
+					b="$(basename "$p")"
+					if test "$b" == build.prop; then
+						# diff exits with 1 when the files differ, which they always do here
+						diff -u "$orig" "$mod" || true
 					fi
 
-					file_blocks=0
-					file_extent_tree_blocks=0
-					if test "$mod_size" != 0; then
-						((file_blocks=(mod_size - 1) / block_size + 1))
-
-						current_blocks="$file_blocks"
-						while test "$current_blocks" -gt 4; do
-							((current_blocks=(file_extent_tree_blocks - 1) / min_extent_nodes_per_block + 1))
-							((file_extent_tree_blocks+=current_blocks))
-						done
-					fi
-
-					file_name_blocks=1
-					((extra_data_blocks+=file_blocks + file_extent_tree_blocks + file_name_blocks))
-					((extra_inodes+=1))
-				else
-					echo "Patching $p: size $mod_size" >&2
+					files+=("$p")
+					file_dirs+=("$d")
 				fi
-				b="$(basename "$p")"
-				if test "$b" == build.prop; then
-					# diff exits with 1 when the files differ, which they always do here
-					diff -u "$orig" "$mod" || true
-				fi
+			done < <(cd "$base" && find . -type f -print)
+		done
 
-				files+=("$p")
-			fi
-		done < <(cd "$base" && find . -type f -print)
-
-		while ! $loop_umount "$1/mnt"; do sleep 1; done
+		while ! $loop_umount "$work/mnt"; do sleep 1; done
 		sleep 1
 
 		if test "${#files[@]}" != 0; then
@@ -917,15 +936,15 @@ function update_fs_image {
 
 			# patch out shared_blocks flag
 			# this means that writes might affect multiple files, but that's probably fine (we carefully truncate/overwrite properly)
-			dd if="$img" of="$1/features" skip=$((0x465)) bs=1 count=1 2>/dev/null
+			dd if="$img" of="$work/features" skip=$((0x465)) bs=1 count=1 2>/dev/null
 			dd if=/dev/zero of="$img" seek=$((0x465)) conv=notrunc bs=1 count=1 2>/dev/null
 
 			if test "$loop_method" == "guestmount"; then
 				eval $(guestfish --listen -a "$img")
-				guestfish --remote launch : mount_options rw,noatime /dev/sda / : debug sh "echo 0 > /sys/fs/ext4/sda/reserved_clusters" : mount-local "$1/mnt"
+				guestfish --remote launch : mount_options rw,noatime /dev/sda / : debug sh "echo 0 > /sys/fs/ext4/sda/reserved_clusters" : mount-local "$work/mnt"
 				guestfish --remote mount-local-run &
 			else
-				loop="$(mount -v -o loop,rw,noatime "$img" "$1/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
+				loop="$(mount -v -o loop,rw,noatime "$img" "$work/mnt"|sed -re 's|^mount: /dev/(\S+).*|\1|')"
 				echo 0 > /sys/fs/ext4/"$loop"/reserved_clusters
 			fi
 
@@ -934,8 +953,12 @@ function update_fs_image {
 
 			for i in "${!files[@]}"; do
 				p="${files[i]}"
+				d="${file_dirs[i]}"
+				base="${bases[d]}"
+				modded="${moddeds[d]}"
+				root="${roots[d]}"
 				mod="$base/$p"
-				orig="$1/mnt$root/$p"
+				orig="$work/mnt$root/$p"
 
 				tmp=
 
@@ -949,7 +972,7 @@ function update_fs_image {
 					if test -e "$orig"; then
 						times="$(stat -c '%X %Y %Z' -- "$orig")"
 						if test -z "$tmp_dir"; then
-							tmp_dir="$(mktemp -d "$1/mnt/.tmp.XXXXXX")"
+							tmp_dir="$(mktemp -d "$work/mnt/.tmp.XXXXXX")"
 						fi
 
 						tmp="$tmp_dir/$tmp_i"
@@ -961,7 +984,7 @@ function update_fs_image {
 						touch "$orig"
 					fi
 					if test -s "$modded/$p"; then
-						times="$(stat -c '%X %Y %Z' -- "$1/mnt$root")"
+						times="$(stat -c '%X %Y %Z' -- "$work/mnt$root")"
 						read mode uid gid con rest < "$modded/$p"
 						touch "$orig"
 						chown "$uid:$gid" "$orig"
@@ -978,20 +1001,20 @@ function update_fs_image {
 				read atime mtime ctime <<<"$times"
 				touch -d "@$mtime" -m -- "$orig"
 				touch -d "@$atime" -a -- "$orig"
-				echo "set_inode_field $root/$p ctime @$ctime" >> "$1/debugfs"
+				echo "set_inode_field $root/$p ctime @$ctime" >> "$work/debugfs"
 				if test -n "$tmp"; then
-					tmp_rel="$(sed -e "s|^$1/mnt||" <<<"$tmp")"
+					tmp_rel="$(sed -e "s|^$work/mnt||" <<<"$tmp")"
 					# use unlink so that it doesn't free potentially shared blocks
-					echo "unlink $tmp_rel" >> "$1/debugfs"
+					echo "unlink $tmp_rel" >> "$work/debugfs"
 				fi
 			done
 
 			if test -n "$tmp_dir"; then
-				tmp_dir_rel="$(sed -e "s|^$1/mnt||" <<<"$tmp_dir")"
+				tmp_dir_rel="$(sed -e "s|^$work/mnt||" <<<"$tmp_dir")"
 				# rmdir is fine here, we can't have shared blocks in the directory
-				echo "rmdir $tmp_dir_rel" >> "$1/debugfs"
+				echo "rmdir $tmp_dir_rel" >> "$work/debugfs"
 			fi
-			while ! $loop_umount "$1/mnt"; do sleep 1; done
+			while ! $loop_umount "$work/mnt"; do sleep 1; done
 		else
 			ln -f "$src" "$img"
 		fi
@@ -1990,11 +2013,15 @@ function make_target_files_zip {
 			if test -e "$dir/ota_payload/$b.img"; then
 				d="$(echo "$b"|tr a-z A-Z)"
 				if test -e "$outdir/target_files_signed/$d"; then
-					root=
+					dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "")
 					if test "$b" == system; then
-						root=/system
+						# the system image of a system-as-root device is the root filesystem, which the
+						# system partition is then mounted inside of, so its ROOT directory goes at the
+						# root of the image and its SYSTEM directory under /system
+						dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" /system
+							"$outdir/target_files_signed/ROOT" "$outdir/modded_paths/ROOT" "")
 					fi
-					make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "$root"
+					make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "${dirs[@]}"
 				fi
 			fi
 		done
