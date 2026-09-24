@@ -582,6 +582,45 @@ fi
 make_file "$otatools/bin/aapt2.maven" download_aapt2
 make_file "$otatools/bin/aapt2" make_aapt2_wrapper
 
+function make_deapexer_wrapper {
+	cat - > "$1" <<"EOF"
+#!/bin/bash
+set -euo pipefail
+deapexer="$0.otatools"
+# the options that come before the command
+opts=()
+while [[ $# -ge 2 && $1 == --* ]]; do
+	opts+=("$1" "$2")
+	shift 2
+done
+# deapexer can only list the files of an ext4 payload, while the signing lists the files of every
+# APEX to find the APKs to sign in it, so list those of an erofs one by extracting them
+if [[ $# == 2 && $1 == list ]] && python3 -c 'import struct, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]).open("apex_payload.img") as f:
+    sys.exit(struct.unpack_from("<I", f.read(1028), 1024)[0] != 0xE0F5E1E2)' "$2" 2>/dev/null; then
+	tmp="$(mktemp -d)"
+	trap 'rm -rf "$tmp"' EXIT
+	# the signing takes what the command prints on stderr as part of the list as well
+	if ! log="$("$deapexer" "${opts[@]}" extract "$2" "$tmp/payload" 2>&1)"; then
+		printf '%s\n' "$log" >&2
+		exit 1
+	fi
+	cd "$tmp/payload"
+	find . \( -type d -printf '%p/\n' \) -o -printf '%p\n'
+else
+	exec "$deapexer" "${opts[@]}" "$@"
+fi
+EOF
+	chmod +x "$1"
+}
+
+# wrap deapexer so that it can list the files of an erofs APEX payload, like the one of the virt APEX,
+# written again every time so that a change to the wrapper takes effect
+if ! test -e "$otatools/bin/deapexer.otatools"; then
+	mv "$otatools/bin/deapexer" "$otatools/bin/deapexer.otatools"
+fi
+with_temp "$otatools/bin/deapexer" "mktemp -u" mv make_deapexer_wrapper
+
 export PATH="$otatools/bin:$PATH"
 export ANDROID_HOST_OUT="$otatools"
 
