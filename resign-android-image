@@ -1534,21 +1534,25 @@ function patch_smali_method {
 	fi
 }
 
-# dex bytecode to pass to patch_jar_dex_method: "const/4 v0, 0; return v0", i.e. return false
+# bytecode and register count to pass to patch_jar_dex_method: "const/4 v0, 0; return v0", i.e. return
+# false, which uses a single register (v0)
 dex_return_false=12000f00
+dex_return_false_regs=1
 
 # replace the bytecode of a method in the dex files of a jar by binary-patching them in place rather than
 # disassembling and reassembling them, so that nothing but the method changes: $1 is a work directory, $2
 # is the jar (which is replaced), $3 is the method as dexdump -d names it, i.e. "Class.name:signature"
-# with the package left out (any package matches) and $4 is the new bytecode as hex. The new bytecode
-# must fit in the old one, and the rest of the old one is overwritten with nops. Errors out if no matching
-# method is found, so that the build fails loudly instead of silently producing an unpatched image if
-# Android renames or moves the code being patched
+# with the package left out (any package matches), $4 is the new bytecode as hex and $5 is the number of
+# registers it uses. The new bytecode must fit in the old one, and the rest of the old one is overwritten
+# with nops; registers_size is raised if the bytecode needs more registers than the method declares. Errors
+# out if no matching method is found, so that the build fails loudly instead of silently producing an
+# unpatched image if Android renames or moves the code being patched
 function patch_jar_dex_method {
 	local work="$1"
 	local jar="$2"
 	local method="$3"
 	local code="$4"
+	local regs="$5"
 
 	mkdir "$work/dex"
 	unzip -q -d "$work/dex" "$jar" 'classes*.dex'
@@ -1578,10 +1582,10 @@ function patch_jar_dex_method {
 
 		# the code item is registers_size, ins_size, outs_size and tries_size as 16-bit values followed by
 		# debug_info_off and insns_size (in 16-bit units) as 32-bit values and then the bytecode
-		python3 - "$dex" "$code" "${offsets[@]}" <<'EOF'
+		python3 - "$dex" "$code" "$regs" "${offsets[@]}" <<'EOF'
 import hashlib, struct, sys, zlib
 
-path, code, offsets = sys.argv[1], bytes.fromhex(sys.argv[2]), sys.argv[3:]
+path, code, need_regs, offsets = sys.argv[1], bytes.fromhex(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
 with open(path, "rb") as f:
 	dex = bytearray(f.read())
 if dex[:4] != b"dex\n" or not dex[4:7].isdigit() or dex[7] != 0:
@@ -1594,12 +1598,18 @@ version = int(dex[4:7])
 for offset in offsets:
 	offset = int(offset, 16)
 	registers, _, _, _, _, insns = struct.unpack_from("<HHHHII", dex, offset)
-	# the replacement bytecode only uses v0 and never throws, so any try blocks become dead code: their
-	# handlers are unreachable, and since insns_size is unchanged and every unit left behind (const/4,
-	# return, nop) is a one-unit instruction, the try ranges and handler addresses that follow the bytecode
-	# stay in bounds and instruction-aligned, so they need no fixup
-	if registers < 1 or len(code) > insns * 2:
-		sys.exit(f"The method at {offset:#x} in {path} can't be replaced: {registers} registers, {insns} code units")
+	# the new bytecode has to fit where the old method was; the leftover is filled with nops below
+	if len(code) > insns * 2:
+		sys.exit(f"The method at {offset:#x} in {path} is too small: {insns} code units, but the replacement needs {len(code) // 2}")
+	# raise registers_size if the bytecode needs more registers than the method declares. Growing it shifts
+	# any parameters (which occupy the highest-numbered registers) upwards, but the whole instruction stream
+	# is being replaced, so nothing refers to them by their old numbers: try_items reference code offsets
+	# rather than registers, and debug info only requires each register it mentions to stay below the count
+	if registers < need_regs:
+		struct.pack_into("<H", dex, offset, need_regs)
+	# a replacement that ends in a return never throws, so any try blocks become unreachable dead code; the
+	# code items past the bytecode are untouched and insns_size is unchanged, and every filled unit is a
+	# single code unit, so their try ranges and handler addresses stay in bounds and instruction-aligned
 	dex[offset + 16:offset + 16 + insns * 2] = code.ljust(insns * 2, b"\0")
 
 # recompute a logical dex's SHA-1 signature (over everything past it up to the end of that dex) and then its
@@ -1804,7 +1814,7 @@ function patch_service_connectivity {
 	# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
 	# introduced in Android 17 are never enforced; the jar is recreated, so restore its original permissions
 	local mode="$(stat -c %a "$jar")"
-	with_temp_dir "$outdir/patch-service-connectivity" patch_jar_dex_method "$jar" 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
+	with_temp_dir "$outdir/patch-service-connectivity" patch_jar_dex_method "$jar" 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false" "$dex_return_false_regs"
 	chmod "$mode" "$jar"
 }
 
