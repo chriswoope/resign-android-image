@@ -1,0 +1,769 @@
+#!/usr/bin/env python3
+
+# Reconstruct, from the images of an Android build, the inputs that the standard Android image building
+# code (add_img_to_target_files.py, which sign_target_files_apks.py runs at the end of signing) builds
+# them from in target files, so that the images can be rebuilt from their files as a normal build
+# does rather than patched in place. Since the images of a release are built this way, whatever the
+# target files can't express can't be in them, and it is an error rather than something silently
+# dropped if it is.
+#
+# Usage:
+#     target_files_inputs.py fs-dump IMAGE
+#         print the metadata of every file of the ext4 IMAGE as JSON, read from the image itself so
+#         that nothing needs to be mounted
+#     target_files_inputs.py fs-config TARGET_FILES EXPECTED PARTITION METADATA [PARTITION METADATA...]
+#         write the META/*filesystem_config.txt and META/file_contexts.bin to build each PARTITION
+#         from the files in the TARGET_FILES directory with, and write to the EXPECTED directory the
+#         metadata the files of each built image are expected to have: a file that METADATA, the dump
+#         of the original image, has keeps the metadata it had there, and any other file gets the
+#         default one that the build would give it
+#     target_files_inputs.py fs-verify IMAGE EXPECTED
+#         check that the files of the built IMAGE have exactly the metadata in the EXPECTED file
+#     target_files_inputs.py boot-inputs OUT PARTITION IMAGE [PARTITION IMAGE...]
+#         write to OUT/target_files the BOOT, INIT_BOOT and VENDOR_BOOT directories and the META files
+#         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
+#         to OUT/misc_info.txt the misc_info.txt entries they are built with, and to OUT/expected what
+#         the built images are expected to be like. A boot image without a ramdisk is left to be used
+#         as a prebuilt one, as it is by a normal build
+#     target_files_inputs.py boot-verify IMAGE EXPECTED
+#         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
+#         names and metadata of the files in its ramdisks described in the EXPECTED file
+#     target_files_inputs.py avb-args PARTITION IMAGE
+#         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
+#         to PARTITION as the one IMAGE has
+#
+# The SELinux labels of the files of a filesystem image come from the file_contexts of the SELinux
+# policy in the image, which is what a normal build labels the files with, so that files added to the
+# image are labeled as the policy says; a file whose original label is not the one the policy gives it
+# (which should not happen in an image labeled by a normal build, but is checked for every file rather
+# than assumed) has its original label pinned by an extra entry matching exactly its path.
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+
+# the partitions whose images are built from a directory of the target files with the same name in
+# upper case and are mounted at the directory of their own name, with the system one holding the root
+PARTITIONS = ("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm", "system_dlkm")
+
+# where the file_contexts of each part of the SELinux policy is in the target files, in the order the
+# build concatenates them in, with the path it has in a device that doesn't have a partition for it
+POLICY_FILE_CONTEXTS = (
+    ("SYSTEM/etc/selinux/plat_file_contexts",),
+    ("SYSTEM_EXT/etc/selinux/system_ext_file_contexts", "SYSTEM/system_ext/etc/selinux/system_ext_file_contexts"),
+    ("PRODUCT/etc/selinux/product_file_contexts", "SYSTEM/product/etc/selinux/product_file_contexts"),
+    ("VENDOR/etc/selinux/vendor_file_contexts", "SYSTEM/vendor/etc/selinux/vendor_file_contexts"),
+    ("ODM/etc/selinux/odm_file_contexts", "VENDOR/odm/etc/selinux/odm_file_contexts"),
+)
+
+EXT4_MAGIC = 0xEF53
+EXT4_ROOT_INO = 2
+
+INCOMPAT_FILETYPE = 0x2
+INCOMPAT_EXTENTS = 0x40
+INCOMPAT_64BIT = 0x80
+INCOMPAT_MMP = 0x100
+INCOMPAT_FLEX_BG = 0x200
+INCOMPAT_CSUM_SEED = 0x2000
+INCOMPAT_INLINE_DATA = 0x8000
+# the incompatible features that don't change how the metadata read here is laid out
+INCOMPAT_SUPPORTED = (INCOMPAT_FILETYPE | INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_MMP | INCOMPAT_FLEX_BG
+                      | INCOMPAT_CSUM_SEED | INCOMPAT_INLINE_DATA)
+
+EXTENTS_FL = 0x80000
+INLINE_DATA_FL = 0x10000000
+EXTENT_MAGIC = 0xF30A
+XATTR_MAGIC = 0xEA020000
+XATTR_PREFIXES = {1: b"user.", 2: b"system.posix_acl_access", 3: b"system.posix_acl_default", 4: b"trusted.",
+                  6: b"security.", 7: b"system.", 8: b"system.richacl"}
+
+XATTR_SELINUX = b"security.selinux"
+XATTR_CAPABILITY = b"security.capability"
+XATTR_INLINE_DATA = b"system.data"
+VFS_CAP_REVISION_2 = 0x02000000
+VFS_CAP_FLAGS_EFFECTIVE = 0x1
+
+# the characters that have a meaning in a file_contexts regex, which is a PCRE2 one
+REGEX_META = re.compile(r"([\\^$.|?*+()\[\]{}])")
+
+
+def fail(message):
+    sys.exit(f"{sys.argv[0]}: {message}")
+
+
+class Ext4:
+    """The metadata of the files of an ext4 image, read straight out of the image."""
+
+    def __init__(self, path):
+        self.path = path
+        self.image = open(path, "rb")
+        sb = self.read(1024, 1024)
+        if struct.unpack_from("<H", sb, 0x38)[0] != EXT4_MAGIC:
+            fail(f"{path} is not an ext4 image")
+        self.block_size = 1024 << struct.unpack_from("<I", sb, 0x18)[0]
+        self.inodes_per_group = struct.unpack_from("<I", sb, 0x28)[0]
+        first_data_block = struct.unpack_from("<I", sb, 0x14)[0]
+        self.inode_size = struct.unpack_from("<H", sb, 0x58)[0] if struct.unpack_from("<I", sb, 0x4C)[0] else 128
+        incompat = struct.unpack_from("<I", sb, 0x60)[0]
+        if incompat & ~INCOMPAT_SUPPORTED:
+            fail(f"{path} uses the unsupported incompatible ext4 features {incompat & ~INCOMPAT_SUPPORTED:#x}")
+        self.filetype = incompat & INCOMPAT_FILETYPE
+        self.desc_size = 32
+        if incompat & INCOMPAT_64BIT:
+            self.desc_size = struct.unpack_from("<H", sb, 0xFE)[0]
+        groups = -(-struct.unpack_from("<I", sb, 0x0)[0] // self.inodes_per_group)
+        self.descs = self.read((first_data_block + 1) * self.block_size, groups * self.desc_size)
+
+    def read(self, offset, size):
+        self.image.seek(offset)
+        data = self.image.read(size)
+        if len(data) != size:
+            fail(f"{self.path} is truncated")
+        return data
+
+    def inode(self, ino):
+        group, index = divmod(ino - 1, self.inodes_per_group)
+        desc = self.descs[group * self.desc_size:(group + 1) * self.desc_size]
+        table = struct.unpack_from("<I", desc, 0x8)[0]
+        if self.desc_size >= 64:
+            table |= struct.unpack_from("<I", desc, 0x28)[0] << 32
+        return self.read(table * self.block_size + index * self.inode_size, self.inode_size)
+
+    def xattrs(self, ino, raw):
+        xattrs = {}
+        if self.inode_size > 128:
+            start = 128 + struct.unpack_from("<H", raw, 0x80)[0]
+            if start + 4 <= len(raw) and struct.unpack_from("<I", raw, start)[0] == XATTR_MAGIC:
+                # the values of the attributes in the inode are at offsets from the first entry
+                self.xattr_entries(ino, raw, start + 4, start + 4, xattrs)
+        block = struct.unpack_from("<I", raw, 0x68)[0] | struct.unpack_from("<H", raw, 0x76)[0] << 32
+        if block:
+            data = self.read(block * self.block_size, self.block_size)
+            if struct.unpack_from("<I", data, 0)[0] != XATTR_MAGIC:
+                fail(f"{self.path}: inode {ino} has a corrupt extended attribute block")
+            # the entries in a block follow its 32 byte header and their values are at offsets from it
+            self.xattr_entries(ino, data, 32, 0, xattrs)
+        return xattrs
+
+    def xattr_entries(self, ino, data, offset, values, xattrs):
+        while offset + 4 <= len(data) and struct.unpack_from("<I", data, offset)[0]:
+            name_len, index, value_offset, value_inum, value_size = struct.unpack_from("<BBHII", data, offset)
+            if index not in XATTR_PREFIXES or value_inum:
+                fail(f"{self.path}: inode {ino} has an unsupported extended attribute")
+            name = XATTR_PREFIXES[index] + data[offset + 16:offset + 16 + name_len]
+            xattrs[name] = data[values + value_offset:values + value_offset + value_size]
+            offset += (16 + name_len + 3) & ~3
+
+    def extents(self, ino, node):
+        magic, entries, _, depth = struct.unpack_from("<HHHH", node, 0)
+        if magic != EXTENT_MAGIC:
+            fail(f"{self.path}: inode {ino} has a corrupt extent tree")
+        for i in range(entries):
+            entry = 12 + 12 * i
+            if depth:
+                leaf = struct.unpack_from("<I", node, entry + 4)[0] | struct.unpack_from("<H", node, entry + 8)[0] << 32
+                yield from self.extents(ino, self.read(leaf * self.block_size, self.block_size))
+            else:
+                logical, length, start_hi, start_lo = struct.unpack_from("<IHHI", node, entry)
+                yield logical, length, start_hi << 32 | start_lo
+
+    def dir_entries(self, ino, raw, xattrs):
+        """The names and inode numbers of the entries of the directory with inode number ino."""
+        flags = struct.unpack_from("<I", raw, 0x20)[0]
+        blocks = raw[0x28:0x28 + 60]
+        if flags & INLINE_DATA_FL:
+            # the inode holds the number of the parent directory and then the first entries, and the
+            # rest of the entries are in an extended attribute
+            regions = [blocks[4:], xattrs.get(XATTR_INLINE_DATA, b"")]
+        elif flags & EXTENTS_FL:
+            size = struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
+            data = bytearray(size)
+            for logical, length, start in self.extents(ino, blocks):
+                # an uninitialized extent, whose length has the top bit set, reads as zeroes
+                if length <= 32768:
+                    chunk = self.read(start * self.block_size, length * self.block_size)
+                    data[logical * self.block_size:logical * self.block_size + len(chunk)] = chunk
+            regions = [bytes(data[i:i + self.block_size]) for i in range(0, size, self.block_size)]
+        else:
+            fail(f"{self.path}: directory inode {ino} uses block maps, which are not supported")
+        for region in regions:
+            offset = 0
+            while offset + 8 <= len(region):
+                entry_ino, rec_len = struct.unpack_from("<IH", region, offset)
+                name_len = region[offset + 6] if self.filetype else struct.unpack_from("<H", region, offset + 6)[0]
+                if rec_len < 8 or offset + rec_len > len(region) or 8 + name_len > rec_len:
+                    fail(f"{self.path}: directory inode {ino} is corrupt")
+                name = region[offset + 8:offset + 8 + name_len]
+                # the entries of the tree of an indexed directory and the checksums of the blocks are
+                # hidden in entries with no inode
+                if entry_ino and name not in (b".", b".."):
+                    yield name, entry_ino
+                offset += rec_len
+
+    def metadata(self, ino, raw, xattrs):
+        mode = struct.unpack_from("<H", raw, 0x0)[0]
+        if stat.S_ISDIR(mode):
+            kind = "d"
+        elif stat.S_ISREG(mode):
+            kind = "f"
+        elif stat.S_ISLNK(mode):
+            kind = "l"
+        else:
+            fail(f"{self.path}: inode {ino} is of an unsupported type {mode:#o}")
+
+        caps = 0
+        for name, value in xattrs.items():
+            if name == XATTR_SELINUX:
+                if not value.endswith(b"\0") or b"\0" in value[:-1]:
+                    fail(f"{self.path}: inode {ino} has a malformed SELinux label {value!r}")
+            elif name == XATTR_CAPABILITY:
+                # only the capabilities the build can set can be carried over: effective and
+                # permitted ones, with no inheritable ones, as a revision 2 attribute
+                if len(value) != 20:
+                    fail(f"{self.path}: inode {ino} has unsupported capabilities {value.hex()}")
+                magic, permitted_lo, inheritable_lo, permitted_hi, inheritable_hi = struct.unpack("<5I", value)
+                caps = permitted_hi << 32 | permitted_lo
+                if (magic != VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE or inheritable_lo or inheritable_hi
+                        or not caps):
+                    fail(f"{self.path}: inode {ino} has unsupported capabilities {value.hex()}")
+            elif not (name == XATTR_INLINE_DATA and struct.unpack_from("<I", raw, 0x20)[0] & INLINE_DATA_FL):
+                fail(f"{self.path}: inode {ino} has an unsupported extended attribute {name!r}")
+        if XATTR_SELINUX not in xattrs:
+            fail(f"{self.path}: inode {ino} has no SELinux label")
+
+        return {
+            "type": kind,
+            "uid": struct.unpack_from("<H", raw, 0x2)[0] | struct.unpack_from("<H", raw, 0x78)[0] << 16,
+            "gid": struct.unpack_from("<H", raw, 0x18)[0] | struct.unpack_from("<H", raw, 0x7A)[0] << 16,
+            "mode": stat.S_IMODE(mode),
+            "caps": caps,
+            "label": os.fsdecode(xattrs[XATTR_SELINUX][:-1]),
+        }
+
+    def files(self):
+        """The metadata of every file, by path relative to the root, which is "" itself."""
+        files = {}
+        paths = {}
+        pending = [("", EXT4_ROOT_INO)]
+        while pending:
+            path, ino = pending.pop()
+            if ino in paths:
+                fail(f"{self.path}: /{path} is a hard link to /{paths[ino]}, which target files cannot hold")
+            paths[ino] = path
+            raw = self.inode(ino)
+            xattrs = self.xattrs(ino, raw)
+            files[path] = self.metadata(ino, raw, xattrs)
+            if files[path]["type"] == "d":
+                for name, entry_ino in self.dir_entries(ino, raw, xattrs):
+                    # mke2fs creates lost+found in every image it builds
+                    if path == "" and name == b"lost+found":
+                        continue
+                    pending.append((os.path.join(path, os.fsdecode(name)), entry_ino))
+        return files
+
+
+def partition_prefix(partition):
+    """The path the files of the image of a partition have in the fs_config and file_contexts."""
+    return "" if partition == "system" else partition
+
+
+def join(prefix, path):
+    return prefix + "/" + path if prefix and path else prefix or path
+
+
+def unjoin(prefix, path):
+    """The path relative to the root of the image of a file whose path in the fs_config is path."""
+    if not prefix:
+        return path
+    return "" if path == prefix else path[len(prefix) + 1:]
+
+
+def text(path, mode="r"):
+    """Open a text file that holds file names, which can be any bytes."""
+    return open(path, mode, encoding="utf-8", errors="surrogateescape")
+
+
+def fs_dump(image):
+    json.dump(Ext4(image).files(), sys.stdout, sort_keys=True)
+
+
+def avb_args(partition, image):
+    """The misc_info.txt entries that make the build add the same AVB footer to partition as image has."""
+    info = subprocess.run(["avbtool", "info_image", "--image", image], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout
+    fields = dict(re.findall(r"^\s*([A-Za-z ]+):\s+(.*)$", info, re.M))
+    props = [arg for name, value in re.findall(r"^\s+Prop: (.*?) -> '(.*)'$", info, re.M)
+             for arg in ("--prop", f"{name}:{value}")]
+    descriptors = re.findall(r"^    (\S.*) descriptor:$", info, re.M)
+    if any(value != "0" for value in re.findall(r"^\s*(?:Flags|Rollback Index):\s+(.*)$", info, re.M)):
+        fail(f"{image} has an AVB footer with flags or a rollback index, which the build doesn't give it")
+    if descriptors == ["Hashtree"]:
+        if fields["Data Block Size"] != "4096 bytes" or fields["Hash Block Size"] != "4096 bytes":
+            fail(f"{image} has an AVB hashtree with a block size other than 4096")
+        args = ["--hash_algorithm", fields["Hash Algorithm"]]
+        if fields["FEC num roots"] == "0":
+            args.append("--do_not_generate_fec")
+        else:
+            args += ["--fec_num_roots", fields["FEC num roots"]]
+        return [f"avb_{partition}_hashtree_enable=true",
+                f"avb_{partition}_add_hashtree_footer_args={shlex.join(args + props)}",
+                f"avb_{partition}_salt={fields['Salt']}"]
+    if descriptors == ["Hash"]:
+        # the build only gives the images with a hash footer a salt of their own through their arguments
+        args = ["--hash_algorithm", fields["Hash Algorithm"], "--salt", fields["Salt"]]
+        return [f"avb_{partition}_add_hash_footer_args={shlex.join(args + props)}",
+                f"{partition}_size={fields['Image size'].split()[0]}"]
+    fail(f"{image} has an AVB footer with descriptors {descriptors} rather than a single hash or hashtree one")
+
+
+def tree_files(target_files, partition):
+    """The type of each of the files that are going to be in the image of a partition, by the path
+    they have in the fs_config."""
+    prefix = partition_prefix(partition)
+    trees = [(prefix, os.path.join(target_files, partition.upper()))]
+    if partition == "system":
+        # the system image of a system-as-root device is the root filesystem, with the system
+        # partition in it at /system, which build_image.py builds out of ROOT and then SYSTEM
+        trees = [("", os.path.join(target_files, "ROOT")), ("system", os.path.join(target_files, "SYSTEM"))]
+    files = {}
+    for tree_prefix, tree in trees:
+        if not os.path.isdir(tree):
+            fail(f"{tree} is missing")
+        for top, dirs, names in os.walk(tree):
+            rel = os.path.relpath(top, tree)
+            base = join(tree_prefix, "" if rel == "." else rel)
+            if top == tree:
+                # ROOT holds the directory that SYSTEM goes in
+                if partition == "system" and tree_prefix == "" and "system" in dirs:
+                    dirs.remove("system")
+                entries = [(base, top)]
+            else:
+                entries = []
+            if base == prefix and "lost+found" in dirs:
+                # mke2fs creates it
+                dirs.remove("lost+found")
+            entries += [(join(base, name), os.path.join(top, name)) for name in dirs + names]
+            for path, host_path in entries:
+                if re.search(r"[\x00-\x20\x7f]", path):
+                    fail(f"{path!r} cannot be written in a fs_config or file_contexts file")
+                mode = os.lstat(host_path).st_mode
+                if stat.S_ISDIR(mode):
+                    files[path] = "d"
+                elif stat.S_ISREG(mode):
+                    files[path] = "f"
+                elif stat.S_ISLNK(mode):
+                    files[path] = "l"
+                else:
+                    fail(f"{host_path} is of an unsupported type")
+    return files
+
+
+def policy_file_contexts(target_files):
+    paths = []
+    for candidates in POLICY_FILE_CONTEXTS:
+        found = [p for p in (os.path.join(target_files, c) for c in candidates) if os.path.exists(p)]
+        paths += found[:1]
+    if not paths or not paths[0].endswith("/plat_file_contexts"):
+        fail(f"{target_files} has no plat_file_contexts")
+    return paths
+
+
+def fs_config_name(partition, path):
+    if partition != "system":
+        return partition + "_filesystem_config.txt"
+    if path == "system" or path.startswith("system/"):
+        return "filesystem_config.txt"
+    return "root_filesystem_config.txt"
+
+
+def fs_config(target_files, expected_dir, partitions):
+    meta = os.path.join(target_files, "META")
+    with tempfile.TemporaryDirectory() as tmp:
+        policy = os.path.join(tmp, "file_contexts")
+        subprocess.run(["fc_sort", "-i", *policy_file_contexts(target_files), "-o", policy], check=True)
+        policy_bin = os.path.join(tmp, "file_contexts.bin")
+        subprocess.run(["sefcontext_compile", "-o", policy_bin, policy], check=True)
+
+        # fs_config reads the device specific defaults from the etc/fs_config_* files of each
+        # partition, which it looks for next to the directory of the system partition it is given
+        out = os.path.join(tmp, "out")
+        os.mkdir(out)
+        for partition in PARTITIONS:
+            tree = os.path.abspath(os.path.join(target_files, partition.upper()))
+            if os.path.isdir(tree):
+                os.symlink(tree, os.path.join(out, partition))
+
+        files = {}
+        originals = {}
+        for partition, metadata in partitions:
+            files[partition] = tree_files(target_files, partition)
+            with open(metadata) as f:
+                originals.update((join(partition_prefix(partition), path), m) for path, m in json.load(f).items())
+
+        # the label the policy gives each file and the metadata that a file the original image doesn't
+        # have gets by default, as the build computes them, with a directory told apart by a slash
+        paths = [(path, kind) for partition in files for path, kind in sorted(files[partition].items())]
+        listing = "".join(path + "/" * (kind == "d") + "\n" for path, kind in paths)
+        output = subprocess.run(["fs_config", "-C", "-D", os.path.join(out, "system"), "-S", policy_bin, "-R", ""],
+                                input=os.fsencode(listing), check=True, stdout=subprocess.PIPE).stdout
+        lines = os.fsdecode(output).splitlines()
+        if len(lines) != len(paths):
+            fail("fs_config did not print a line for each file")
+        defaults = {}
+        for (path, _), line in zip(paths, lines):
+            # the path goes first, and a path has no spaces
+            fields = line.split(" ")[1:]
+            attrs = dict(f.split("=", 1) for f in fields[3:])
+            if "selabel" not in attrs:
+                fail(f"the SELinux policy has no label for /{path}")
+            defaults[path] = {"uid": int(fields[0]), "gid": int(fields[1]), "mode": int(fields[2], 8),
+                              "caps": int(attrs["capabilities"], 16), "label": attrs["selabel"]}
+
+        pins = {}
+        fs_configs = {}
+        for partition in files:
+            prefix = partition_prefix(partition)
+            expected = {}
+            for path, kind in files[partition].items():
+                original = originals.get(path)
+                if original and original["type"] == kind:
+                    m = {k: original[k] for k in ("uid", "gid", "mode", "caps", "label")}
+                    if kind == "l":
+                        # fs_config looks a symbolic link up as if it were a regular file rather than
+                        # as the link that the build labels, so the label it got may not be the one the
+                        # build gives it
+                        pins[path] = m["label"]
+                    elif m["label"] != defaults[path]["label"]:
+                        print(f"Pinning the label {m['label']} of /{path}, which the policy labels "
+                              f"{defaults[path]['label']}", file=sys.stderr)
+                        pins[path] = m["label"]
+                else:
+                    m = defaults[path]
+                expected[path] = dict(m, type=kind)
+                # e2fsdroid looks the root of every image up by an empty path, and every other file by
+                # the path it has on the device
+                fs_configs.setdefault(fs_config_name(partition, path), []).append(
+                    f"{'' if path == prefix else path} {m['uid']} {m['gid']} {m['mode']:o} "
+                    f"selabel={m['label']} capabilities={m['caps']:#x}\n")
+
+            with open(os.path.join(expected_dir, partition + ".json"), "w") as f:
+                json.dump({unjoin(prefix, path): m for path, m in expected.items()}, f, sort_keys=True)
+
+        for name, lines in fs_configs.items():
+            with text(os.path.join(meta, name), "w") as f:
+                f.writelines(sorted(lines))
+
+        # a path that is only made of characters that have no special meaning in a regex or escaped
+        # ones is sorted after the regexes that have some and thus takes precedence over them, and a
+        # policy entry with the same regex has to go since the two would conflict
+        pin_regexes = {"/" + REGEX_META.sub(r"\\\1", path): label for path, label in sorted(pins.items())}
+        fc = os.path.join(tmp, "pinned_file_contexts")
+        with text(policy) as f, text(fc, "w") as out_fc:
+            for line in f:
+                fields = line.split()
+                if not fields or fields[0] not in pin_regexes:
+                    out_fc.write(line)
+            out_fc.writelines(f"{regex} {label}\n" for regex, label in pin_regexes.items())
+        subprocess.run(["sefcontext_compile", "-o", os.path.join(meta, "file_contexts.bin"), fc], check=True)
+
+
+def fs_verify(image, expected_path):
+    with open(expected_path) as f:
+        expected = json.load(f)
+    actual = Ext4(image).files()
+    errors = []
+    for path in sorted(expected.keys() | actual.keys()):
+        if path not in actual:
+            errors.append(f"/{path} is missing")
+        elif path not in expected:
+            errors.append(f"/{path} should not be there")
+        elif actual[path] != expected[path]:
+            errors.append(f"/{path} is {actual[path]} rather than {expected[path]}")
+    if errors:
+        fail(f"{image} doesn't hold the expected files:\n" + "\n".join(errors))
+
+
+# the boot image files that unpack_bootimg writes out, as the options of mkbootimg that take them
+BOOT_FILE_OPTIONS = ("--kernel", "--ramdisk", "--dtb", "--vendor_bootconfig", "--vendor_ramdisk",
+                     "--vendor_ramdisk_fragment")
+RAMDISK_OPTIONS = ("--ramdisk", "--vendor_ramdisk", "--vendor_ramdisk_fragment")
+# the options of mkbootimg that describe the ramdisk that follows them in a vendor boot image
+FRAGMENT_OPTIONS = re.compile(r"--ramdisk_type|--ramdisk_name|--board_id[0-9]+")
+LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"
+CPIO_TRAILER = b"TRAILER!!!"
+
+
+def unpack_boot_image(image, out):
+    """The mkbootimg options that image was made with, as unpack_bootimg writes them out to out."""
+    args = subprocess.run(["unpack_bootimg", "--boot_img", image, "--out", out, "--format", "mkbootimg"],
+                          check=True, stdout=subprocess.PIPE, text=True).stdout
+    info = subprocess.run(["unpack_bootimg", "--boot_img", image, "--out", out + ".info"], check=True,
+                          stdout=subprocess.PIPE, text=True).stdout
+    # a GKI boot image is certified by a signature that only a prebuilt image can carry
+    if re.search(r"^boot\.img signature size: (?!0$)", info, re.M):
+        fail(f"{image} has a boot signature, which target files can only hold in a prebuilt image")
+    tokens = shlex.split(args)
+    return list(zip(tokens[::2], tokens[1::2]))
+
+
+def cpio_entries(ramdisk):
+    """The entries of the newc cpio archive in the lz4 compressed ramdisk, as the name, mode, uid, gid,
+    device major and minor numbers and contents of each."""
+    with open(ramdisk, "rb") as f:
+        if f.read(4) != LZ4_LEGACY_MAGIC:
+            fail(f"{ramdisk} is not a ramdisk compressed with lz4 as the build compresses them")
+    data = subprocess.run(["lz4", "-d", "-c", ramdisk], check=True, stdout=subprocess.PIPE).stdout
+    entries = []
+    offset = 0
+    while True:
+        header = data[offset:offset + 110]
+        if header[:6] not in (b"070701", b"070702"):
+            fail(f"{ramdisk} is not a newc cpio archive")
+        ino, mode, uid, gid, nlink, mtime, size, dev_major, dev_minor, rdev_major, rdev_minor, name_size, _ = (
+            int(header[6 + 8 * i:14 + 8 * i], 16) for i in range(13))
+        name = data[offset + 110:offset + 110 + name_size - 1]
+        offset = (offset + 110 + name_size + 3) & ~3
+        contents = data[offset:offset + size]
+        offset = (offset + size + 3) & ~3
+        if name == CPIO_TRAILER:
+            return entries
+        entries.append((name, mode, uid, gid, rdev_major, rdev_minor, contents))
+
+
+def ramdisk_metadata(ramdisk):
+    return [[os.fsdecode(name), mode, uid, gid, rdev_major, rdev_minor]
+            for name, mode, uid, gid, rdev_major, rdev_minor, _ in cpio_entries(ramdisk)]
+
+
+def describe_boot_image(image, tmp):
+    """What a built boot image must be the same as the original in: its header, the contents of its
+    files and the names and metadata of the files in its ramdisks, whose contents may have changed."""
+    out = os.path.join(tmp, "unpacked")
+    description = []
+    for option, value in unpack_boot_image(image, out):
+        if option in RAMDISK_OPTIONS:
+            value = ramdisk_metadata(value)
+        elif option in BOOT_FILE_OPTIONS:
+            with open(value, "rb") as f:
+                value = hashlib.sha256(f.read()).hexdigest()
+        description.append([option, value])
+    return description
+
+
+def extract_ramdisk(ramdisk, tree, nodes_allowed):
+    """Extract the files of the ramdisk to tree, as the directory that mkbootfs is given, and return
+    the lines of the fs_config that mkbootfs takes the metadata of the files from and of the node list
+    of the entries that it adds of its own."""
+    entries = cpio_entries(ramdisk)
+    # mkbootfs writes out the entries of the node list first, and then the files in the directory it
+    # is given, sorted as it walks the directory, so the files are the longest run of entries at the end
+    # in that order that follows every device node
+    key = [tuple(name.split(b"/")) for name, *_ in entries]
+    first_file = len(entries)
+    while first_file > 0 and (first_file == len(entries) or key[first_file - 1] < key[first_file]):
+        first_file -= 1
+    for i, (_, mode, *_) in enumerate(entries):
+        if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+            first_file = max(first_file, i + 1)
+    if first_file and not nodes_allowed:
+        fail(f"{ramdisk} has device nodes, which target files can only hold in an init_boot ramdisk")
+
+    os.makedirs(tree)
+    fs_config = {}
+    nodes = []
+    for i, (name, mode, uid, gid, rdev_major, rdev_minor, contents) in enumerate(entries):
+        parts = name.split(b"/")
+        if not name or any(part in (b"", b".", b"..") for part in parts):
+            fail(f"{ramdisk} holds a file named {name!r}")
+        if re.search(rb"[\x00-\x20\x7f]", name):
+            fail(f"{ramdisk} holds {name!r}, which cannot be written in a fs_config file")
+        path = os.fsdecode(name)
+        line = f"{path} {uid} {gid} {stat.S_IMODE(mode):o}\n"
+        if fs_config.setdefault(path, line) != line:
+            fail(f"{ramdisk} holds /{path} twice with different metadata")
+        host_path = os.path.join(tree, *map(os.fsdecode, parts))
+        if i < first_file:
+            if stat.S_ISDIR(mode):
+                nodes.append(f"dir {path} {stat.S_IMODE(mode):04o} {uid} {gid}\n")
+            elif stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+                kind = "c" if stat.S_ISCHR(mode) else "b"
+                nodes.append(f"nod {path} {stat.S_IMODE(mode):04o} {uid} {gid} {kind} {rdev_major} {rdev_minor}\n")
+            else:
+                fail(f"{ramdisk} holds /{path} among the entries of the node list")
+        elif os.path.lexists(host_path):
+            fail(f"{ramdisk} holds /{path} twice")
+        elif stat.S_ISDIR(mode):
+            os.mkdir(host_path)
+        elif stat.S_ISREG(mode):
+            with open(host_path, "wb") as f:
+                f.write(contents)
+        elif stat.S_ISLNK(mode):
+            os.symlink(contents, host_path)
+        else:
+            fail(f"{ramdisk} holds /{path}, which is of an unsupported type {mode:#o}")
+    # mkbootfs looks the root up too, although it doesn't write it out
+    return [" 0 0 755\n"] + sorted(fs_config.values()), nodes
+
+
+def boot_inputs(out, partitions):
+    target_files = os.path.join(out, "target_files")
+    meta = os.path.join(target_files, "META")
+    expected = os.path.join(out, "expected")
+    os.makedirs(meta)
+    os.makedirs(expected)
+    misc_info = []
+    shared = {}
+
+    def share(key, value, image):
+        """Set a misc_info.txt entry that more than one image is built with."""
+        if shared.setdefault(key, (value, image))[0] != value:
+            fail(f"{image} and {shared[key][1]} would need different {key}: {value} and {shared[key][0]}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for partition, image in partitions:
+            unpacked = os.path.join(tmp, partition)
+            options = unpack_boot_image(image, unpacked)
+            values = dict(options)
+            tree = os.path.join(target_files, partition.upper())
+            misc_info += avb_args(partition, image)
+
+            if partition in ("boot", "init_boot"):
+                known = ("--header_version", "--os_version", "--os_patch_level", "--kernel", "--ramdisk", "--cmdline")
+                unknown = [option for option, _ in options if option not in known]
+                if unknown:
+                    fail(f"{image} is made with {' '.join(unknown)}, which target files cannot hold")
+                if os.path.getsize(values["--ramdisk"]) == 0:
+                    if partition == "init_boot":
+                        fail(f"{image} has no ramdisk")
+                    # like a GKI boot image, which a normal build takes as a prebuilt one
+                    continue
+                if partition == "init_boot" and (os.path.getsize(values["--kernel"]) or values["--cmdline"]):
+                    fail(f"{image} has a kernel or a command line, which the build doesn't give an init_boot image")
+                fs_config, nodes = extract_ramdisk(values["--ramdisk"], os.path.join(tree, "RAMDISK"),
+                                                   partition == "init_boot")
+                with text(os.path.join(meta, partition + "_filesystem_config.txt"), "w") as f:
+                    f.writelines(fs_config)
+                if nodes:
+                    with text(os.path.join(meta, "ramdisk_node_list"), "w") as f:
+                        f.writelines(nodes)
+                if os.path.getsize(values["--kernel"]):
+                    shutil.copyfile(values["--kernel"], os.path.join(tree, "kernel"))
+                if values["--cmdline"]:
+                    with open(os.path.join(tree, "cmdline"), "w") as f:
+                        f.write(values["--cmdline"])
+                header = ["--header_version", values["--header_version"]]
+                if partition == "init_boot":
+                    misc_info.append(f"mkbootimg_init_args={shlex.join(header)}")
+                else:
+                    share("mkbootimg header version", values["--header_version"], image)
+                share("mkbootimg_version_args", shlex.join(
+                    ["--os_version", values["--os_version"], "--os_patch_level", values["--os_patch_level"]]), image)
+
+            elif partition == "vendor_boot":
+                # what goes in a file of its own in VENDOR_BOOT, as the name of the file
+                files = {"--dtb": "dtb", "--vendor_bootconfig": "vendor_bootconfig", "--vendor_cmdline": "vendor_cmdline",
+                         "--pagesize": "pagesize", "--base": "base"}
+                known = ("--header_version", "--kernel_offset", "--ramdisk_offset", "--tags_offset", "--dtb_offset",
+                         "--board", "--vendor_ramdisk", "--vendor_ramdisk_fragment", *files)
+                args = []
+                ramdisks = []
+                fragment = []
+                os.makedirs(tree)
+                for option, value in options:
+                    if FRAGMENT_OPTIONS.fullmatch(option):
+                        fragment += [option, value]
+                    elif option in ("--vendor_ramdisk", "--vendor_ramdisk_fragment"):
+                        ramdisks.append((fragment, value))
+                        fragment = []
+                    elif option not in known:
+                        fail(f"{image} is made with {option}, which target files cannot hold")
+                    elif option in files and option in BOOT_FILE_OPTIONS:
+                        shutil.copyfile(value, os.path.join(tree, files[option]))
+                    elif option in files:
+                        if value:
+                            with open(os.path.join(tree, files[option]), "w") as f:
+                                f.write(value)
+                    else:
+                        args += [option, value]
+                # the build makes the ramdisk in VENDOR_BOOT/RAMDISK the first one, of the platform type
+                # and with no name, and then adds the others as fragments
+                if not ramdisks or ramdisks[0][0] not in ([], ["--ramdisk_type", "1", "--ramdisk_name", ""]):
+                    fail(f"{image} doesn't start with the unnamed platform ramdisk that the build makes first")
+                extract_ramdisk(ramdisks[0][1], os.path.join(tree, "RAMDISK"), False)
+                names = []
+                for fragment, ramdisk in ramdisks[1:]:
+                    name = dict(zip(fragment[::2], fragment[1::2])).get("--ramdisk_name", "")
+                    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in (".", "..") or name in names:
+                        fail(f"{image} has a ramdisk named {name!r}, which cannot be a fragment in target files")
+                    names.append(name)
+                    fragment_dir = os.path.join(tree, "RAMDISK_FRAGMENTS", name)
+                    os.makedirs(fragment_dir)
+                    with open(os.path.join(fragment_dir, "mkbootimg_args"), "w") as f:
+                        f.write(shlex.join(fragment))
+                    shutil.copyfile(ramdisk, os.path.join(fragment_dir, "prebuilt_ramdisk"))
+                if names:
+                    with open(os.path.join(tree, "vendor_ramdisk_fragments"), "w") as f:
+                        f.write(shlex.join(names))
+                share("mkbootimg header version", values["--header_version"], image)
+                misc_info.append(f"mkbootimg_args={shlex.join(args)}")
+                misc_info.append("vendor_boot=true")
+
+            else:
+                fail(f"{partition} is not a boot image partition")
+
+            with open(os.path.join(expected, partition + ".json"), "w") as f:
+                json.dump(describe_boot_image(image, os.path.join(tmp, partition + ".expected")), f)
+
+        if "mkbootimg header version" in shared and "vendor_boot" not in dict(partitions):
+            misc_info.append(f"mkbootimg_args={shlex.join(['--header_version', shared['mkbootimg header version'][0]])}")
+        if "mkbootimg_version_args" in shared:
+            misc_info.append(f"mkbootimg_version_args={shared['mkbootimg_version_args'][0]}")
+    with open(os.path.join(out, "misc_info.txt"), "w") as f:
+        f.writelines(line + "\n" for line in misc_info)
+
+
+def boot_verify(image, expected_path):
+    with open(expected_path) as f:
+        expected = json.load(f)
+    with tempfile.TemporaryDirectory() as tmp:
+        actual = describe_boot_image(image, tmp)
+    if actual != expected:
+        errors = [f"{a} rather than {e}" for a, e in zip(actual, expected) if a != e]
+        if len(actual) != len(expected):
+            errors.append(f"{len(actual)} options rather than {len(expected)}")
+        fail(f"{image} is not made like the original one:\n" + "\n".join(errors))
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "fs-dump":
+        fs_dump(args[1])
+    elif len(args) >= 5 and len(args) % 2 == 1 and args[0] == "fs-config":
+        partitions = list(zip(args[3::2], args[4::2]))
+        unknown = [p for p, _ in partitions if p not in PARTITIONS]
+        if unknown:
+            fail(f"unknown partitions {' '.join(unknown)}")
+        fs_config(args[1], args[2], partitions)
+    elif len(args) == 3 and args[0] == "fs-verify":
+        fs_verify(args[1], args[2])
+    elif len(args) >= 4 and len(args) % 2 == 0 and args[0] == "boot-inputs":
+        boot_inputs(args[1], list(zip(args[2::2], args[3::2])))
+    elif len(args) == 3 and args[0] == "boot-verify":
+        boot_verify(args[1], args[2])
+    elif len(args) == 3 and args[0] == "avb-args":
+        print("\n".join(avb_args(args[1], args[2])))
+    else:
+        fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE")
+
+
+if __name__ == "__main__":
+    main()

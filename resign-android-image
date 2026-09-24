@@ -136,8 +136,9 @@ fi
 # vbmeta: only resign vbmeta
 # resign: resign apks and replace them in the images
 # rebuild: rebuild images
+# rebuild_images: resign apks and rebuild the filesystem images from their files as a normal build does
 
-image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm"
+image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm system_dlkm"
 
 build_factory=
 build_factory_zip=
@@ -256,6 +257,8 @@ while test "$#" != 0; do
 	elif test "$1" == "--rebuild"; then
 		build_method=rebuild
 		echo "--rebuild is incomplete and broken" >&2
+	elif test "$1" == "--rebuild-images"; then
+		build_method=rebuild_images
 	elif test "$1" == "--zip-opt"; then
 		zip_opt="-$2"
 		shift 1
@@ -303,7 +306,7 @@ if test -n "$adb_at_boot" && test -z "$adb_keys_content$adb_any_key"; then
 	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
 fi
 
-if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
+if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign && test "$build_method" != rebuild_images; then
 	echo "--adb-key, --adb-at-boot and --adb-until-unlock add files to the system image, which $build_method doesn't rebuild" >&2
 	exit 1
 fi
@@ -416,6 +419,14 @@ function mkdir_touch
 {
 	mkdir -p "$(dirname "$1")"
 	touch "$1"
+}
+
+# make a file that is about to be written in place a copy of its own, rather than one of the hard links
+# that the target files share with the files extracted from the images, which would be written too
+function own_file
+{
+	cp -a -- "$1" "$1.own"
+	mv -f -- "$1.own" "$1"
 }
 
 # write a modded_paths marker for a file that doesn't exist in the original image and has to be created
@@ -729,6 +740,9 @@ if test "$out_build" != "$build"; then
 	build_date_utc="$((build_date_utc + 86400 - 100 + 10#${out_build:8}))"
 fi
 outdir="$dir/out_$build_method"
+
+# the images that the signing builds, or adds a footer to, for rebuild_images
+signed_images="$image_parts vbmeta boot init_boot vendor_boot dtbo pvmfw"
 
 mkdir -p "$outdir"
 
@@ -1390,15 +1404,44 @@ function make_target_files_extracted {
 		ramdisk_part=init_boot
 	fi
 
-	for b in "$ramdisk_part" vendor_boot; do
-		if test -e "$dir/ota_payload/$b.img"; then
-			d="$(echo "$b"|tr a-z A-Z)"
-			make_dir "$outdir/target_files_extracted/$d" make_extract_boot "$outdir/bootimg/$b" "$dir/ota_payload/$b.img"
-		fi
-	done
+	if test "$build_method" == rebuild_images; then
+		# the owner, mode, capabilities and SELinux label of the files, which extracting the files
+		# doesn't keep and the images are going to be rebuilt with
+		mkdir -p "$outdir/fs_metadata"
+		for b in $image_parts; do
+			if test -e "$dir/ota_payload/$b.img"; then
+				make_file "$outdir/fs_metadata/$b.json" dump_fs_metadata "$dir/ota_payload/$b.img"
+			fi
+		done
+		make_dir "$outdir/boot_inputs" make_boot_inputs
+	else
+		for b in "$ramdisk_part" vendor_boot; do
+			if test -e "$dir/ota_payload/$b.img"; then
+				d="$(echo "$b"|tr a-z A-Z)"
+				make_dir "$outdir/target_files_extracted/$d" make_extract_boot "$outdir/bootimg/$b" "$dir/ota_payload/$b.img"
+			fi
+		done
+	fi
 
 	make_file "$outdir/apk_cert_hashes.txt" make_original_apk_cert_hashes "$outdir/target_files_extracted"
 	touch "$1"
+}
+
+function dump_fs_metadata {
+	python3 "$data_dir/target_files_inputs.py" fs-dump "$2" > "$1"
+}
+
+# write to $1 the target files directories and files that the boot images are built from, the
+# misc_info.txt entries they are built with and what they are expected to be like once built
+function make_boot_inputs {
+	local args=() b
+	for b in boot init_boot vendor_boot; do
+		# a boot image given with --replace-boot is used as a prebuilt one
+		if test -e "$dir/ota_payload/$b.img" && ! [[ $b == boot && -n $replace_boot ]]; then
+			args+=("$b" "$dir/ota_payload/$b.img")
+		fi
+	done
+	python3 "$data_dir/target_files_inputs.py" boot-inputs "$1" "${args[@]}"
 }
 
 function deapexer {
@@ -1891,6 +1934,17 @@ EOF
 	fi
 
 	cp -a -n -l --target-directory="$1" "$outdir/target_files_extracted"/*
+
+	if test "$build_method" == rebuild_images; then
+		cp -a -n -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
+		if test -n "$allowbackup"; then
+			# what resign unlinks from the image with debugfs
+			rm -rf "$1/SYSTEM/priv-app/Seedvault/oat"
+		fi
+		# the images are built out of these files by the signing, so the changes that resign makes to
+		# the signed files have to be made to these instead
+		apply_modifications "$1"
+	fi
 }
 
 
@@ -1914,6 +1968,68 @@ EOF
 			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
 		fi
 	fi
+
+	if test "$build_method" == rebuild_images; then
+		# have the signing build the filesystem images out of their files, as it does for a normal
+		# build, and give them the same hashtree footer as the original images
+		local dynamic=" $(sed -nre 's/^dynamic_partition_list=//p' "$dir/ota_payload/META/dynamic_partitions_info.txt") "
+		local b
+		for b in $image_parts; do
+			if test -e "$dir/ota_payload/$b.img"; then
+				printf '%s\n' "building_${b}_image=true" "${b}_fs_type=ext4" "${b}_selinux_fc=file_contexts.bin" "${b}_disable_sparse=true" >> "$1"
+				python3 "$data_dir/target_files_inputs.py" avb-args "$b" "$dir/ota_payload/$b.img" >> "$1" || exit 1
+				# the size of a dynamic partition is the size of its image, while the AVB footer of the
+				# image of any other partition must be at the end of the partition
+				if [[ $dynamic != *" $b "* ]]; then
+					echo "${b}_size=$(stat -c %s -- "$dir/ota_payload/$b.img")" >> "$1"
+				fi
+			fi
+		done
+
+		# and the boot images and vbmeta, with the dtbo and pvmfw images taken as prebuilt ones that the
+		# build adds a footer to
+		cat "$outdir/boot_inputs/misc_info.txt" >> "$1"
+		if test -e "$dir/ota_payload/dtbo.img"; then
+			python3 "$data_dir/target_files_inputs.py" avb-args dtbo "$dir/ota_payload/dtbo.img" >> "$1" || exit 1
+		fi
+		if test -e "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img"; then
+			echo has_pvmfw=true >> "$1"
+			python3 "$data_dir/target_files_inputs.py" avb-args pvmfw "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img" >> "$1" || exit 1
+		fi
+		if test -n "$replace_boot"; then
+			python3 "$data_dir/target_files_inputs.py" avb-args boot "$dir/ota_payload/boot.img" >> "$1" || exit 1
+		fi
+		check_vbmeta_partitions
+		printf '%s\n' avb_building_vbmeta_image=true "avb_vbmeta_args=--padding_size 4096 $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img"|tr '\n' ' ')" >> "$1"
+	fi
+}
+
+# check that vbmeta only verifies partitions that the signing builds the images of, as for a normal build
+function check_vbmeta_partitions {
+	if [[ $("$otatools/bin/avbtool" info_image --image "$dir/ota_payload/vbmeta.img") == *"Chain Partition descriptor"* ]]; then
+		echo "vbmeta chains to other vbmeta images, which is not supported" >&2
+		exit 1
+	fi
+	local p
+	for p in $(get_avbtool_partitions "$dir/ota_payload/vbmeta.img"); do
+		if ! [[ " $signed_images " == *" $p "* ]]; then
+			echo "vbmeta verifies $p, which there is no way to build the image of" >&2
+			exit 1
+		fi
+	done
+}
+
+# write the fs_config and file_contexts files that the images are going to be built with, so that the
+# files have the metadata they have in the original images, and the metadata the built images are
+# expected to have to $1
+function make_fs_config {
+	local args=() b
+	for b in $image_parts; do
+		if test -e "$outdir/fs_metadata/$b.json"; then
+			args+=("$b" "$outdir/fs_metadata/$b.json")
+		fi
+	done
+	python3 "$data_dir/target_files_inputs.py" fs-config "$outdir/target_files_intermediates" "$1" "${args[@]}"
 }
 
 function make_dynamic_partitions_info {
@@ -1980,6 +2096,26 @@ function make_dummy_image {
 	echo "x" > "$1"
 }
 
+function make_copy {
+	cp -- "$2" "$1"
+}
+
+# the public key of the payload of the virt APEX of the original images, which pvmfw has embedded to
+# verify it with, and which the signing replaces with the key it signs the APEX with
+function make_pvmfw_embedded_avbpubkey {
+	local apex
+	apex="$(find "$outdir/target_files_extracted" -regextype posix-extended -regex '.*/apex/com\.([^./]+\.)?android\.virt\.c?apex' -print -quit)"
+	if test -z "$apex"; then
+		echo "Failed to find the virt APEX, whose key pvmfw embeds" >&2
+		exit 1
+	fi
+	if [[ $apex == *.capex ]]; then
+		unzip -p "$apex" original_apex|bsdtar -x -O -f - apex_pubkey > "$1" || exit 1
+	else
+		unzip -p "$apex" apex_pubkey > "$1" || exit 1
+	fi
+}
+
 function make_target_files_intermediates {
 	make_dir "$outdir/target_files_intermediates" make_target_files_intermediates_base
 	make_file "$outdir/certs_mac.txt" make_certs_mac
@@ -1988,14 +2124,18 @@ function make_target_files_intermediates {
 	mkdir -p "$outdir/target_files_intermediates/META"
 	make_file "$outdir/target_files_intermediates/META/apkcerts.txt" make_apkcerts
 	make_file "$outdir/target_files_intermediates/META/apexkeys.txt" make_apexkeys
-	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
 	make_file "$outdir/target_files_intermediates/META/dynamic_partitions_info.txt" make_dynamic_partitions_info
 	make_file "$outdir/target_files_intermediates/META/otakeys.txt" make_otakeys
 	make_file "$outdir/target_files_intermediates/META/update_engine_config.txt" make_update_engine_config
 	mkdir -p "$outdir/target_files_intermediates/PREBUILT_IMAGES"
 	for i in dtbo boot init_boot; do
-		if test -e "$dir/ota_payload/$i.img"; then
-			make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+		# unless it is built from the files of its ramdisk
+		if test -e "$dir/ota_payload/$i.img" && ! test -e "$outdir/boot_inputs/target_files/${i^^}"; then
+			if test "$i" == boot && test -n "$replace_boot"; then
+				make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_copy "$replace_boot"
+			else
+				make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
+			fi
 		fi
 	done
 	for i in $image_parts; do
@@ -2006,6 +2146,21 @@ function make_target_files_intermediates {
 #	else
 #		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
 	fi
+	if test "$build_method" == rebuild_images; then
+		make_dir "$outdir/fs_expected" make_fs_config
+		# pvmfw may only be in the factory images, since it doesn't have to be updated by OTAs
+		local pvmfw="$dir/ota_payload/pvmfw.img"
+		if ! test -e "$pvmfw" && [[ " $(get_avbtool_partitions "$dir/ota_payload/vbmeta.img"|tr '\n' ' ') " == *" pvmfw "* ]]; then
+			extract_factory_image
+			pvmfw="$dir/factory_image/pvmfw.img"
+		fi
+		if test -e "$pvmfw"; then
+			make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img" make_hardlink "$pvmfw"
+			make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw_embedded.avbpubkey" make_pvmfw_embedded_avbpubkey
+		fi
+	fi
+	# after the prebuilt images, which it depends on
+	make_file "$outdir/target_files_intermediates/META/misc_info.txt" make_misc_info
 	touch "$1"
 }
 
@@ -2058,12 +2213,20 @@ function make_target_files_signed {
 
 	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
 
-	apply_modifications "$1"
+	if test "$build_method" == resign; then
+		apply_modifications "$1"
+	fi
 }
 
 # make the changes that the options ask for to the files in the target files directory $1
 function apply_modifications {
-	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n\n/'
+	# the signing appends a newline to the build.prop files, so resign makes them end with the empty
+	# line they end with in the original images after it, and rebuild_images with a single newline before it
+	local ending='\n\n'
+	if test "$build_method" == rebuild_images; then
+		ending='\n'
+	fi
+	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/'"$ending"'/'
 	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
 	# grep -vz BOOT|
 	prop_sed=""
@@ -2098,6 +2261,7 @@ function apply_modifications {
 	su=
 	if test -n "$recovery_adb_root"; then
 		# replace all calls to __android_log_is_debuggable with the constant 1
+		own_file "$1/VENDOR_BOOT/RAMDISK/system/bin/adbd"
 		patch_adbd {,}"$1/VENDOR_BOOT/RAMDISK/system/bin/adbd"
 	fi
 
@@ -2132,10 +2296,12 @@ function apply_modifications {
 		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="171032338"\s+name="RESTRICT_ADB_BACKUP"\s+/>)|\199"\2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
 	fi
 	if test -n "$hosts_url"; then
+		own_file "$1/SYSTEM/etc/hosts"
 		curl "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
 		mkdir_touch "$outdir/modded_paths/SYSTEM/etc/hosts"
 	fi
 	if test "$(wc -l < "$sepolicy")" != 0; then
+		own_file "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
 		echo "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" > "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
 
 		# we remove all neverallows because they have no runtime effect after policy compilation (unless validation fails, but in that case the device fails to boot), and it's too hard to fix them
@@ -2171,7 +2337,7 @@ function apply_modifications {
 }
 
 function make_target_files_base {
-	if test "$build_method" == resign; then
+	if test "$build_method" == resign || test "$build_method" == rebuild_images; then
 		make_dir "$outdir/target_files_signed" make_target_files_signed
 		discard "$outdir/target_files_signed.zip"
 
@@ -2196,6 +2362,7 @@ function make_target_files_base {
 # vbmeta: ota_payload -> [copy ota_payload images and make new vbmeta] -> target_files_intermediate -> target_files_intermediate.zip -> [ln] -> target_files_signed.zip -> [ln] -> target_files.zip
 # resign: ota_payload -> [extract apks from images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [integrate with ota_payload images] -> target_files -> target_files.zip
 # rebuild: ota_payload -> [unpack all images] -> target_files_intermediate -> target_files_intermediate.zip -> [sign] -> target_files_signed.zip -> [rename] -> target_files.zip
+# rebuild_images: ota_payload -> [extract files and their metadata from images, modify] -> target_files_intermediate -> target_files_intermediate.zip -> [sign and build filesystem images] -> target_files_signed.zip -> [integrate with ota_payload images] -> target_files -> target_files.zip
 
 function read_prop {
 	local i
@@ -2253,8 +2420,32 @@ function make_care_map {
 	"$otatools/bin/care_map_generator" "$care_map_txt" "$1"
 }
 
+# take the image of partition $2 that the signing built, checking that it is made like the original one
+function take_signed_image {
+	local img="$outdir/target_files_signed/IMAGES/$2.img"
+	local orig="$dir/ota_payload/$2.img"
+	if test -e "$outdir/fs_expected/$2.json"; then
+		python3 "$data_dir/target_files_inputs.py" fs-verify "$img" "$outdir/fs_expected/$2.json" || exit 1
+	elif test -e "$outdir/boot_inputs/expected/$2.json"; then
+		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$outdir/boot_inputs/expected/$2.json" || exit 1
+	elif test "$2" == vbmeta; then
+		if ! diff <(get_avbtool_partitions "$orig"|sort) <(get_avbtool_partitions "$img"|sort) >&2 || test "$(get_avbtool_vbmeta_opts "$orig")" != "$(get_avbtool_vbmeta_opts "$img")"; then
+			echo "The built vbmeta doesn't verify the same partitions with the same rollback index as the original one" >&2
+			exit 1
+		fi
+	elif test "$2" == boot && test -n "$replace_boot"; then
+		: # it is the one given with --replace-boot
+	elif test "$2" == pvmfw; then
+		: # the signing replaced the key embedded in it, and checked that it found the one to replace
+	elif ! cmp "$img" "$orig"; then
+		echo "The prebuilt $2.img was changed by adding a footer to it again" >&2
+		exit 1
+	fi
+	ln "$img" "$1"
+}
+
 function make_target_files_zip {
-	if test "$build_method" == resign; then
+	if test "$build_method" == resign || test "$build_method" == rebuild_images; then
 		make_dir "$outdir/target_files" make_target_files_base
 
 		ramdisk_part=boot
@@ -2262,10 +2453,16 @@ function make_target_files_zip {
 			ramdisk_part=init_boot
 		fi
 
+		# the images that are built rather than taken as they are
+		local built="$image_parts vbmeta $ramdisk_part vendor_boot"
+		if test "$build_method" == rebuild_images; then
+			built="$signed_images"
+		fi
+
 		mkdir -p "$outdir/target_files/IMAGES"
 		ls -1 "$dir/ota_payload"|while read i; do
 			local done=
-			for j in $image_parts vbmeta "$ramdisk_part" vendor_boot; do
+			for j in $built; do
 				if test "$i" == "$j.img"; then
 					done=1
 				fi
@@ -2275,36 +2472,46 @@ function make_target_files_zip {
 			fi
 		done || exit 1
 
-		for b in $image_parts; do
-			if test -e "$dir/ota_payload/$b.img"; then
-				d="$(echo "$b"|tr a-z A-Z)"
-				if test -e "$outdir/target_files_signed/$d"; then
-					dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "")
-					if test "$b" == system; then
-						# the system image of a system-as-root device is the root filesystem, which the
-						# system partition is then mounted inside of, so its ROOT directory goes at the
-						# root of the image and its SYSTEM directory under /system
-						dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" /system
-							"$outdir/target_files_signed/ROOT" "$outdir/modded_paths/ROOT" "")
-					fi
-					make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "${dirs[@]}"
+		if test "$build_method" == rebuild_images; then
+			for b in $built; do
+				if test -e "$dir/ota_payload/$b.img" || test -e "$outdir/target_files_signed/IMAGES/$b.img"; then
+					make_file "$outdir/target_files/IMAGES/$b.img" take_signed_image "$b"
 				fi
-			fi
-		done
+			done
+		else
+			for b in $image_parts; do
+				if test -e "$dir/ota_payload/$b.img"; then
+					d="$(echo "$b"|tr a-z A-Z)"
+					if test -e "$outdir/target_files_signed/$d"; then
+						dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" "")
+						if test "$b" == system; then
+							# the system image of a system-as-root device is the root filesystem, which the
+							# system partition is then mounted inside of, so its ROOT directory goes at the
+							# root of the image and its SYSTEM directory under /system
+							dirs=("$outdir/target_files_signed/$d" "$outdir/modded_paths/$d" /system
+								"$outdir/target_files_signed/ROOT" "$outdir/modded_paths/ROOT" "")
+						fi
+						make_file "$outdir/target_files/IMAGES/$b.img" make_fs_image "$b" "$dir/ota_payload/$b.img" "${dirs[@]}"
+					fi
+				fi
+			done
 
-		for b in "$ramdisk_part" vendor_boot; do
-			if test -e "$dir/ota_payload/$b.img"; then
-				d="$(echo "$b"|tr a-z A-Z)"
-				make_file "$outdir/target_files/IMAGES/$b.img" make_boot_image "$b" "$dir/ota_payload/$b.img" "$outdir/bootimg/$b" "$outdir/target_files_signed/$d"
-			fi
-		done
+			for b in "$ramdisk_part" vendor_boot; do
+				if test -e "$dir/ota_payload/$b.img"; then
+					d="$(echo "$b"|tr a-z A-Z)"
+					make_file "$outdir/target_files/IMAGES/$b.img" make_boot_image "$b" "$dir/ota_payload/$b.img" "$outdir/bootimg/$b" "$outdir/target_files_signed/$d"
+				fi
+			done
+		fi
 
 		if test "$android" -ge 130 && ! test -e "$outdir/target_files/IMAGES/pvmfw.img"; then
 			extract_factory_image
 			cp -a "$dir/factory_image/pvmfw.img" "$outdir/target_files/IMAGES/pvmfw.img"
 		fi
 
-		make_file "$outdir/target_files/IMAGES/vbmeta.img" make_vbmeta "$dir/ota_payload/vbmeta.img" "$outdir/target_files/IMAGES"
+		if test "$build_method" != rebuild_images; then
+			make_file "$outdir/target_files/IMAGES/vbmeta.img" make_vbmeta "$dir/ota_payload/vbmeta.img" "$outdir/target_files/IMAGES"
+		fi
 
 		discard "$outdir/target_files_signed"
 
