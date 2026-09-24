@@ -2058,7 +2058,7 @@ function make_target_files_signed {
 
 	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
 
-	find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -z -re 's/\n*$/\n\n/'
+	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n\n/'
 	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
 	# grep -vz BOOT|
 	prop_sed=""
@@ -2087,7 +2087,7 @@ function make_target_files_signed {
 		prop_sed="$prop_sed; s/^ro.adb.secure=.*/ro.adb.secure=0/"
 	fi
 	if test -n "$prop_sed"; then
-		find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -re "$prop_sed"
+		find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -re "$prop_sed"
 	fi
 	sepolicy="$(mktemp)"
 	su=
