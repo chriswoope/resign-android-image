@@ -1660,6 +1660,7 @@ function make_target_files_intermediates_base {
 			if test -e "$outdir/target_files_extracted/$i"; then
 				mkdir -p "$1/SYSTEM/apex"
 				with_temp_dir "$outdir/patch-adbd-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_adbd_in_root
+				mkdir_touch "$outdir/modded_paths/$i"
 			fi
 		done
 		if test -e "$outdir/target_files_extracted/SYSTEM/bin/adbd"; then
@@ -1728,6 +1729,7 @@ EOF
 			if test -e "$outdir/target_files_extracted/$i"; then
 				mkdir -p "$1/SYSTEM/apex"
 				with_temp_dir "$outdir/patch-tethering-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_service_connectivity
+				mkdir_touch "$outdir/modded_paths/$i"
 				patched=1
 			fi
 		done
