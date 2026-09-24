@@ -1393,6 +1393,29 @@ function deapexer {
 	"$otatools/bin/deapexer" --blkid_path "$blkid" --debugfs_path "$debugfs" --fsckerofs_path "$fsckerofs" "$@"
 }
 
+# remove from an extracted APEX payload the files that apexer adds back itself when it builds one
+function remove_apex_manifests {
+	local i
+	for i in apex_manifest.pb apex_manifest.json lost+found; do
+		if test -d "$1/$i"; then
+			rmdir "$1/$i"
+		else
+			rm -f "$1/$i"
+		fi
+	done
+}
+
+# print the name, the type, the mode, the size and either the target or the contents of every file of a
+# directory tree, sorted and NUL separated so that any file name works, to compare two trees by
+# everything that extracting an APEX payload preserves
+function tree_manifest {
+	(
+		cd "$1"
+		find . -mindepth 1 -printf '%p %y %#m %s %l\0'|sort -z
+		find . -mindepth 1 -type f -print0|sort -z|xargs -0 -r sha256sum
+	)
+}
+
 function patch_apex {
 	local work="$1"
 	local out="$2"
@@ -1408,13 +1431,7 @@ function patch_apex {
 	fi
 
 	deapexer extract "$work"/original.apex "$work"/payload
-	for i in apex_manifest.pb apex_manifest.json lost+found; do
-		if test -d "$work/payload/$i"; then
-			rmdir "$work/payload/$i"
-		else
-			rm -f "$work/payload/$i"
-		fi
-	done
+	remove_apex_manifests "$work/payload"
 
 	"$cmd" "$work/payload" "$@"
 
@@ -1444,6 +1461,29 @@ function patch_apex {
 	(cd "$work" && zip -0 "$modded_apex_r" apex_payload.img)
 	# apexd mounts the payload out of the APEX where it is, so it has to stay page aligned in it
 	"$otatools/bin/zipalign" -f 4096 "$work/modded.apex" "$work/aligned.apex"
+
+	# extracting the repacked APEX again has to give back exactly what apexer was given, so that a
+	# payload that lost a file, a symbolic link, a permission bit or a byte on the way makes the build
+	# fail rather than the device not boot
+	deapexer extract "$work/aligned.apex" "$work/repacked"
+	remove_apex_manifests "$work/repacked"
+	if ! cmp -s <(tree_manifest "$work/payload") <(tree_manifest "$work/repacked"); then
+		echo "Repacking $apex did not preserve its payload:" >&2
+		# the manifests are NUL separated to hold any file name, so make them printable to show them
+		diff <(tree_manifest "$work/payload"|tr '\0' '\n') <(tree_manifest "$work/repacked"|tr '\0' '\n') >&2 || true
+		exit 1
+	fi
+
+	# the SELinux label of each file is the one thing that extracting the payload doesn't keep, and it
+	# is what allows the bpf programs of the tethering APEX to be loaded at boot, so compare the labels
+	# in the images themselves; deapexer can only list an ext4 payload, whose superblock holds the
+	# 0x53ef magic at offset 0x438, rather than an erofs or f2fs one
+	if test "$(dd if="$work/apex/apex_payload.img" bs=1 skip=$((0x438)) count=2 status=none)" == $'\xef\x53'; then
+		if ! diff <(deapexer list -Z "$work/original.apex"|sort) <(deapexer list -Z "$work/aligned.apex"|sort) >&2; then
+			echo "Repacking $apex changed the SELinux labels of its payload" >&2
+			exit 1
+		fi
+	fi
 
 	if test "$type" == COMPRESSED; then
 		# apex_compression_tool tries to make an hardlink from the input to /tmp, so we need to copy it to /tmp
