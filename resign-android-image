@@ -931,15 +931,19 @@ function make_target_files_extracted {
 		fi
 	fi
 
+	# the images are read by one process each, so they are all read at the same time
+	local pids=() pid
 	for b in $image_parts; do
 		if test "$b" != system && test -e "$dir/ota_payload/$b.img"; then
 			d="$(echo "$b"|tr a-z A-Z)"
-			make_dir "$outdir/target_files_extracted/$d" make_extract_fs "$dir/ota_payload/$b.img" "$query"
+			make_dir "$outdir/target_files_extracted/$d" make_extract_fs "$dir/ota_payload/$b.img" "$query" &
+			pids+=("$!")
 		fi
 	done
 
 	if ! test -e "$outdir/target_files_extracted/SYSTEM" || ! test -e "$outdir/target_files_extracted/ROOT"; then
-		with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query"
+		with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query" &
+		pids+=("$!")
 	fi
 
 	if test "$build_method" == resign; then
@@ -948,11 +952,17 @@ function make_target_files_extracted {
 		mkdir -p "$outdir/fs_metadata"
 		for b in $image_parts; do
 			if test -e "$dir/ota_payload/$b.img"; then
-				make_file "$outdir/fs_metadata/$b.json" dump_fs_metadata "$dir/ota_payload/$b.img"
+				make_file "$outdir/fs_metadata/$b.json" dump_fs_metadata "$dir/ota_payload/$b.img" &
+				pids+=("$!")
 			fi
 		done
-		make_dir "$outdir/boot_inputs" make_boot_inputs
+		make_dir "$outdir/boot_inputs" make_boot_inputs &
+		pids+=("$!")
 	fi
+
+	for pid in "${pids[@]}"; do
+		wait "$pid" || exit 1
+	done
 
 	touch "$1"
 }
