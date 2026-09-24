@@ -1492,34 +1492,22 @@ dex_return_void='return-void'
 # expect to be able to modify it, and the immutable one only if the dex doesn't refer to ArrayList
 dex_return_empty_list=$'new-instance v0, Ljava/util/ArrayList;\ninvoke-direct {v0}, Ljava/util/ArrayList;.<init>:()V\nreturn-object v0\nor\ninvoke-static {}, Ljava/util/Collections;.emptyList:()Ljava/util/List;\nmove-result-object v0\nreturn-object v0'
 
-# patch the code in the dex files of a jar or an APK by binary-patching them in place rather than
-# disassembling and reassembling them with apktool, so that nothing but the patched instructions changes:
-# $1 is a work directory, $2 is the zip to write, $3 is the zip to patch and the remaining arguments are
-# the edits to apply, three arguments each, as documented in patch_dex.py
+# patch the code in the dex files of a jar or an APK by binary-patching them where they are inside it
+# rather than disassembling and reassembling them with apktool or even taking them out of the zip and
+# putting them back, so that nothing but the patched instructions changes: $1 is the zip to write, $2 is
+# the zip to patch, which can be the same file, and the remaining arguments are the edits to apply, three
+# arguments each, as documented in patch_dex.py
 function patch_dex_in_zip {
-	local work="$1"
-	local out="$2"
-	local in_zip="$3"
-	shift 3
+	local out="$1"
+	local in_zip="$2"
+	shift 2
 
-	mkdir "$work/dex"
-	unzip -q -d "$work/dex" "$in_zip" 'classes*.dex'
-
-	# the edits are passed on stdin since there can be any number of them, and the names of the dex files
-	# that were patched are read back, since those are the only ones that need replacing in the zip
-	local patched=()
-	mapfile -t patched < <(printf '%s\0' "$@"|python3 "$data_dir/patch_dex.py" "$work/dex")
-	if ! wait $!; then
-		echo "Failed to patch the dex files of $in_zip" >&2
-		exit 1
+	if test "$out" != "$in_zip"; then
+		cp -a "$in_zip" "$out"
 	fi
 
-	# replace only the patched dex files in a copy of the original, keeping them stored uncompressed
-	cp "$in_zip" "$work/out0.zip"
-	local out0_r="$(realpath "$work/out0.zip")"
-	(cd "$work/dex" && printf '%s\n' "${patched[@]}"|zip -q -0 -@ "$out0_r")
-	rm -f "$out"
-	"$otatools/bin/zipalign" -f -p 4 "$work/out0.zip" "$out"
+	# the edits are passed on stdin since there can be any number of them
+	printf '%s\0' "$@"|python3 "$data_dir/patch_dex.py" "$out"
 }
 
 # make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other
@@ -1631,7 +1619,7 @@ function patch_framework_jar {
 	fi
 
 	mkdir -p "$out/SYSTEM/framework"
-	with_temp_dir "$outdir/patch-${jar%.jar}" patch_dex_in_zip {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" "$@"
+	patch_dex_in_zip {"$out","$outdir/target_files_extracted"}/SYSTEM/framework/"$jar" "$@"
 	mkdir_touch "$outdir/modded_paths/SYSTEM/framework/$jar"
 }
 
@@ -1643,10 +1631,8 @@ function patch_service_connectivity {
 	fi
 
 	# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
-	# introduced in Android 17 are never enforced; the jar is recreated, so restore its original permissions
-	local mode="$(stat -c %a "$jar")"
-	with_temp_dir "$outdir/patch-service-connectivity" patch_dex_in_zip "$jar" "$jar" method 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
-	chmod "$mode" "$jar"
+	# introduced in Android 17 are never enforced
+	patch_dex_in_zip "$jar" "$jar" method 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
 }
 
 function patch_updater {
@@ -1783,7 +1769,7 @@ EOF
 	if test -n "$allowbackup"; then
 		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
 			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
-			with_temp_dir "$outdir/patch_seedvault" patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
+			patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
 			mkdir_touch "$outdir/modded_paths/SYSTEM/priv-app/Seedvault/Seedvault.apk"
 			echo "unlink /system/priv-app/Seedvault/oat" >> "$outdir/debugfs/system"
 		fi
