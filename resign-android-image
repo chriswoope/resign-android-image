@@ -673,14 +673,6 @@ if ! test -x "$fsckerofs"; then
 	fsckerofs="$(which fsck.erofs)"
 fi
 
-if false; then
-	extract_android_ota_payload="$var_dir/android-prepare-vendor/scripts/extract_android_ota_payload/extract_android_ota_payload.py"
-	git_clone "$var_dir/android-prepare-vendor" https://github.com/GrapheneOS/android-prepare-vendor &
-else
-	extract_android_ota_payload="$var_dir/extract_android_ota_payload/extract_android_ota_payload.py"
-	git_clone "$var_dir/extract_android_ota_payload" https://github.com/cyxx/extract_android_ota_payload &
-fi
-
 aosp="$var_dir/aosp-$os"
 mkdir -p "$aosp/build"
 git_clone_ref "$aosp/script" "$git_ref" "$git/script" &
@@ -806,8 +798,10 @@ signed_images="$image_parts vbmeta boot init_boot vendor_boot dtbo pvmfw"
 
 mkdir -p "$outdir"
 
+# extract the images of the partitions of payload $2, whose names are in file $3, into directory $1,
+# in parallel since ota_extractor extracts the partitions it is given one after the other
 function do_extract_ota_payload {
-	python3 "$extract_android_ota_payload" "$2" "$1"
+	xargs -d '\n' -a "$3" -P "$(nproc)" -I {} "$otatools/bin/ota_extractor" -payload "$2" -output_dir "$1" -partitions {}
 }
 
 function do_extract_ota_manifest {
@@ -895,7 +889,7 @@ function make_extract_ota_payload {
 		make_file "$dir/ota_meta/$i" make_hardlink "$dir/ota/$i"
 	done
 
-	do_extract_ota_payload "$1" "$dir/ota/payload.bin"
+	do_extract_ota_payload "$1" "$dir/ota/payload.bin" "$dir/ota_meta/ab_partitions.txt" || exit 1
 	mkdir -p "$1/META"
 	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$dir/ota/payload.bin"
 }
@@ -2046,7 +2040,8 @@ function check_images {
 function check_ota {
 	mkdir "$1"/ota >&2
 	unzip -x -d "$1/ota" "$outdir/ota_unchecked.zip" >&2
-	python3 "$extract_android_ota_payload" "$1/ota/payload.bin" "$1/ota_payload" >&2
+	mkdir "$1/ota_payload"
+	"$otatools/bin/ota_extractor" -payload "$1/ota/payload.bin" -output_dir "$1/ota_payload" -partitions vendor_boot,system >&2
 	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img"
 }
 
