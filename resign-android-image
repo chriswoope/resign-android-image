@@ -798,10 +798,21 @@ signed_images="$image_parts vbmeta boot init_boot vendor_boot dtbo pvmfw"
 
 mkdir -p "$outdir"
 
-# extract the images of the partitions of payload $2, whose names are in file $3, into directory $1,
-# in parallel since ota_extractor extracts the partitions it is given one after the other
+# set ota_payload_offset to the offset of the payload in the A/B OTA zip $1, which its metadata gives,
+# for the payload to be read where it is rather than extracted
+function ota_payload_offset {
+	ota_payload_offset="$(unzip -p "$1" META-INF/com/android/metadata|sed -nre 's/^ota-property-files=(.*,)?payload\.bin:([0-9]+):.*/\2/p')"
+	if test -z "$ota_payload_offset"; then
+		echo "The metadata of $1 doesn't give the offset of its payload" >&2
+		exit 1
+	fi
+}
+
+# extract the images of the partitions of the payload of OTA zip $2, whose names are in file $3, into
+# directory $1, in parallel since ota_extractor extracts the partitions it is given one after the other
 function do_extract_ota_payload {
-	xargs -d '\n' -a "$3" -P "$(nproc)" -I {} "$otatools/bin/ota_extractor" -payload "$2" -output_dir "$1" -partitions {}
+	ota_payload_offset "$2"
+	xargs -d '\n' -a "$3" -P "$(nproc)" -I {} "$otatools/bin/ota_extractor" -payload "$2" -payload_offset "$ota_payload_offset" -output_dir "$1" -partitions {}
 }
 
 function do_extract_ota_manifest {
@@ -877,26 +888,26 @@ function extract_root_and_system {
 function make_extract_ota {
 	make_file "$dir/ota.zip.ok" download_ota
 
-	do_unzip "$1" "$ota_zip"
+	# the payload is read where it is in the zip
+	unzip -q -d "$1" "$ota_zip" -x payload.bin
 }
 
 function make_extract_ota_payload {
 	make_dir "$dir/ota" make_extract_ota
-	discard_download "$ota_zip"
 
-	make_dir "$dir/ota_meta" do_extract_ota_manifest "$dir/ota/payload.bin"
+	make_dir "$dir/ota_meta" do_extract_ota_manifest "$ota_zip"
 	for i in apex_info.pb; do
 		make_file "$dir/ota_meta/$i" make_hardlink "$dir/ota/$i"
 	done
 
-	do_extract_ota_payload "$1" "$dir/ota/payload.bin" "$dir/ota_meta/ab_partitions.txt" || exit 1
+	do_extract_ota_payload "$1" "$ota_zip" "$dir/ota_meta/ab_partitions.txt" || exit 1
 	mkdir -p "$1/META"
-	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$dir/ota/payload.bin"
+	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$ota_zip" || exit 1
+	discard_download "$ota_zip"
 }
 
 function make_target_files_extracted {
 	make_dir "$dir/ota_payload" make_extract_ota_payload
-	discard "$dir/ota/payload.bin"
 
 	#mkdir "$1/META"
 	#ls -1 "$dir/ota_payload"|sed -re 's/\.img$//'>"$1/META/ab_partitions.txt"
@@ -2054,10 +2065,9 @@ function check_images {
 }
 
 function check_ota {
-	mkdir "$1"/ota >&2
-	unzip -x -d "$1/ota" "$outdir/ota_unchecked.zip" >&2
 	mkdir "$1/ota_payload"
-	"$otatools/bin/ota_extractor" -payload "$1/ota/payload.bin" -output_dir "$1/ota_payload" -partitions vendor_boot,system >&2
+	ota_payload_offset "$outdir/ota_unchecked.zip"
+	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions vendor_boot,system >&2
 	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img"
 }
 

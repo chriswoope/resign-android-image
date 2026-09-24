@@ -74,9 +74,8 @@ class Payload(object):
 
 def main(filename, output_dir):
   if filename.endswith('.zip'):
-    print("Extracting 'payload.bin' from OTA file...")
-    ota_zf = zipfile.ZipFile(filename)
-    payload_file = open(ota_zf.extract('payload.bin', output_dir), 'rb')
+    # only the start of the payload is read, where it is in the OTA file
+    payload_file = zipfile.ZipFile(filename).open('payload.bin')
   else:
     payload_file = open(filename, 'rb')
 
