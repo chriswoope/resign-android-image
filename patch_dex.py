@@ -328,7 +328,11 @@ def replace(dex, method, refs, op, code, start, end):
              "refers to, none is " +
              ", ".join(dict.fromkeys(ref for body in bodies for ref in missing(body, refs))))
 
+    # a vN register is a local and the locals of a method come before the parameters its pN name, so
+    # a body using both needs the method to have room for as many locals as it uses below them
     needed = registers(insns)
+    if any(reg[0] == "p" for _, _, _, regs, _ in insns for reg in regs):
+        needed += method.ins
     if needed > method.registers:
         if op != "method":
             fail(f"{method.name} has {method.registers} registers, too few for: {code}")
