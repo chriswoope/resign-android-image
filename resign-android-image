@@ -88,6 +88,10 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(libc6-dev)
 	fi
 
+	if ! which dexdump >/dev/null; then
+		deb+=(dexdump)
+	fi
+
 	if ! which llvm-objdump >/dev/null; then
 		deb+=(llvm)
 	fi
@@ -1530,10 +1534,87 @@ function patch_smali_method {
 	fi
 }
 
-# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
-# introduced in Android 17 are never enforced
-function patch_loopback_checks {
-	patch_smali_method "$1" 'BpfNetMaps$Dependencies.smali' 'isLoopbackChecksEnabled\(\)Z' "$smali_return_false"
+# dex bytecode to pass to patch_jar_dex_method: "const/4 v0, 0; return v0", i.e. return false
+dex_return_false=12000f00
+
+# replace the bytecode of a method in the dex files of a jar by binary-patching them in place rather than
+# disassembling and reassembling them, so that nothing but the method changes: $1 is a work directory, $2
+# is the jar (which is replaced), $3 is the method as dexdump -d names it, i.e. "Class.name:signature"
+# with the package left out (any package matches) and $4 is the new bytecode as hex. The new bytecode
+# must fit in the old one, and the rest of the old one is overwritten with nops. Errors out if no matching
+# method is found, so that the build fails loudly instead of silently producing an unpatched image if
+# Android renames or moves the code being patched
+function patch_jar_dex_method {
+	local work="$1"
+	local jar="$2"
+	local method="$3"
+	local code="$4"
+
+	mkdir "$work/dex"
+	unzip -q -d "$work/dex" "$jar" 'classes*.dex'
+
+	local patched=()
+	local dex offsets
+	for dex in "$work/dex"/classes*.dex; do
+		# dexdump prints the offset of each method's code item before its disassembly, e.g.
+		#     0000fc:                                        |[0000fc] a.b.C.isLoopbackChecksEnabled:()Z
+		# (the method is passed through the environment since awk -v would interpret backslash escapes)
+		mapfile -t offsets < <(dexdump -d "$dex" | m="$method" awk '
+			/^[0-9a-f]+: +\|\[[0-9a-f]+\] / {
+				s = $0
+				sub(/^[^[]*\[/, "", s)
+				off = substr(s, 1, index(s, "]") - 1)
+				name = substr(s, index(s, "]") + 2)
+				if (name == ENVIRON["m"] || substr(name, length(name) - length(ENVIRON["m"])) == "." ENVIRON["m"])
+					print off
+			}')
+		if ! wait $!; then
+			echo "Failed to disassemble $dex from $jar" >&2
+			exit 1
+		fi
+		if test "${#offsets[@]}" == 0; then
+			continue
+		fi
+
+		# the code item is registers_size, ins_size, outs_size and tries_size as 16-bit values followed by
+		# debug_info_off and insns_size (in 16-bit units) as 32-bit values and then the bytecode. After
+		# patching, the SHA-1 signature of everything past it and then the Adler-32 checksum of everything
+		# past the checksum itself must be recomputed, or the runtime rejects the dex
+		python3 - "$dex" "$code" "${offsets[@]}" <<'EOF'
+import hashlib, struct, sys, zlib
+
+path, code, offsets = sys.argv[1], bytes.fromhex(sys.argv[2]), sys.argv[3:]
+with open(path, "rb") as f:
+	dex = bytearray(f.read())
+# newer versions (041+) can contain several dex files each with their own header, so refuse them
+if dex[:4] != b"dex\n" or dex[4:8] not in (b"035\0", b"037\0", b"038\0", b"039\0", b"040\0"):
+	sys.exit(f"{path} is not a dex file of a supported version")
+for offset in offsets:
+	offset = int(offset, 16)
+	registers, _, _, tries, _, insns = struct.unpack_from("<HHHHII", dex, offset)
+	# the replacement bytecode only uses v0; with no tries, no exception handler can jump into the nops
+	if registers < 1 or tries != 0 or len(code) > insns * 2:
+		sys.exit(f"The method at {offset:#x} in {path} can't be replaced: {registers} registers, {tries} tries, {insns} code units")
+	dex[offset + 16:offset + 16 + insns * 2] = code.ljust(insns * 2, b"\0")
+dex[12:32] = hashlib.sha1(dex[32:]).digest()
+dex[8:12] = struct.pack("<I", zlib.adler32(dex[12:]))
+with open(path, "wb") as f:
+	f.write(dex)
+EOF
+		patched+=("${dex##*/}")
+	done
+
+	if test "${#patched[@]}" == 0; then
+		echo "Failed to find $method in $jar to patch" >&2
+		exit 1
+	fi
+
+	# replace only the patched dex files in a copy of the original, keeping them stored uncompressed
+	cp "$jar" "$work/out0.jar"
+	local out0_r="$(realpath "$work/out0.jar")"
+	(cd "$work/dex" && zip -q -0 "$out0_r" "${patched[@]}")
+	rm -f "$jar"
+	"$otatools/bin/zipalign" -f -p 4 "$work/out0.jar" "$jar"
 }
 
 # make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other
@@ -1687,12 +1768,10 @@ function patch_service_connectivity {
 		exit 1
 	fi
 
-	get_build_sdk
-	local sdk="$get_build_sdk"
-
-	# the jar is recreated by apktool, so restore its original permissions
+	# make BpfNetMaps$Dependencies.isLoopbackChecksEnabled() return false so that the loopback checks
+	# introduced in Android 17 are never enforced; the jar is recreated, so restore its original permissions
 	local mode="$(stat -c %a "$jar")"
-	with_temp_dir "$outdir/patch-service-connectivity" patch_apk_apktool -api "$sdk" -r "$jar" "$jar" patch_loopback_checks
+	with_temp_dir "$outdir/patch-service-connectivity" patch_jar_dex_method "$jar" 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
 	chmod "$mode" "$jar"
 }
 
