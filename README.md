@@ -118,7 +118,9 @@ By using --adb-until-unlock instead, ADB is only turned on until the device is f
 
 Once the device is unlocked for the first time, the boot has evidently worked, and with --adb-until-unlock the init script stops adbd again. This is a best effort: the system server still believes USB debugging is on for the rest of the boot, so anything that makes it reconfigure the USB gadget, such as unplugging and replugging the cable, starts adbd again.
 
-Security impact: anyone holding the private key of a baked in ADB public key can get a shell, a root one with --adb-root, on a device that hasn't been unlocked since it booted, and with --adb-at-boot also on an unlocked one; the USB attack surface of the device is also exposed while it hasn't been unlocked since it booted, rather than being disabled along with the data lines
+By using --adb-at-boot-any-key-INSECURE, you get everything --adb-at-boot does and, in addition, adbd accepts any host key with no on-screen authorization, so you do not need to bake a key in with --adb-key. It works by clearing ro.adb.secure in build.prop, which is what makes adbd demand an authorized key; an eng build ships it cleared for the same effect. As the INSECURE in the name warns, this means anyone who can reach the USB (or, once it is enabled, network) ADB interface can connect with a key of their own, so it is only for a device you keep under physical control.
+
+Security impact: anyone holding the private key of a baked in ADB public key can get a shell, a root one with --adb-root, on a device that hasn't been unlocked since it booted, and with --adb-at-boot also on an unlocked one; with --adb-at-boot-any-key-INSECURE no baked in key is needed and any host key is accepted, so anyone who can reach the ADB interface can get that shell; the USB attack surface of the device is also exposed while it hasn't been unlocked since it booted, rather than being disabled along with the data lines
 
 ## Ignore allowbackup and `<full-backup-content><exclude>`
 

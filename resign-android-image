@@ -149,6 +149,7 @@ recovery_adb_root=
 adb_keys=()
 adb_at_boot=
 adb_until_unlock=
+adb_any_key=
 allowbackup=
 adb_backup=
 cross_profile_localhost=
@@ -203,6 +204,9 @@ while test "$#" != 0; do
 	elif test "$1" == "--adb-until-unlock"; then
 		adb_at_boot=1
 		adb_until_unlock=1
+	elif test "$1" == "--adb-at-boot-any-key-INSECURE"; then
+		adb_at_boot=1
+		adb_any_key=1
 	elif test "$1" == "--allowbackup"; then
 		allowbackup=1
 	elif test "$1" == "--adb-backup"; then
@@ -291,8 +295,8 @@ for i in "${adb_keys[@]}"; do
 	done < "$i"
 done
 
-if test -n "$adb_at_boot" && test -z "$adb_keys_content"; then
-	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there" >&2
+if test -n "$adb_at_boot" && test -z "$adb_keys_content$adb_any_key"; then
+	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
 fi
 
 if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
@@ -2035,6 +2039,15 @@ function make_target_files_signed {
 	fi
 	if test -n "$ro_secure"; then
 		prop_sed="$prop_sed; s/^ro.secure=.*/ro.secure=$ro_secure/"
+	fi
+	if test -n "$adb_any_key"; then
+		# let adbd accept any host key with no on-screen authorization, the way an eng build does: it
+		# demands an authorized key only while ro.adb.secure is set, so clear it. The property is
+		# checked for so that its absence, or a rename, doesn't silently leave authorization on
+		if test -z "$(find "$1" \( -name build.prop -o -name prop.default \) -exec grep -l '^ro\.adb\.secure=' {} +)"; then
+			echo "Warning: no build.prop sets ro.adb.secure, so --adb-at-boot-any-key-INSECURE may not disable ADB key authorization" >&2
+		fi
+		prop_sed="$prop_sed; s/^ro.adb.secure=.*/ro.adb.secure=0/"
 	fi
 	if test -n "$prop_sed"; then
 		find "$1" \( -name build.prop -o -name prop.default \) -print0|xargs -0 sed -i -re "$prop_sed"
