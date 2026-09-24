@@ -120,6 +120,10 @@ if test "$#" != 0 && test "$1" != "--no-unshare"; then
 		deb+=(android-sdk-libsparse-utils)
 	fi
 
+	if ! which attr >/dev/null; then
+		deb+=(attr)
+	fi
+
 	if test "${#deb[@]}" != 0; then
 		sudo apt-get -y install "${deb[@]}"
 	fi
