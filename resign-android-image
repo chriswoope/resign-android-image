@@ -148,6 +148,7 @@ adb_root=
 recovery_adb_root=
 adb_keys=()
 adb_at_boot=
+adb_until_unlock=
 allowbackup=
 adb_backup=
 cross_profile_localhost=
@@ -199,6 +200,9 @@ while test "$#" != 0; do
 		shift 1
 	elif test "$1" == "--adb-at-boot"; then
 		adb_at_boot=1
+	elif test "$1" == "--adb-until-unlock"; then
+		adb_at_boot=1
+		adb_until_unlock=1
 	elif test "$1" == "--allowbackup"; then
 		allowbackup=1
 	elif test "$1" == "--adb-backup"; then
@@ -288,11 +292,11 @@ for i in "${adb_keys[@]}"; do
 done
 
 if test -n "$adb_at_boot" && test -z "$adb_keys_content"; then
-	echo "--adb-at-boot without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there" >&2
+	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there" >&2
 fi
 
 if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
-	echo "--adb-key and --adb-at-boot add files to the system image, which $build_method doesn't rebuild" >&2
+	echo "--adb-key, --adb-at-boot and --adb-until-unlock add files to the system image, which $build_method doesn't rebuild" >&2
 	exit 1
 fi
 
@@ -1642,15 +1646,16 @@ patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' 
 #     and-int/2addr v2, v3
 patch_seedvault=(replace $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
 
-# have the system server come up believing that USB ADB is enabled, so that ADB keeps working once it
-# takes the USB gadget over from init, which it otherwise immediately takes the ADB function away from.
+# for --adb-until-unlock, have the system server come up believing that USB ADB is enabled, so that ADB
+# keeps working once it takes the USB gadget over from init, which it otherwise immediately takes the
+# ADB function away from.
 # AdbService.systemReady() sets the field holding that belief from the persist.sys.usb.config property
 # and then writes what it decided to the adb_enabled setting, so turning ADB on the way the framework
 # expects would enable USB debugging in /data for good; assigning the field alone touches neither, so
 # ADB is on for as long as this boot lasts, which is all that debugging a boot needs, and the next boot
 # starts from whatever the settings say again. The original body also restores wireless debugging from
 # its own property, which is lost: it has to be enabled again in the settings after every boot
-patch_adb_at_boot=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\niput-boolean v0, p0, Lcom/android/server/adb/AdbService;.mIsAdbUsbEnabled:Z\nreturn-void')
+patch_adb_until_unlock=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\niput-boolean v0, p0, Lcom/android/server/adb/AdbService;.mIsAdbUsbEnabled:Z\nreturn-void')
 
 # apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
@@ -1748,28 +1753,47 @@ function make_target_files_intermediates_base {
 		mkdir -p "$1/SYSTEM/etc/init"
 		# init parses every .rc file in /system/etc/init
 		cat > "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
-# ADB before first unlock, added by resign-android-image --adb-at-boot
+# ADB at boot, added by resign-android-image --adb-at-boot or --adb-until-unlock
 
 # turn ADB on as early as possible, so that a boot that hangs before the system server is up can be
-# debugged as well. This sets sys.usb.config rather than persist.sys.usb.config so that nothing is
-# written to /data and the framework, which reads the persistent property once at boot to decide
-# whether USB debugging is on, keeps using and showing the setting chosen in Settings
+# debugged as well
 on early-init
     setprop sys.usb.config adb
 
-# and again once the persistent properties have been read from /data, since the rule that mirrors
-# persist.sys.usb.config into sys.usb.config has just turned ADB back off
+on property:ro.persistent_properties.ready=true
+    # the USB-C port setting of GrapheneOS, set once the persistent properties have been read from
+    # /data since they would override it otherwise: 3 is "charging-only when locked, except before
+    # first unlock", while the default of 2 cuts the USB data lines whenever the device is locked,
+    # which includes the whole of a boot that never reaches an unlock
+    setprop persist.security.usb_mode 3
+EOF
+		if test -z "$adb_until_unlock"; then
+			cat >> "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
+
+# turn USB debugging on the way a debuggable build does: init mirrors persist.sys.usb.config into
+# sys.usb.config at boot, and the system server enables USB debugging from it, so ADB stays on after
+# either takes over. This also turns on the adb_enabled setting, so USB debugging shows as on in
+# Settings, and turning it off there only lasts until the next boot
+on property:ro.persistent_properties.ready=true
+    setprop persist.sys.usb.config adb
+EOF
+		else
+			cat >> "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
+
+# only the non-persistent sys.usb.config is set, so that nothing is written to /data and the
+# framework, which reads persist.sys.usb.config once at boot to decide whether USB debugging is on,
+# keeps using and showing the setting chosen in Settings: services.jar is patched so that the system
+# server keeps ADB on regardless. It is set again once the persistent properties have been read from
+# /data, since the rule that mirrors persist.sys.usb.config into sys.usb.config has just turned ADB
+# back off
 on boot
     setprop sys.usb.config adb
-    # the USB-C port setting of GrapheneOS: 3 is "charging-only when locked, except before first
-    # unlock", while the default of 2 cuts the USB data lines whenever the device is locked, which
-    # includes the whole of a boot that never reaches an unlock
-    setprop persist.security.usb_mode 3
 
 # the device has been unlocked, so the boot worked and the debugging access is not needed any more
 on property:sys.user.0.ce_available=true
     stop adbd
 EOF
+		fi
 		mkdir_new_file "$outdir/modded_paths/SYSTEM/etc/init/resign-adb.rc" 644 0 0 u:object_r:system_file:s0
 	fi
 
@@ -1806,8 +1830,8 @@ EOF
 	if test -n "$record_anything"; then
 		framework_jar_patches+=("${patch_audio_capture_policy[@]}")
 	fi
-	if test -n "$adb_at_boot"; then
-		services_jar_patches+=("${patch_adb_at_boot[@]}")
+	if test -n "$adb_until_unlock"; then
+		services_jar_patches+=("${patch_adb_until_unlock[@]}")
 	fi
 	if test "${#services_jar_patches[@]}" != 0; then
 		patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
