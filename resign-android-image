@@ -1515,6 +1515,12 @@ function patch_apk_raw {
 }
 
 function patch_adbd {
+	# the patched bytes are written into the output, which is the input itself when adbd is patched
+	# where it is inside an APEX payload or a ramdisk, and otherwise a copy of it
+	if test "$1" != "$2"; then
+		cp -a "$2" "$1"
+	fi
+
 	patch="$(mktemp)"
 	echo -n -e '\x20\x00\x80\x52' > "$patch" # mov w0,#0x1
 	# non-LLVM objdump fails to annotate calls to the PLT with the symbol name
@@ -2013,7 +2019,7 @@ function make_target_files_signed {
 	su=
 	if test -n "$recovery_adb_root"; then
 		# replace all calls to __android_log_is_debuggable with the constant 1
-		patch_adb "$1/VENDOR_BOOT/RAMDISK/system/bin/adbd"
+		patch_adbd {,}"$1/VENDOR_BOOT/RAMDISK/system/bin/adbd"
 	fi
 
 	if test -n "$adb_root"; then
