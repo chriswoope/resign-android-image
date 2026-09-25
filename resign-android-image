@@ -610,18 +610,20 @@ if ! [[ $ota_metadata =~ $post_build_re ]]; then
 fi
 android_version="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
 
-# otatools of the same Android version and quarterly platform release as the build, from the newest build of it
-# on the Android CI, which is only looked for when they aren't downloaded yet
-otatools_ci=https://ci.android.com/builds
-otatools_branch=aosp-android-latest-release
-# the host tools in otatools are the same for every target
-otatools_target=aosp_cf_x86_64_only_phone-userdebug
-otatools="$(realpath "$var_dir")/otatools-$android_version"
-function download_otatools {
+# the host tools are taken from the newest build on the Android CI of the same Android version and quarterly
+# platform release as the build
+android_ci=https://ci.android.com/builds
+android_ci_branch=aosp-android-latest-release
+# the host tools are the same for every target
+android_ci_target=aosp_cf_x86_64_only_phone-userdebug
+
+# download to $1 the artifact $2 of that build, which is only looked for when an artifact isn't downloaded yet,
+# telling to put the artifact at $3 if there is no such build
+function download_ci_artifact {
 	local bid
 	bid="$(python3 -c '
 import json, re, sys, urllib.error, urllib.parse, urllib.request
-ci, branch, target, version, zip = sys.argv[1:]
+ci, branch, target, version, artifact, dest = sys.argv[1:]
 def get(path, *parts):
     with urllib.request.urlopen(ci + path.format(*(urllib.parse.quote(p, safe="") for p in parts))) as f:
         return f.read().decode()
@@ -645,11 +647,13 @@ while ids := [i for i in json.loads(get("/branch/{}/build-ids/between/{}/1?", br
             print(bid)
             sys.exit()
     start = ids[-1]
-sys.exit(f"There is no build of Android {version} on {branch} on the Android CI: put an otatools.zip of it at {zip}")
-' "$otatools_ci" "$otatools_branch" "$otatools_target" "$android_version" "$otatools.zip")" || exit 1
-	download "$1" "$otatools_ci/submitted/$bid/$otatools_target/latest/raw/otatools.zip"
+sys.exit(f"There is no build of Android {version} on {branch} on the Android CI: put the {artifact} of it at {dest}")
+' "$android_ci" "$android_ci_branch" "$android_ci_target" "$android_version" "$2" "$3")" || exit 1
+	download "$1" "$android_ci/submitted/$bid/$android_ci_target/latest/raw/$2"
 }
-make_file "$otatools.zip" download_otatools
+
+otatools="$(realpath "$var_dir")/otatools-$android_version"
+make_file "$otatools.zip" download_ci_artifact otatools.zip "$otatools.zip"
 make_dir "$otatools" do_unzip "$otatools.zip"
 # for the tests to use the same ones as the build
 ln -sfn "$otatools" "$dir/otatools"
