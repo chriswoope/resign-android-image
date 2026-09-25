@@ -781,6 +781,22 @@ if ! test -e "$otatools/framework/signapk.jar.otatools"; then
 fi
 make_file "$otatools/framework/signapk.jar" make_signapk_jar
 
+# the Java options that sign_target_files_apks runs signapk with, which replace its default ones, the maximum
+# heap size among them
+signapk_java_args=(-Xmx4096m)
+signapk_jsa="$otatools/framework/signapk.jsa"
+
+# a class data sharing archive of the classes that signapk loads, which it starts faster with, made by signing
+# framework-res.apk of the target files $3 with it in the directory $1
+function make_signapk_jsa_in {
+	unzip -p "$3" SYSTEM/framework/framework-res.apk > "$1/in.apk" || exit 1
+	java "${signapk_java_args[@]}" -XX:ArchiveClassesAtExit="$2" -Xlog:cds=off -Xlog:cds+dynamic=off -Djava.library.path="$otatools/lib64" -jar "$otatools/framework/signapk.jar" "$key_dir/releasekey.x509.pem" "$key_dir/releasekey.pk8" "$1/in.apk" "$1/out.apk" || exit 1
+}
+
+function make_signapk_jsa {
+	with_temp_dir "$1.build" make_signapk_jsa_in "$1" "$2"
+}
+
 function gen_key {
 	openssl genrsa -f4 4096 > "$1"
 }
@@ -1816,6 +1832,11 @@ function make_target_files_signed_zip {
 		else
 			from="$(realpath "$outdir/target_files_intermediates.zip")"
 			to="$(realpath "$2")"
+			# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with
+			if test -e "$signapk_jsa" && ! java "${signapk_java_args[@]}" -Xshare:on -XX:SharedArchiveFile="$signapk_jsa" -cp "$otatools/framework/signapk.jar" -version 2>/dev/null; then
+				rm "$signapk_jsa" || exit 1
+			fi
+			make_file "$signapk_jsa" make_signapk_jsa "$from"
 			mkdir -p "$1/build/make/target/product"
 			ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
 			ln -s "$(realpath "$key_dir")" "$1/keys"
@@ -1826,6 +1847,12 @@ function make_target_files_signed_zip {
 			if grep -q '"threads="' "$otatools/releasetools/sign_target_files_apks.py"; then
 				sign_args+=(--threads "$threads")
 			fi
+			# sign_target_files_apks splits the Java options like a shell does, so each one is single quoted
+			local java_args= arg
+			for arg in "${signapk_java_args[@]}" -XX:SharedArchiveFile="$signapk_jsa"; do
+				java_args+=" '${arg//\'/\'\\\'\'}'"
+			done
+			sign_args+=(--java_args "$java_args")
 			generate_release_sh="$aosp/script/generate-release.sh"
 			if ! test -e "$generate_release_sh"; then
 				generate_release_sh="$aosp/script/release.sh"
