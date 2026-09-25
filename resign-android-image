@@ -756,6 +756,31 @@ for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
 	fi
 done
 
+# signapk writes an APK through a ZipOutputStream, which writes the fields of the zip headers a byte at a
+# time, to an unbuffered FileOutputStream, making a system call for each byte: buffer the CountingOutputStream
+# that everything it writes goes through, which makes it several times faster and writes the same bytes
+function make_signapk_jar {
+	function go {
+		local src="$aosp/build/make/tools/signapk/src/com/android/signapk/CountingOutputStream.java"
+		local patched="$1/CountingOutputStream.java"
+		sed -re 's/^(\s*mBase = )base;$/\1new java.io.BufferedOutputStream(base);/' "$src" > "$patched" || exit 1
+		if cmp -s "$src" "$patched"; then
+			echo "There is no assignment of the stream to write to in $src" >&2
+			exit 1
+		fi
+		# javac, which the Java runtime has without the JDK
+		java -m jdk.compiler/com.sun.tools.javac.Main -d "$1/classes" "$patched" || exit 1
+		cp "$otatools/framework/signapk.jar.otatools" "$2" || exit 1
+		(cd "$1/classes" && zip -q -X -D -r "$2" com) || exit 1
+	}
+	with_temp_dir "$1.build" go "$1"
+}
+
+if ! test -e "$otatools/framework/signapk.jar.otatools"; then
+	mv "$otatools/framework/signapk.jar" "$otatools/framework/signapk.jar.otatools"
+fi
+make_file "$otatools/framework/signapk.jar" make_signapk_jar
+
 function gen_key {
 	openssl genrsa -f4 4096 > "$1"
 }
