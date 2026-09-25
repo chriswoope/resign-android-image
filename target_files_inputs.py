@@ -35,7 +35,13 @@
 #         write to the META directory the apkcerts.txt and apexkeys.txt files naming the key that
 #         each APK and APEX in the TARGET_FILES directory, and each APK in the payload of an APEX, is
 #         to be signed with: the one whose certificate it is signed with in the CERTS file, or none if
-#         it is signed with a key that isn't there, to leave it signed as it is
+#         it is signed with a key that isn't there, to leave it signed as it is, and the tool that
+#         signs the files in the payload of an APEX that are signed with its payload key with the
+#         payload key the APEX is signed with, if it has any
+#     target_files_inputs.py apex-verify ORIGINAL SIGNED
+#         check that each APEX that the ORIGINAL target files zip gives a sign tool for has, in the
+#         SIGNED target files zip, a payload with the same type of filesystem and the same files in it
+#         signed with its payload key as the original one
 #
 # The SELinux labels of the files of a filesystem image come from the file_contexts of the SELinux
 # policy in the image, which is what a normal build labels the files with, so that files added to the
@@ -307,6 +313,15 @@ APK_SIGNATURE_SCHEMES = (0x7109871A, 0xF05368C0, 0x1B93AD61)
 # signs with
 KEY_PATH = "build/make/target/product/security/"
 
+# the tool that signs the files in the payload of an APEX that are signed with its payload key, which
+# only those of the virt APEX are: the images of the protected VMs, which pvmfw verifies with the key
+PAYLOAD_SIGN_TOOL = "sign_virt_apex"
+
+AVB_MAGIC = b"AVB0"
+AVB_HEADER_SIZE = 256
+AVB_FOOTER_MAGIC = b"AVBf"
+AVB_FOOTER_SIZE = 64
+
 
 def length_prefixed(data):
     """The items of a sequence of items prefixed by their 32 bit length, as the APK signing block holds."""
@@ -378,20 +393,23 @@ def read_file(path, offset=0, size=None):
 
 
 def apex_payload(apex, tmp):
-    """The path, the size and a function reading the contents like read_file of every regular file in
-    the payload of the APEX or compressed APEX apex."""
+    """The public key of the payload of the APEX or compressed APEX apex, the type of its filesystem,
+    and the path, the size and a function reading the contents like read_file of every regular file in
+    it."""
     with zipfile.ZipFile(apex) as z:
         # a compressed APEX holds the original one as a whole
         if "original_apex" in z.namelist():
             apex = z.extract("original_apex", tempfile.mkdtemp(dir=tmp))
+    with zipfile.ZipFile(apex) as z:
+        public_key = z.read("apex_pubkey")
     image, offset = zip_member(apex, "apex_payload.img", tmp)
     with open(image, "rb") as f:
         f.seek(offset + 1024)
         superblock = f.read(1024)
     if struct.unpack_from("<H", superblock, 0x38)[0] == EXT4_MAGIC:
         payload = Ext4(image, offset)
-        return [(path, payload.size(raw), functools.partial(payload.data, ino, raw))
-                for path, ino, raw, metadata in payload.walk() if metadata["type"] == "f"]
+        return public_key, "ext4", [(path, payload.size(raw), functools.partial(payload.data, ino, raw))
+                                    for path, ino, raw, metadata in payload.walk() if metadata["type"] == "f"]
     if struct.unpack_from("<I", superblock, 0)[0] == EROFS_MAGIC:
         out = tempfile.mkdtemp(dir=tmp)
         if offset:
@@ -405,8 +423,34 @@ def apex_payload(apex, tmp):
                 if stat.S_ISREG(os.lstat(path).st_mode):
                     files.append((os.path.relpath(path, out + "/payload"), os.path.getsize(path),
                                   functools.partial(read_file, path)))
-        return files
+        return public_key, "erofs", files
     fail(f"the payload of {apex} is neither an ext4 nor an erofs image")
+
+
+def avb_public_key(name, size, read):
+    """The public key that the file name of size bytes, whose contents are read like read_file, is
+    signed with by AVB as a vbmeta image or as an image with an AVB footer, empty if its vbmeta is
+    unsigned, or None if it is neither."""
+    if size >= len(AVB_MAGIC) and read(0, len(AVB_MAGIC)) == AVB_MAGIC:
+        vbmeta = 0
+    elif size >= AVB_FOOTER_SIZE and (footer := read(size - AVB_FOOTER_SIZE)).startswith(AVB_FOOTER_MAGIC):
+        # after the magic, the version and the size of the image
+        vbmeta = struct.unpack_from(">Q", footer, 20)[0]
+    else:
+        return None
+    header = read(vbmeta, AVB_HEADER_SIZE)
+    if len(header) != AVB_HEADER_SIZE or not header.startswith(AVB_MAGIC):
+        fail(f"{name} has an AVB footer that doesn't point to a vbmeta")
+    # the key is in the auxiliary data block, which follows the header and the authentication one
+    authentication_size = struct.unpack_from(">Q", header, 12)[0]
+    key_offset, key_size = struct.unpack_from(">QQ", header, 64)
+    return read(vbmeta + AVB_HEADER_SIZE + authentication_size + key_offset, key_size)
+
+
+def payload_key_signed(apex, public_key, files):
+    """The paths of the files, as apex_payload gives them, in the payload of the APEX apex that are
+    signed with its payload key public_key."""
+    return sorted(path for path, size, read in files if avb_public_key(f"{apex}:{path}", size, read) == public_key)
 
 
 def apk_keys(target_files, certs, meta):
@@ -422,6 +466,9 @@ def apk_keys(target_files, certs, meta):
 
     apks = {}
     apexes = {}
+    # the APEXes with files in their payload signed with the payload key, which the signing signs with
+    # the payload key it signs the APEX with only if given the tool to
+    payload_signed = set()
 
     def add(found, name, where, apk):
         key = keys.get(hashlib.sha256(apk_certificates(where, apk)).hexdigest())
@@ -435,10 +482,14 @@ def apk_keys(target_files, certs, meta):
             for name in sorted(names):
                 path = os.path.join(root, name)
                 if name.endswith((".apex", ".capex")):
+                    # the signing names a compressed APEX after the APEX it holds
+                    apex_name = re.sub(r"\.capex$", ".apex", name)
                     with open(path, "rb") as f:
-                        # the signing names a compressed APEX after the APEX it holds
-                        add(apexes, re.sub(r"\.capex$", ".apex", name), path, f.read())
-                    for inner, _, read in apex_payload(path, tmp):
+                        add(apexes, apex_name, path, f.read())
+                    public_key, _, files = apex_payload(path, tmp)
+                    if payload_key_signed(path, public_key, files):
+                        payload_signed.add(apex_name)
+                    for inner, _, read in files:
                         if inner.endswith(".apk"):
                             add(apks, os.path.basename(inner), f"{path}:{inner}", read())
                 elif name.endswith(".apk"):
@@ -457,8 +508,30 @@ def apk_keys(target_files, certs, meta):
     with text(os.path.join(meta, "apexkeys.txt"), "w") as f:
         for name, (key, _) in sorted(apexes.items()):
             # the payload keys are the ones the release script gives for each APEX
+            sign_tool = f' sign_tool="{PAYLOAD_SIGN_TOOL}"' if name in payload_signed else ""
             f.write(f'name="{name}" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" '
-                    f'{certificate("container_", key, "PRESIGNED")} partition=""\n')
+                    f'{certificate("container_", key, "PRESIGNED")} partition=""{sign_tool}\n')
+
+
+def apex_verify(original, signed):
+    """Check that each APEX that apexkeys.txt in the original target files zip gives a sign tool for
+    has, in the signed target files zip, a payload with the same type of filesystem and the same files
+    in it signed with its payload key as the original one."""
+    with (zipfile.ZipFile(original) as before, zipfile.ZipFile(signed) as after,
+          tempfile.TemporaryDirectory() as tmp):
+        names = set()
+        for line in before.read("META/apexkeys.txt").decode("utf-8", "surrogateescape").splitlines():
+            if match := re.fullmatch(r'name="(.*?)" .* sign_tool=".*"', line):
+                names.add(match[1])
+        for member in before.namelist():
+            if member.endswith((".apex", ".capex")) and re.sub(r"\.capex$", ".apex", os.path.basename(member)) in names:
+                payloads = []
+                for z in before, after:
+                    public_key, fs_type, files = apex_payload(z.extract(member, tempfile.mkdtemp(dir=tmp)), tmp)
+                    payloads.append((fs_type, payload_key_signed(f"{z.filename}:{member}", public_key, files)))
+                if payloads[0] != payloads[1]:
+                    fail(f"{member} has a signed {payloads[1][0]} payload with {payloads[1][1]} signed with its "
+                         f"payload key rather than an {payloads[0][0]} one with {payloads[0][1]}")
 
 
 def partition_prefix(partition):
@@ -953,10 +1026,12 @@ def main():
         print("\n".join(avb_args(args[1], args[2])))
     elif len(args) == 4 and args[0] == "apk-keys":
         apk_keys(args[1], args[2], args[3])
+    elif len(args) == 3 and args[0] == "apex-verify":
+        apex_verify(args[1], args[2])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
-             "apk-keys TARGET_FILES CERTS META")
+             "apk-keys TARGET_FILES CERTS META | apex-verify ORIGINAL SIGNED")
 
 
 if __name__ == "__main__":

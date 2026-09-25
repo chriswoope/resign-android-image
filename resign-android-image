@@ -1791,6 +1791,9 @@ function make_target_files_signed_zip {
 			fi
 
 			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 $KEY_MAP/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 KEY_MAP="$key_map" bash -x || exit 1
+			# check that the sign tools signed all the files they are for, with the payloads they are
+			# in repacked as they were
+			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to" || exit 1
 		fi
 	}
 	with_temp_dir "$outdir/sign_target_files" go "$@"
