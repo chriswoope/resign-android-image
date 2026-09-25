@@ -1911,6 +1911,17 @@ function set_compat_change_sdk {
 	fi
 }
 
+# the directory of the files of the partition $2 (as named in target files) in the target files
+# directory $1, which is inside the one of the partition it is mounted from when it's not built on
+# its own
+declare -A nested_partition_dirs=([SYSTEM_EXT]=SYSTEM/system_ext [PRODUCT]=SYSTEM/product [ODM]=VENDOR/odm)
+function partition_dir {
+	partition_dir="$1/$2"
+	if ! test -d "$partition_dir" && test -n "${nested_partition_dirs[$2]:-}"; then
+		partition_dir="$1/${nested_partition_dirs[$2]}"
+	fi
+}
+
 # make the changes that the options ask for to the files in the target files directory $1
 function apply_modifications {
 	# the signing appends a newline to the build.prop files, so they are left with a single one for
@@ -1991,8 +2002,41 @@ function apply_modifications {
 		curl "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
 	fi
 	if test "$(wc -l < "$sepolicy")" != 0; then
-		own_file "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
-		echo "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" > "$1/SYSTEM/etc/selinux/plat_sepolicy_and_mapping.sha256"
+		# init loads the precompiled policy only while the hashes stored next to it match those of the
+		# policy of the system partitions, and otherwise compiles the policy at every boot, so compile it
+		# here instead, from the CIL files that init would compile it from
+		selinux="$1/SYSTEM/etc/selinux"
+		vendor_selinux="$1/VENDOR/etc/selinux"
+		partition_dir "$1" SYSTEM_EXT
+		system_ext_selinux="$partition_dir/etc/selinux"
+		partition_dir "$1" PRODUCT
+		product_selinux="$partition_dir/etc/selinux"
+		partition_dir "$1" ODM
+		odm_selinux="$partition_dir/etc/selinux"
+		precompiled="$odm_selinux/precompiled_sepolicy"
+		if ! test -e "$precompiled"; then
+			precompiled="$vendor_selinux/precompiled_sepolicy"
+		fi
+		# the version of the policy format, from the header of the precompiled policy
+		policy_version="$(od -An -tu4 --endian=little -j16 -N4 "$precompiled")" || exit 1
+		read -r mapping_version < "$vendor_selinux/plat_sepolicy_vers.txt" || exit 1
+		read -r genfs_version < "$vendor_selinux/genfs_labels_version.txt" || exit 1
+		cil=()
+		for i in "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil" "$selinux/mapping/$mapping_version.compat.cil" \
+			"$system_ext_selinux/system_ext_sepolicy.cil" "$system_ext_selinux/mapping/$mapping_version.cil" "$system_ext_selinux/mapping/$mapping_version.compat.cil" \
+			"$product_selinux/product_sepolicy.cil" "$product_selinux/mapping/$mapping_version.cil" \
+			"$vendor_selinux/plat_pub_versioned.cil" "$vendor_selinux/vendor_sepolicy.cil" "$odm_selinux/odm_sepolicy.cil" \
+			"$selinux/plat_sepolicy_genfs_$genfs_version.cil"; do
+			if test -e "$i"; then
+				cil+=("$i")
+			fi
+		done
+		secilc=("$otatools/bin/secilc" -m -M true -G -N -c "${policy_version// /}" -f /dev/null "${cil[@]}")
+		# compiling the policy before changing it must reproduce the precompiled one exactly
+		if ! "${secilc[@]}" -o /dev/stdout|cmp -s - "$precompiled"; then
+			echo "Compiling the unmodified SELinux policy from ${cil[*]} doesn't reproduce $precompiled" >&2
+			exit 1
+		fi
 
 		# we remove all neverallows because they have no runtime effect after policy compilation (unless validation fails, but in that case the device fails to boot), and it's too hard to fix them
 		# TODO: fix the neverallows...
@@ -2016,8 +2060,15 @@ function apply_modifications {
 			fi
 		done >> "$1/SYSTEM/etc/selinux/plat_sepolicy.cil"
 
-		# check the policy
-		"$otatools/bin/secilc" -m -M true -G -N -c 32 "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" -o /dev/null -f /dev/null
+		"${secilc[@]}" -o "$precompiled.own" || exit 1
+		mv -f -- "$precompiled.own" "$precompiled"
+		# the hash of the platform policy and of the mapping file, as the build makes it with the mapping
+		# file of the version of the platform, which is the version of the vendor partition built with it
+		hash="$(cat -- "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil"|sha256sum)" || exit 1
+		for i in "$selinux/plat_sepolicy_and_mapping.sha256" "$precompiled.plat_sepolicy_and_mapping.sha256"; do
+			echo "${hash%% *}" > "$i.own"
+			mv -f -- "$i.own" "$i"
+		done
 	fi
 
 	if test -n "$magisk"; then
