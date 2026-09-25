@@ -1716,6 +1716,23 @@ function make_target_files_signed {
 	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
 }
 
+# make the compat change with ID $2 enabled only for the apps targeting SDK version $3 or later, in
+# whichever compat config of the target files directory $1 declares it, which is not always the same
+# one, nor always with the same attributes
+function set_compat_change_sdk {
+	local configs=()
+	mapfile -t configs < <(grep -lE "<compat-change [^>]*id=\"$2\"" "$1"/SYSTEM/etc/compatconfig/*.xml)
+	if test "${#configs[@]}" == 0; then
+		echo "No compat config declares the compat change $2" >&2
+		exit 1
+	fi
+	sed -i -re "s|(<compat-change\s+(description=\"[^\"]*\"\s+)?enableSinceTargetSdk=\")[0-9]+(\"\s+id=\"$2\")|\1$3\3|" "${configs[@]}"
+	if ! grep -qE "enableSinceTargetSdk=\"$3\"\s+id=\"$2\"" "${configs[@]}"; then
+		echo "Failed to make the compat change $2 in ${configs[*]} enabled since SDK version $3" >&2
+		exit 1
+	fi
+}
+
 # make the changes that the options ask for to the files in the target files directory $1
 function apply_modifications {
 	# the signing appends a newline to the build.prop files, so they are left with a single one for
@@ -1783,11 +1800,13 @@ function apply_modifications {
 		sed -e 's/ nlmsg_getneigh//; s/ get_attestation_key//; s/ migrate_any_key//; s/ su_userfaultfd//' "$data_dir/su.cil"|grep -v '\[userfaultfd\]' >> "$sepolicy"
 	fi
 	if test -n "$allowbackup"; then
-		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="183147249"\s+name="IGNORE_ALLOW_BACKUP_IN_D2D"\s+overridable="true"\s+/>)|\11" \2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
-		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="180523564"\s+name="IGNORE_FULL_BACKUP_CONTENT_IN_D2D"\s+overridable="true"\s+/>)|\11" \2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
+		# IGNORE_ALLOW_BACKUP_IN_D2D and IGNORE_FULL_BACKUP_CONTENT_IN_D2D
+		set_compat_change_sdk "$1" 183147249 1
+		set_compat_change_sdk "$1" 180523564 1
 	fi
 	if test -n "$adb_backup"; then
-		sed -i -re 's|(<compat-change\s+description="[^"]*"\s+enableSinceTargetSdk=")[0-9][0-9]"(\s+id="171032338"\s+name="RESTRICT_ADB_BACKUP"\s+/>)|\199"\2|' "$1/SYSTEM/etc/compatconfig/services-platform-compat-config.xml"
+		# RESTRICT_ADB_BACKUP
+		set_compat_change_sdk "$1" 171032338 99
 	fi
 	if test -n "$hosts_url"; then
 		own_file "$1/SYSTEM/etc/hosts"
