@@ -304,10 +304,6 @@ if test -z "$unshared"; then
 		deb+=(llvm)
 	fi
 
-	if ! which secilc >/dev/null; then
-		deb+=(secilc)
-	fi
-
 	if ! which curl >/dev/null; then
 		deb+=(curl)
 	fi
@@ -2021,7 +2017,7 @@ function apply_modifications {
 		done >> "$1/SYSTEM/etc/selinux/plat_sepolicy.cil"
 
 		# check the policy
-		secilc -m -M true -G -N -c 32 "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" -o /dev/null -f /dev/null
+		"$otatools/bin/secilc" -m -M true -G -N -c 32 "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" -o /dev/null -f /dev/null
 	fi
 
 	if test -n "$magisk"; then
