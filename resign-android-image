@@ -1475,7 +1475,9 @@ EOF
 	else
 		# TODO: properly create this instead of copying one from a raven build from source and hoping it works
 		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
-		cat "$dir/ota_payload/META/misc_info.txt" >> "$1"
+		# and the dynamic partitions as the payload has them, since the last value of an entry is the
+		# one that counts and those of the build misc_info-raven.txt comes from are not the same
+		cat "$dir/ota_payload/META/misc_info.txt" "$dir/ota_payload/META/dynamic_partitions_info.txt" >> "$1"
 		if test -e "$dir/ota_payload/init_boot.img"; then
 			echo "init_boot=true" >> "$1"
 			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
@@ -2106,6 +2108,11 @@ function make_factory_image {
 
 	if test -e "$dir/factory_image/super_1.img" || test -e "$dir/factory_image/super.img"; then
 		"$otatools/bin/build_super_image" "$outdir/target_files.zip" "$1/super.img"
+		# which only warns when it doesn't build it because an image of a partition in it is missing
+		if ! test -e "$1/super.img"; then
+			echo "build_super_image didn't build super.img" >&2
+			exit 1
+		fi
 
 		if test -e "$dir/factory_image/super_1.img"; then
 			simg2simg "$1/super.img" "$1/super" "$max_download_size"
