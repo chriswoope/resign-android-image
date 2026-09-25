@@ -43,6 +43,7 @@
 # (which should not happen in an image labeled by a normal build, but is checked for every file rather
 # than assumed) has its original label pinned by an extra entry matching exactly its path.
 
+import functools
 import hashlib
 import io
 import json
@@ -184,21 +185,29 @@ class Ext4:
                 logical, length, start_hi, start_lo = struct.unpack_from("<IHHI", node, entry)
                 yield logical, length, start_hi << 32 | start_lo
 
-    def data(self, ino, raw):
-        """The contents of the file with inode number ino, which must not be stored inline."""
+    @staticmethod
+    def size(raw):
+        """The size of the file whose inode is raw."""
+        return struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
+
+    def data(self, ino, raw, offset=0, size=None):
+        """The contents of the file with inode number ino, which must not be stored inline, or the at
+        most size bytes of them at offset."""
         flags = struct.unpack_from("<I", raw, 0x20)[0]
         if flags & INLINE_DATA_FL:
             fail(f"{self.path}: the contents of inode {ino} are inline, which is not supported")
         if not flags & EXTENTS_FL:
             fail(f"{self.path}: inode {ino} uses block maps, which are not supported")
-        size = struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
-        data = bytearray(size)
+        end = self.size(raw) if size is None else min(offset + size, self.size(raw))
+        data = bytearray(max(end - offset, 0))
         for logical, length, start in self.extents(ino, raw[0x28:0x28 + 60]):
             # an uninitialized extent, whose length has the top bit set, reads as zeroes
             if length <= 32768:
-                chunk = self.read(start * self.block_size, min(length * self.block_size,
-                                                               size - logical * self.block_size))
-                data[logical * self.block_size:logical * self.block_size + len(chunk)] = chunk
+                low = max(offset, logical * self.block_size)
+                high = min(end, (logical + length) * self.block_size)
+                if low < high:
+                    data[low - offset:high - offset] = self.read(start * self.block_size + low - logical * self.block_size,
+                                                                 high - low)
         return bytes(data)
 
     def dir_entries(self, ino, raw, xattrs):
@@ -361,8 +370,16 @@ def zip_member(path, member, tmp):
         return z.extract(info, tempfile.mkdtemp(dir=tmp)), 0
 
 
-def apex_apks(apex, tmp):
-    """The path and the contents of every APK in the payload of the APEX or compressed APEX apex."""
+def read_file(path, offset=0, size=None):
+    """The contents of the file at path, or the at most size bytes of them at offset."""
+    with open(path, "rb") as f:
+        f.seek(offset)
+        return f.read(size)
+
+
+def apex_payload(apex, tmp):
+    """The path, the size and a function reading the contents like read_file of every regular file in
+    the payload of the APEX or compressed APEX apex."""
     with zipfile.ZipFile(apex) as z:
         # a compressed APEX holds the original one as a whole
         if "original_apex" in z.namelist():
@@ -373,22 +390,23 @@ def apex_apks(apex, tmp):
         superblock = f.read(1024)
     if struct.unpack_from("<H", superblock, 0x38)[0] == EXT4_MAGIC:
         payload = Ext4(image, offset)
-        for path, ino, raw, metadata in payload.walk():
-            if metadata["type"] == "f" and path.endswith(".apk"):
-                yield path, payload.data(ino, raw)
-    elif struct.unpack_from("<I", superblock, 0)[0] == EROFS_MAGIC:
+        return [(path, payload.size(raw), functools.partial(payload.data, ino, raw))
+                for path, ino, raw, metadata in payload.walk() if metadata["type"] == "f"]
+    if struct.unpack_from("<I", superblock, 0)[0] == EROFS_MAGIC:
         out = tempfile.mkdtemp(dir=tmp)
         if offset:
             with zipfile.ZipFile(apex) as z:
                 image = z.extract("apex_payload.img", out)
         subprocess.run(["fsck.erofs", f"--extract={out}/payload", image], check=True, stdout=subprocess.DEVNULL)
+        files = []
         for root, _, names in os.walk(out + "/payload"):
             for name in names:
-                if name.endswith(".apk"):
-                    with open(os.path.join(root, name), "rb") as f:
-                        yield os.path.relpath(os.path.join(root, name), out + "/payload"), f.read()
-    else:
-        fail(f"the payload of {apex} is neither an ext4 nor an erofs image")
+                path = os.path.join(root, name)
+                if stat.S_ISREG(os.lstat(path).st_mode):
+                    files.append((os.path.relpath(path, out + "/payload"), os.path.getsize(path),
+                                  functools.partial(read_file, path)))
+        return files
+    fail(f"the payload of {apex} is neither an ext4 nor an erofs image")
 
 
 def apk_keys(target_files, certs, meta):
@@ -420,8 +438,9 @@ def apk_keys(target_files, certs, meta):
                     with open(path, "rb") as f:
                         # the signing names a compressed APEX after the APEX it holds
                         add(apexes, re.sub(r"\.capex$", ".apex", name), path, f.read())
-                    for inner, apk in apex_apks(path, tmp):
-                        add(apks, os.path.basename(inner), f"{path}:{inner}", apk)
+                    for inner, _, read in apex_payload(path, tmp):
+                        if inner.endswith(".apk"):
+                            add(apks, os.path.basename(inner), f"{path}:{inner}", read())
                 elif name.endswith(".apk"):
                     with open(path, "rb") as f:
                         add(apks, name, path, f.read())
