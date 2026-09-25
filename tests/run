@@ -20,7 +20,6 @@ set -euo pipefail
 # A test that fails leaves its work directory, with the output of resign-android-image in log.
 
 repo="$(realpath "$(dirname "$0")/..")"
-otatools="$HOME/.resign-android-image/otatools/bin"
 
 work_root="$HOME/resign-android-image-tests"
 download_cache="${XDG_CACHE_HOME:-$HOME/.cache}/resign-android-image"
@@ -72,11 +71,13 @@ function fail {
 }
 
 # resign the build into the work directory of the test with the given options, and set out to the
-# directory of its output
+# directory of its output and otatools to the bin directory of the otatools it used
 out=
+otatools=
 function resign {
 	"$repo/resign-android-image" "$work/build" "$work/keys" grapheneos "$device" "$build" --generate-keys --download-cache "$download_cache" "${resign_options[@]}" "$@" > "$work/log" 2>&1 || fail "resign-android-image failed, see $work/log"
 	out="$work/build/out_resign/out"
+	otatools="$work/build/otatools/bin"
 }
 
 # extract the images of OTA $1 into directory $2, only those of the partitions $3 if given, one

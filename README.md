@@ -71,7 +71,7 @@ To use it:
 5. Setup a web server in the server VM or SSH-accessible server with HTTPS certificates from letsencrypt (Caddy is recommended since it's written in a memory-safe language and easy to configure)
 6. Clone this git repository in a trusted VM on the Qubes installation and copy the contents of this repository to dom0
 7. Review the qubes-dom0-install script, modify it if desired and run it in dom0 as root, passing the options you want to pass to resign-android-image
-8. Run the resigning script once manually in the signing VM with --generate-keys to generate keys, and follow the instructions to provide an otatools.zip and debug any issues
+8. Run the resigning script once manually in the signing VM with --generate-keys to generate keys and debug any issues
 9. Enable and start the dom0 systemd timer that will automatically trigger updates, as instructed by the qubes-dom0-install script
 
 If you don't want to use Qubes (note that having a secure workstation is crucial, which means not browsing the web or accessing untrusted data or running untrusted apps outside of dedicated VMs), read what qubes-dom0-install script does and mimic its behavior for your own setup.

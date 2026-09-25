@@ -469,14 +469,6 @@ function do_unzip_list
 	bsdtar -tf "$2" > "$1"
 }
 
-function otatools_help_and_exit
-{
-	echo "Download otatools manually by going to https://ci.android.com/builds/submitted/9884203/aosp_cf_arm64_phone-userdebug/latest/otatools.zip using the Chromium browser" >&2
-	echo "If that doesn't work, go to https://ci.android.com/builds/branches/aosp-master/grid?, selecting a branch for the current Android version and clicking a green square in the aosp_cf_arm64_phone column" >&2
-	echo "Move the file to $otatools.zip and remove the $otatools directory if present" >&2
-	exit 1
-}
-
 function do_git_clone
 {
 	local out="$1"
@@ -592,22 +584,68 @@ function discard_download
 	fi
 }
 
-# TODO: use Selenium and headless Chromium to automatically download this
-otatools="$(realpath "$var_dir/otatools")"
-function make_otatools {
-	if ! test -e  "$otatools.zip"; then
-		otatools_help_and_exit
+# the Android version and quarterly platform release of the build, which is the prefix of its build ID (like CP2A
+# in CP2A.260705.006 of Android 17), from the fingerprint in the metadata of its OTA, where it was extracted or else
+# in the OTA itself, which is downloaded already for this before it is verified with the otatools chosen by it
+ota_metadata_file="$dir/ota/META-INF/com/android/metadata"
+if test -e "$ota_metadata_file"; then
+	ota_metadata="$(< "$ota_metadata_file")"
+else
+	if ! test -e "$ota_zip.ok"; then
+		curl "$ota_url.zip" -C - -o "$ota_zip"
 	fi
-	do_unzip "$1" "$otatools.zip"
-}
-
-make_dir "$otatools" make_otatools
-if test "$android" -ge 130; then
-	if ! grep -qE 'Android-1[3-9]' "$otatools/releasetools/common.py"; then
-		echo "Outdated otatools: building an Android 13+ image with an otatools version from before Android 13" >&2
-		otatools_help_and_exit
-	fi
+	ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"
 fi
+post_build_re=$'(^|\n)post-build=[^:\n]*:([0-9.]+)/([0-9A-Z]+)\\.'
+if ! [[ $ota_metadata =~ $post_build_re ]]; then
+	echo "There is no Android version and build ID in the metadata of the OTA" >&2
+	exit 1
+fi
+android_version="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+
+# otatools of the same Android version and quarterly platform release as the build, from the newest build of it
+# on the Android CI, which is only looked for when they aren't downloaded yet
+otatools_ci=https://ci.android.com/builds
+otatools_branch=aosp-android-latest-release
+# the host tools in otatools are the same for every target
+otatools_target=aosp_cf_x86_64_only_phone-userdebug
+otatools="$(realpath "$var_dir")/otatools-$android_version"
+function download_otatools {
+	local bid
+	bid="$(python3 -c '
+import json, re, sys, urllib.error, urllib.parse, urllib.request
+ci, branch, target, version, zip = sys.argv[1:]
+def get(path, *parts):
+    with urllib.request.urlopen(ci + path.format(*(urllib.parse.quote(p, safe="") for p in parts))) as f:
+        return f.read().decode()
+# the builds of the branch, newest first, in pages that start from the last build of the previous one
+start = json.loads(get("/branch/{}/last-build-id", branch))["last_build_id"]
+seen = set()
+while ids := [i for i in json.loads(get("/branch/{}/build-ids/between/{}/1?", branch, start))["ids"] if i not in seen]:
+    for bid in ids:
+        seen.add(bid)
+        try:
+            prop = get("/submitted/{}/{}/latest/raw/build.prop", bid, target)
+        except urllib.error.HTTPError as e:
+            # a build that failed for the target
+            if e.code == 404:
+                continue
+            raise
+        props = dict(re.findall(r"^([^#=\n]+)=(.*)$", prop, re.M))
+        if props["ro.system.build.version.release"] + "-" + props["ro.system.build.id"].split(".")[0] == version:
+            if not re.fullmatch(r"[0-9]+", bid):
+                sys.exit(f"Unexpected build ID {bid!r} on the Android CI")
+            print(bid)
+            sys.exit()
+    start = ids[-1]
+sys.exit(f"There is no build of Android {version} on {branch} on the Android CI: put an otatools.zip of it at {zip}")
+' "$otatools_ci" "$otatools_branch" "$otatools_target" "$android_version" "$otatools.zip")" || exit 1
+	download "$1" "$otatools_ci/submitted/$bid/$otatools_target/latest/raw/otatools.zip"
+}
+make_file "$otatools.zip" download_otatools
+make_dir "$otatools" do_unzip "$otatools.zip"
+# for the tests to use the same ones as the build
+ln -sfn "$otatools" "$dir/otatools"
 
 function download_aapt2 {
 	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
@@ -840,8 +878,8 @@ function do_extract_ota_manifest {
 	python3 "$data_dir/extract_android_ota_manifest/extract_android_ota_manifest.py" "$2" "$1"
 }
 
-function download_ota {
-	curl "$ota_url.zip" -C - -o "$ota_zip"
+# the OTA was downloaded already to choose the otatools by
+function verify_ota {
 	if ! "$otatools/bin/check_ota_package_signature" "$ota_cert" "$ota_zip"; then
 		echo "Failed to verify OTA update signature of $ota_zip!" >&2
 		exit 1
@@ -907,7 +945,7 @@ function extract_root_and_system {
 }
 
 function make_extract_ota {
-	make_file "$ota_zip.ok" download_ota
+	make_file "$ota_zip.ok" verify_ota
 
 	# the payload is read where it is in the zip
 	unzip -q -d "$1" "$ota_zip" -x payload.bin
