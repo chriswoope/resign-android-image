@@ -107,6 +107,38 @@ function check_ota_signed {
 	"$otatools/avbtool" verify_image --image "$work/ota/vbmeta.img" --key "$work/keys/avb.pem" > "$work/avbtool.log" 2>&1 || fail "The images of $1 are not signed with the generated AVB key, see $work/avbtool.log"
 }
 
+# check that the images of the protected VMs in the virt APEX of system image $1 are signed with the
+# generated AVB key, like the payload of the APEX, and that pvmfw image $2 embeds the key to verify
+# them with
+function check_virt_apex_signed {
+	local virt="$work/virt"
+	mkdir -p "$virt"
+	image_file "$1" /system/apex/com.android.virt.apex > "$virt/apex"
+	unzip -p "$virt/apex" apex_payload.img > "$virt/payload.img"
+	"$otatools/fsck.erofs" --extract="$virt/payload" "$virt/payload.img" > /dev/null 2>&1 || fail "Failed to extract the payload of the virt APEX"
+	cmp -s <(unzip -p "$virt/apex" apex_pubkey) "$work/keys/avb_pkmd.bin" || fail "The payload of the virt APEX is not signed with the generated AVB key"
+	# pvmfw is only in the images of devices that can run protected VMs
+	if test -e "$2"; then
+		python3 -c 'import sys; sys.exit(open(sys.argv[2], "rb").read() not in open(sys.argv[1], "rb").read())' "$2" "$work/keys/avb_pkmd.bin" || fail "pvmfw doesn't embed the generated AVB key"
+	fi
+
+	# avbtool verifies the images that an image has descriptors of as the files named after their
+	# partitions next to it, so each image is verified in a directory of its own with them
+	local -A images=(
+		[vbmeta/vbmeta.img]=etc/fs/microdroid_vbmeta.img [vbmeta/system.img]=etc/fs/microdroid.img
+		[kernel/boot.img]=etc/fs/microdroid_kernel [kernel/initrd_normal.img]=etc/microdroid_initrd_normal.img
+		[kernel/initrd_debug.img]=etc/microdroid_initrd_debuggable.img [service_vm/boot.bin]=etc/service_vm.bin
+	)
+	local i
+	for i in "${!images[@]}"; do
+		mkdir -p "$virt/verify/${i%/*}"
+		ln -s "$virt/payload/${images[$i]}" "$virt/verify/$i"
+	done
+	for i in vbmeta/vbmeta.img kernel/boot.img service_vm/boot.bin; do
+		"$otatools/avbtool" verify_image --image "$virt/verify/$i" --key "$work/keys/avb.pem" > "$virt/${i%/*}.log" 2>&1 || fail "${images[$i]} in the virt APEX, or an image it verifies, is not signed with the generated AVB key, see $virt/${i%/*}.log"
+	done
+}
+
 # print the contents of file $2 in ext4 image $1
 function image_file {
 	"$otatools/debugfs_static" -R "cat $2" "$1" 2>/dev/null
@@ -130,6 +162,7 @@ function test_basic {
 
 	local ota="$out/$device-ota_update-$build.zip"
 	check_ota_signed "$ota"
+	check_virt_apex_signed "$work/ota/system.img" "$work/ota/pvmfw.img"
 	check_metadata "$build" "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.date.utc)"
 	test "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.version.incremental)" == "$build" || fail "The system image is not of build $build"
 
