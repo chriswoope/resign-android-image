@@ -67,6 +67,7 @@ unshare=1
 unshared=
 download_cache=
 timing=
+threads=
 
 while test "$#" != 0; do
 	if test "$1" == "-v"; then
@@ -84,6 +85,9 @@ while test "$#" != 0; do
 		unshare=
 	elif test "$1" == "--download-cache"; then
 		download_cache="$2"
+		shift
+	elif test "$1" == "--threads"; then
+		threads="$2"
 		shift
 	elif test "$1" == "--unshared"; then
 		# internal, passed to the script rerun in its own mount namespace
@@ -173,6 +177,13 @@ while test "$#" != 0; do
 	fi
 	shift 1
 done
+
+if test -z "$threads"; then
+	threads="$(nproc)"
+elif ! [[ $threads =~ ^[1-9][0-9]*$ ]]; then
+	echo "The number of threads must be a positive integer, but is $threads" >&2
+	exit 1
+fi
 
 if test -n "$version" && ! [[ $version =~ ^[0-9]{10}$ ]]; then
 	echo "Version must be a build number in the YYYYMMDDXX form, but is $version" >&2
@@ -871,7 +882,7 @@ function ota_payload_offset {
 # directory $1, in parallel since ota_extractor extracts the partitions it is given one after the other
 function do_extract_ota_payload {
 	ota_payload_offset "$2"
-	xargs -d '\n' -a "$3" -P "$(nproc)" -I {} "$otatools/bin/ota_extractor" -payload "$2" -payload_offset "$ota_payload_offset" -output_dir "$1" -partitions {}
+	xargs -d '\n' -a "$3" -P "$threads" -I {} "$otatools/bin/ota_extractor" -payload "$2" -payload_offset "$ota_payload_offset" -output_dir "$1" -partitions {}
 }
 
 function do_extract_ota_manifest {
@@ -1786,6 +1797,10 @@ function make_target_files_signed_zip {
 			cd "$1"
 			# added to the arguments of sign_target_files_apks in the release script, which gets them as its own
 			local sign_args=(-k build/make/target/product/security/bluetooth=keys/bluetooth)
+			# signing the APKs and APEXes in parallel, which the releasetools before those of Android 17 can't do
+			if grep -q '"threads="' "$otatools/releasetools/sign_target_files_apks.py"; then
+				sign_args+=(--threads "$threads")
+			fi
 			generate_release_sh="$aosp/script/generate-release.sh"
 			if ! test -e "$generate_release_sh"; then
 				generate_release_sh="$aosp/script/release.sh"
@@ -1815,7 +1830,7 @@ function make_target_files_signed {
 	# images are built from, and each image, which the signing compressed, in a process of its own
 	local zip="$outdir/target_files_signed.zip"
 	unzip -q -o "$zip" 'META/*' '*/build.prop' -d "$1" || exit 1
-	unzip -Z1 "$zip" 'IMAGES/*'|xargs -d '\n' -P "$(nproc)" -I {} unzip -q -o "$zip" {} -d "$1"
+	unzip -Z1 "$zip" 'IMAGES/*'|xargs -d '\n' -P "$threads" -I {} unzip -q -o "$zip" {} -d "$1"
 }
 
 # make the compat change with ID $2 enabled only for the apps targeting SDK version $3 or later, in

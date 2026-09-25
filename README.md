@@ -37,6 +37,8 @@ Use --ota to generate an OTA, --factory-image to generate a factory image flasha
 
 The upstream OTA and factory images are downloaded into the work directory and deleted once extracted, unless --keep is given; use --download-cache DIR to download them into DIR instead and keep them there, so that they are downloaded only once for any number of work directories.
 
+Use --threads N to sign the APKs and APEXes, and extract the images, N at a time instead of as many at a time as there are CPUs.
+
 You can use --generate-keys to automatically generate keys if the key directory doesn't exist.
 
 You can use --version to give the resigned images a version (build number) different from the one of the upstream build they are made from: the build number in the build.prop files (including the one embedded in the fingerprints) is replaced with it, and the generated OTA and factory images are named after it.
