@@ -68,6 +68,7 @@ unshared=
 download_cache=
 timing=
 threads=
+dex2oat=1
 
 while test "$#" != 0; do
 	if test "$1" == "-v"; then
@@ -89,6 +90,8 @@ while test "$#" != 0; do
 	elif test "$1" == "--threads"; then
 		threads="$2"
 		shift
+	elif test "$1" == "--no-dex2oat"; then
+		dex2oat=
 	elif test "$1" == "--unshared"; then
 		# internal, passed to the script rerun in its own mount namespace
 		unshared=1
@@ -654,7 +657,8 @@ make_dir "$otatools" do_unzip "$otatools.zip"
 # for the tests to use the same ones as the build
 ln -sfn "$otatools" "$dir/otatools"
 
-# dexdump, which the dex code is disassembled with to patch it
+# dexdump, which the dex code is disassembled with to patch it, and dex2oat and the other tools that dexpreopt
+# compiles it with
 dexpreopt_tools="$(realpath "$var_dir")/dexpreopt_tools-$android_version"
 make_file "$dexpreopt_tools.zip" download_ci_artifact dexpreopt_tools.zip "$dexpreopt_tools.zip"
 make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
@@ -1403,8 +1407,8 @@ patch_adb_until_unlock=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\nipu
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
 # can be patched directly like a plain system file; what was compiled from them and against them is
-# removed, and their fs-verity metadata made again, once the target files are put together, see
-# stale-preopt and fsverity-update in target_files_inputs.py
+# compiled again, or removed with --no-dex2oat, and their fs-verity metadata made again, once the target
+# files are put together, see recompile-preopt, stale-preopt and fsverity-update in target_files_inputs.py
 function patch_framework_jar {
 	local out="$1"
 	local jar="$2"
@@ -1437,6 +1441,27 @@ function patch_updater {
 			sed -i -e "s|$orig_update_url|$update_url|g" "$i"
 		fi
 	done
+}
+
+# set dex2oat_runner to the command that the dex2oat of the dexpreopt tools is to be run with, if any, having
+# checked that it works and reproduces what dexpreopt compiled in the target files directory $1. In gVisor,
+# whose platforms that take the GS register for themselves make the runtime in dex2oat abort as it starts, it
+# is run with qemu-user, which emulates the register, if it doesn't work as it is
+function dex2oat_runner {
+	dex2oat_runner=
+	if dmesg 2>/dev/null|grep -q '^\[ *[0-9.]*\] Starting gVisor\.\.\.$'; then
+		local log="$outdir/dex2oat-gvisor.log"
+		if python3 "$data_dir/target_files_inputs.py" preopt-check "$1" "$dexpreopt_tools" "" > "$log" 2>&1; then
+			cat "$log"
+			return
+		fi
+		echo "dex2oat doesn't work in this gVisor sandbox, see $log, so it is run with qemu-user" >&2
+		if ! which qemu-x86_64 >/dev/null; then
+			sudo apt-get -y install qemu-user || exit 1
+		fi
+		dex2oat_runner="$(which qemu-x86_64)"
+	fi
+	python3 "$data_dir/target_files_inputs.py" preopt-check "$1" "$dexpreopt_tools" "$dex2oat_runner" || exit 1
 }
 
 function make_target_files_intermediates_base {
@@ -1598,9 +1623,15 @@ EOF
 		cp -a -n -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
 		# the runtime rejects compiled code that no longer matches what it was compiled from or against
 		# and odrefresh only compiles the boot image and the system server jars again when the files
-		# compiled from them are missing, so a stale boot image leaves every process without one
+		# compiled from them are missing, so a stale boot image leaves every process without one: it is
+		# compiled again, or removed for the device to compile it
 		if test "${#patched_dex[@]}" != 0; then
-			python3 "$data_dir/target_files_inputs.py" stale-preopt "$1" "${patched_dex[@]}" || exit 1
+			if test -n "$dex2oat"; then
+				dex2oat_runner "$outdir/target_files_extracted"
+				python3 "$data_dir/target_files_inputs.py" recompile-preopt "$1" "$outdir/target_files_extracted" "$dexpreopt_tools" "$dex2oat_runner" "$threads" "${patched_dex[@]}" || exit 1
+			else
+				python3 "$data_dir/target_files_inputs.py" stale-preopt "$1" "${patched_dex[@]}" || exit 1
+			fi
 		fi
 		# the images are built out of these files by the signing
 		apply_modifications "$1"

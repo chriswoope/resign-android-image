@@ -29,7 +29,7 @@ keep=
 tests=()
 resign_options=()
 
-all_tests=(basic modifications)
+all_tests=(basic modifications no_dex2oat)
 
 while test "$#" != 0; do
 	case "$1" in
@@ -215,8 +215,70 @@ function test_modifications {
 		fi
 	done
 
-	# and what was compiled from them and against them is left for the device to compile again, rather
-	# than left stale, while what doesn't depend on them is kept
+	# and what was compiled from them and against them is compiled again: the verified dex code of the
+	# patched jars has the checksums of their dex files, and what is compiled against the boot image has
+	# the checksum of the new one
+	image_file "$system" /system/framework/services.jar > "$work/services.jar"
+	image_file "$system" /system/framework/oat/arm64/services.vdex > "$work/services.vdex"
+	has_dex_checksums "$work/services.jar" "$work/services.vdex" || fail "services.vdex is not compiled from the patched services.jar"
+	image_file "$system" /system/framework/framework.jar > "$work/framework.jar"
+	image_file "$system" /system/framework/boot-framework.vdex > "$work/boot-framework.vdex"
+	has_dex_checksums "$work/framework.jar" "$work/boot-framework.vdex" || fail "The boot image is not compiled from the patched framework.jar"
+	local checksum="$(boot_image_checksum "$system")"
+	test "$checksum" != "$(boot_image_checksum "$work/original/system.img")" || fail "The boot image is the original one"
+	grep -qaF "$checksum" <(image_file "$work/ota/system_ext.img" /priv-app/SystemUI/oat/arm64/SystemUI.odex) || fail "The compiled code of SystemUI is not compiled against the new boot image"
+
+	# and the fs-verity metadata that CompOS checks the files it compiles from against is that of what
+	# they are now
+	check_fsverity "$system" /system/framework/services.jar /system/framework/framework.jar /system/framework/arm64/boot-framework.oat
+}
+
+# whether the file $2 has the CRC-32 of every dex file of the zip $1, which is the checksum of it that the
+# files compiled from it have
+function has_dex_checksums {
+	python3 -c 'import re, struct, sys, zipfile
+data = open(sys.argv[2], "rb").read()
+with zipfile.ZipFile(sys.argv[1]) as z:
+    sys.exit(not all(struct.pack("<I", i.CRC) in data for i in z.infolist() if re.fullmatch(r"classes[0-9]*\.dex", i.filename)))' "$1" "$2"
+}
+
+# print the checksum of the boot image in the system image $1 as the files compiled against it have it:
+# the number of its files and the checksum in the header of its first file
+function boot_image_checksum {
+	image_file "$1" /system/framework/arm64/boot.art|python3 -c 'import struct, sys
+components, _, _, checksum = struct.unpack_from("<IIII", sys.stdin.buffer.read(28), 12)
+print(f"i;{components}/{checksum:08x}")'
+}
+
+# check that the fs-verity metadata of the files $2... of the system image $1 is that of what they are now
+# rather than of the original ones: the digest in the manifest is the hash of the fs-verity descriptor in
+# the .fsv_meta file, which follows its version and holds the size of the file after 8 bytes
+function check_fsverity {
+	local system="$1" file
+	shift
+	image_file "$system" /system/etc/security/fsverity/BuildManifest.apk > "$work/BuildManifest.apk"
+	unzip -p "$work/BuildManifest.apk" assets/build_manifest.pb > "$work/build_manifest.pb"
+	for file in "$@"; do
+		image_file "$system" "$file.fsv_meta" > "$work/fsv_meta"
+		if cmp -s "$work/fsv_meta" <(image_file "$work/original/system.img" "$file.fsv_meta"); then
+			fail "The fs-verity metadata of $file is that of the original one"
+		fi
+		python3 -c 'import hashlib, struct, sys
+descriptor = open(sys.argv[1], "rb").read()[4:260]
+sys.exit(struct.unpack_from("<Q", descriptor, 8)[0] != int(sys.argv[3]) or hashlib.sha256(descriptor).digest() not in open(sys.argv[2], "rb").read())' "$work/fsv_meta" "$work/build_manifest.pb" "$(image_file "$system" "$file"|wc -c)" || fail "The fs-verity manifest doesn't have the digest of the fs-verity metadata of $file"
+	done
+}
+
+function test_no_dex2oat {
+	resign --ota --always-screenshot --always-screenshot-surfaceview --cross-profile-localhost --no-dex2oat
+
+	local ota="$out/$device-ota_update-$build.zip"
+	extract_ota "$ota" "$work/ota" $'system\nsystem_ext'
+	extract_ota "$download_cache/$device-ota_update-$build.zip" "$work/original" system
+	local system="$work/ota/system.img"
+
+	# what was compiled from the patched files and against them is left for the device to compile again,
+	# rather than left stale, while what doesn't depend on them is kept
 	local stale
 	for stale in /system/framework/arm64/boot-framework.oat /system/framework/arm64/boot.art /system/framework/boot-framework.vdex /system/framework/oat/arm64/services.odex /system/framework/oat/arm64/services.vdex /system/framework/oat/arm64/apex@com.android.tethering@javalib@service-connectivity.jar@classes.vdex; do
 		if image_has "$system" "$stale"; then
@@ -228,20 +290,7 @@ function test_modifications {
 	fi
 	image_has "$work/ota/system_ext.img" /priv-app/SystemUI/oat/arm64/SystemUI.vdex || fail "The verified dex code of SystemUI, which doesn't depend on the framework, was removed"
 
-	# and the fs-verity metadata that CompOS checks the files it compiles from against is that of what
-	# they are now: the digest in the manifest is the hash of the fs-verity descriptor in the .fsv_meta
-	# file, which follows its version and holds the size of the file after 8 bytes
-	image_file "$system" /system/etc/security/fsverity/BuildManifest.apk > "$work/BuildManifest.apk"
-	unzip -p "$work/BuildManifest.apk" assets/build_manifest.pb > "$work/build_manifest.pb"
-	for jar in services framework; do
-		image_file "$system" "/system/framework/$jar.jar.fsv_meta" > "$work/$jar.jar.fsv_meta"
-		if cmp -s "$work/$jar.jar.fsv_meta" <(image_file "$work/original/system.img" "/system/framework/$jar.jar.fsv_meta"); then
-			fail "The fs-verity metadata of $jar.jar is that of the original one"
-		fi
-		python3 -c 'import hashlib, struct, sys
-descriptor = open(sys.argv[1], "rb").read()[4:260]
-sys.exit(struct.unpack_from("<Q", descriptor, 8)[0] != int(sys.argv[3]) or hashlib.sha256(descriptor).digest() not in open(sys.argv[2], "rb").read())' "$work/$jar.jar.fsv_meta" "$work/build_manifest.pb" "$(image_file "$system" "/system/framework/$jar.jar"|wc -c)" || fail "The fs-verity manifest doesn't have the digest of the fs-verity metadata of $jar.jar"
-	done
+	check_fsverity "$system" /system/framework/services.jar /system/framework/framework.jar
 	if grep -qaF system/framework/arm64/boot-framework.oat "$work/build_manifest.pb"; then
 		fail "The fs-verity manifest still has the stale boot image, which was removed"
 	fi

@@ -45,6 +45,18 @@
 #         been changed, which go on into the payload of an APEX if a directory in them is an APEX file:
 #         the compiled code of the files themselves and of everything compiled against them, and the
 #         whole boot image if any of it is stale, for the device to compile them again
+#     target_files_inputs.py preopt-check TARGET_FILES TOOLS RUNNER
+#         check that the dex2oat of the dexpreopt tools in the TOOLS directory, run by the RUNNER
+#         command unless empty, works and reproduces what dexpreopt compiled in the TARGET_FILES
+#         directory, by compiling the smallest file it compiled again
+#     target_files_inputs.py recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED [PATCHED...]
+#         compile again, as dexpreopt compiled them, the files that stale-preopt would remove, printing
+#         each of them, with the dex2oat of the dexpreopt tools in the TOOLS directory run by the RUNNER
+#         command unless empty and THREADS threads, after checking that compiling the boot image of
+#         the ORIGINAL target files directory, which TARGET_FILES is patched from, reproduces it if the
+#         boot image is stale. Everything that they are compiled with is taken from the files they
+#         replace and the target files, which have the profiles and the other files that the device
+#         compiles them with too
 #     target_files_inputs.py fsverity-update TARGET_FILES
 #         make the fs-verity metadata of the files in the TARGET_FILES directory, the .fsv_meta files
 #         and the manifests of the digests in the BuildManifest APKs, match the files again, printing
@@ -59,6 +71,7 @@
 # image are labeled as the policy says. A file of the original image is checked to get back the label
 # it had, which it does unless its image wasn't labeled by a normal build with the same policy.
 
+import concurrent.futures
 import functools
 import glob
 import hashlib
@@ -73,6 +86,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 
 from ota_protobuf import all_bytes, encode_bytes, fields, last_bytes
@@ -581,12 +595,11 @@ def device_path(target_files, path):
 PREOPT_EXTENSIONS = (".odex", ".vdex", ".art")
 
 
-def stale_preopt(target_files, patched):
-    """Remove from the target files directory target_files the files compiled by dexpreopt that the
-    dex code of the files at the paths patched in it, which go on into the payload of an APEX as for
-    device_path, being changed makes stale, printing each of them, so that the runtime and odrefresh
-    compile them again on the device rather than reject them, or worse use them."""
-    remove = {}
+def stale_artifacts(target_files, patched):
+    """The files in the target files directory target_files compiled by dexpreopt that the dex code of
+    the files at the paths patched in it, which go on into the payload of an APEX as for device_path,
+    being changed makes stale, each with the reason why."""
+    stale = {}
     locations = []
     for path in patched:
         location = device_path(target_files, path)
@@ -604,7 +617,7 @@ def stale_preopt(target_files, patched):
         for pattern in patterns:
             for extension in PREOPT_EXTENSIONS:
                 for artifact in glob.glob(pattern + extension):
-                    remove.setdefault(artifact, f"compiled from {location}")
+                    stale.setdefault(artifact, f"compiled from {location}")
 
     # compiled code records by their location on the device the dex files it was compiled against (the
     # boot classpath, with the checksums of the boot image, and the class loader context, with the
@@ -626,23 +639,34 @@ def stale_preopt(target_files, patched):
                 if found:
                     for artifact in path, os.path.splitext(path)[0] + ".art":
                         if os.path.lexists(artifact):
-                            remove.setdefault(artifact, f"compiled against {found}")
+                            stale.setdefault(artifact, f"compiled against {found}")
 
     # the boot image is loaded, and compiled again by odrefresh, as a whole, and its vdex files are in
     # the directory above that of the files of each instruction set, which link to them
-    stale_boot_image = [path for path in boot_image if path in remove]
+    # (the one of each instruction set being said to be stale for a file of its own if it has one)
+    stale_boot_image = {}
+    for path in sorted(boot_image):
+        if path in stale:
+            stale_boot_image.setdefault(os.path.dirname(path), path)
     if stale_boot_image:
-        reason = "in the boot image with " + device_path(target_files, os.path.relpath(stale_boot_image[0], target_files))
         for path in boot_image:
+            reason = stale_boot_image.get(os.path.dirname(path), next(iter(stale_boot_image.values())))
+            reason = "in the boot image with " + device_path(target_files, os.path.relpath(reason, target_files))
             base = os.path.splitext(path)[0]
             for artifact in path, base + ".art", base + ".vdex":
                 if os.path.lexists(artifact):
-                    remove.setdefault(artifact, reason)
+                    stale.setdefault(artifact, reason)
                     if os.path.islink(artifact):
                         target = os.path.join(os.path.dirname(artifact), os.readlink(artifact))
-                        remove.setdefault(os.path.normpath(target), reason)
+                        stale.setdefault(os.path.normpath(target), reason)
+    return stale
 
-    for artifact, reason in sorted(remove.items()):
+
+def stale_preopt(target_files, patched):
+    """Remove from the target files directory target_files the files compiled by dexpreopt that are
+    stale as for stale_artifacts, printing each of them, so that the runtime and odrefresh compile them
+    again on the device rather than reject them, or worse use them."""
+    for artifact, reason in sorted(stale_artifacts(target_files, patched).items()):
         relative = os.path.relpath(artifact, target_files)
         print(f"Removing stale {device_path(target_files, relative)}, {reason}")
         # along with the fs-verity metadata of it that the build makes
@@ -656,6 +680,438 @@ def stale_preopt(target_files, patched):
         while directory != top and not os.listdir(directory):
             os.rmdir(directory)
             directory = os.path.dirname(directory)
+
+
+SHT_NOBITS = 8
+DT_SONAME = 14
+# the section of an ELF file that holds a hash of the file, which the rest of it is compared without
+BUILD_ID_SECTION = ".note.gnu.build-id"
+
+
+def elf(path):
+    """The type, the size and the data of each section of the ELF file at path, by name, and its
+    soname."""
+    data = read_file(path)
+    if data[:4] != b"\x7fELF":
+        fail(f"{path} is not an ELF file")
+    # where the section headers are, and the format of the fields that a section header starts with
+    # (the name, the type, the flags, the address, the offset and the size) and of a dynamic entry
+    if data[4] == 2:
+        shoff = struct.unpack_from("<Q", data, 0x28)[0]
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
+        header, dynamic = "<IIQQQQ", "<qQ"
+    else:
+        shoff = struct.unpack_from("<I", data, 0x20)[0]
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x2E)
+        header, dynamic = "<IIIIII", "<iI"
+    headers = [struct.unpack_from(header, data, shoff + i * shentsize) for i in range(shnum)]
+
+    def string(table, offset):
+        return table[offset:table.index(b"\0", offset)].decode()
+
+    names = headers[shstrndx]
+    names = data[names[4]:names[4] + names[5]]
+    sections = {string(names, h[0]): (h[1], h[5], b"" if h[1] == SHT_NOBITS else data[h[4]:h[4] + h[5]])
+                for h in headers}
+    soname = None
+    for tag, value in struct.iter_unpack(dynamic, sections.get(".dynamic", (0, 0, b""))[2]):
+        if tag == DT_SONAME:
+            soname = string(sections[".dynstr"][2], value)
+    return sections, soname
+
+
+def same_compiled_files(made, original):
+    """Whether the file compiled by dexpreopt at the path made is the same as the one at the path
+    original, but for the hash of the file that the compiled code has, which isn't one of its
+    contents: the build of the original one leaves garbage in the padding that it hashes."""
+    if not made.endswith((".odex", ".oat")):
+        return read_file(made) == read_file(original)
+    made, original = (elf(path)[0] for path in (made, original))
+    return all(made.get(name) == original.get(name) for name in made.keys() | original.keys() if name != BUILD_ID_SECTION)
+
+
+# the fields that an image file of ART, the boot image or an app image, starts with after its magic and
+# its version: the size of the address space that it reserves when it is the first file of a boot image,
+# the number of files that such a boot image is made of, the address it is loaded at and its size, and
+# after 6 more fields the address, the size and the number of files of the boot image that it extends
+IMAGE_HEADER = "<IIII24xIII"
+IMAGE_MAGIC = b"art\n"
+
+# where the files of the boot image are, and those that dexpreopt compiles it with, on the device: the
+# profiles are the one of the platform and those of the APEXes, which each have the part of it for their
+# own jars, and are installed for the device to compile the boot image with too
+BOOT_IMAGE_DIRECTORY = "/system/framework"
+BOOT_IMAGE_PROFILE = "etc/boot-image.prof"
+PRELOADED_CLASSES = "/system/etc/preloaded-classes"
+DIRTY_IMAGE_OBJECTS = "/system/etc/dirty-image-objects"
+
+
+class Dex2oat:
+    """The dex2oat and oatdump of the dexpreopt tools in the directory tools, dex2oat being run by runner
+    unless empty, to compile the APKs and jars of the target files directory target_files as dexpreopt
+    compiled them into the files that are there, with the files in the payloads of the APEXes that
+    they need extracted into the directory tmp."""
+
+    def __init__(self, tools, runner, target_files, tmp):
+        # the paths are absolute, since dex2oat runs in a directory of its own
+        tools, target_files, tmp = (os.path.abspath(path) for path in (tools, target_files, tmp))
+        self.dex2oat = ([runner] if runner else []) + [os.path.join(tools, "dex2oatd64")]
+        self.oatdump = os.path.join(tools, "oatdump")
+        # the options that choose the garbage collector that the device uses, which the files are
+        # compiled for
+        with text(os.path.join(tools, "uffd_gc_flag.txt")) as f:
+            self.gc = f.read().split()
+        self.target_files = target_files
+        self.tmp = tmp
+        # the Android root that dex2oat is given, which it shouldn't read anything from
+        self.empty = tempfile.mkdtemp(dir=tmp)
+        # the directory that dex2oat runs in, with links to the files of the class loader contexts at
+        # their locations on the device
+        self.root = tempfile.mkdtemp(dir=tmp)
+        with text(os.path.join(target_files, "SYSTEM", "build.prop")) as f:
+            self.props = dict(re.findall(r"^([^#=\n]+)=(.*)$", f.read(), re.M))
+        self.apexes = {}
+        for partition in PARTITIONS:
+            for apex in sorted(glob.glob(os.path.join(glob.escape(os.path.join(target_files, partition.upper(), "apex")), "*.*apex"))):
+                self.apexes.setdefault(apex_name(apex), apex)
+        self.payloads = {}
+        self.lock = threading.Lock()
+
+    def find(self, location):
+        """The path of the file at location on the device, or None if there is no such file."""
+        if not location.startswith("/apex/"):
+            path = target_files_path(self.target_files, location)
+            return path if os.path.isfile(path) else None
+        name, _, inner = location[len("/apex/"):].partition("/")
+        if name not in self.apexes:
+            return None
+        path = os.path.join(self.tmp, "apex", name, inner)
+        with self.lock:
+            if name not in self.payloads:
+                self.payloads[name] = {file: read for file, _, read in apex_payload(self.apexes[name], self.tmp)[2]}
+            if not os.path.exists(path):
+                if inner not in self.payloads[name]:
+                    return None
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(self.payloads[name][inner]())
+        return path
+
+    def path(self, location):
+        """The path of the file at location on the device, which must exist."""
+        path = self.find(location)
+        if path is None:
+            fail(f"there is no {location} in {self.target_files}")
+        return path
+
+    def header(self, path):
+        """The instruction set features and the key value store of the header of the file at path
+        compiled by dexpreopt, as oatdump prints them."""
+        out = run([self.oatdump, f"--oat-file={path}", "--header-only"])
+        features = re.search(r"^INSTRUCTION SET FEATURES:\n(.*)$", out, re.M)
+        store = re.search(r"^KEY VALUE STORE:\n(.*?)\n\n", out, re.M | re.S)
+        if not features or not store:
+            fail(f"oatdump printed no header of {path}:\n{out}")
+        return features[1], dict(line.split(" = ", 1) for line in store[1].split("\n"))
+
+    def class_loader_context(self, context, host):
+        """The class loader context stored in a header, context, without the checksums of its dex
+        files, with the paths of them that dex2oat opens them by rather than their locations on the
+        device if host."""
+        def paths(match):
+            locations = [re.sub(r"\*[0-9]+$", "", location) for location in match[1].split(":") if location]
+            return "[" + ":".join(self.link(location) if host else location for location in locations) + "]"
+        return re.sub(r"\[([^\]]*)\]", paths, context)
+
+    def link(self, location):
+        """The path, relative to the directory that dex2oat runs in, of a link there to the file at
+        location on the device, at that location: dex2oat puts the paths that it opens the files of
+        the class loader context by into the app images, which then don't depend on where the target
+        files are."""
+        relative = location.lstrip("/")
+        link = os.path.join(self.root, relative)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        try:
+            os.symlink(self.path(location), link)
+        except FileExistsError:
+            pass
+        return relative
+
+    def args(self, header, isa, heap, boot_classpath):
+        """The dex2oat options, for the instruction set isa, that the files with the header given as
+        for header were compiled with, with the sizes of the heap of the properties starting with
+        heap and the locations boot_classpath as the boot classpath."""
+        features, keys = header
+        args = [*self.dex2oat, "--avoid-storing-invocation"]
+        for option, prop in ("-Xms", "Xms"), ("-Xmx", "Xmx"):
+            if heap + prop in self.props:
+                args += ["--runtime-arg", option + self.props[heap + prop]]
+        args += ["--runtime-arg", "-Xbootclasspath:" + ":".join(self.path(location) for location in boot_classpath),
+                 "--runtime-arg", "-Xbootclasspath-locations:" + ":".join(boot_classpath),
+                 f"--instruction-set={isa}", f"--instruction-set-features={features}", f"--android-root={self.empty}",
+                 "--no-inline-from=core-oj.jar", "--force-determinism", "--abort-on-hard-verifier-error",
+                 "--generate-build-id", f"--compiler-filter={keys['compiler-filter']}", *self.gc]
+        if "assume-value-sdk-int" in keys:
+            args.append(f"--assume-value=Landroid/os/Build$VERSION;->SDK_INT:{keys['assume-value-sdk-int']}")
+        if "compilation-reason" in keys:
+            args.append(f"--compilation-reason={keys['compilation-reason']}")
+        return args
+
+    def check_header(self, made, original, header):
+        """Check that the file compiled by dexpreopt at the path made has the header given as for header
+        of the one at the path original that it replaces, but for the checksums of the dex files and
+        of the boot image it was compiled against."""
+        def comparable(header):
+            features, keys = header
+            keys = {key: value for key, value in keys.items() if key != "bootclasspath-checksums"}
+            if "classpath" in keys:
+                keys["classpath"] = self.class_loader_context(keys["classpath"], False)
+            return features, keys
+        if comparable(self.header(made)) != comparable(header):
+            fail(f"compiling {original} again made one with a different header:\n"
+                 f"{run([self.oatdump, f'--oat-file={made}', '--header-only'])}")
+
+    def boot_images(self, isa):
+        """The paths of the first files of the images the boot image for the instruction set isa is made
+        of, with the image each one extends before it, and for each one the address it is loaded at,
+        the number of files it is made of and the number of files of the images it extends."""
+        directory = os.path.join(target_files_path(self.target_files, BOOT_IMAGE_DIRECTORY), isa)
+        images = []
+        for path in sorted(glob.glob(os.path.join(glob.escape(directory), "*.art"))):
+            header = read_file(path, 0, 8 + struct.calcsize(IMAGE_HEADER))
+            if header[:4] != IMAGE_MAGIC:
+                fail(f"{path} is not an image file")
+            _, components, begin, _, _, _, boot_components = struct.unpack_from(IMAGE_HEADER, header, 8)
+            # the other files of an image have no number of files
+            if components:
+                images.append((boot_components, path, begin, components))
+        return [(path, begin, components, boot_components) for boot_components, path, begin, components in sorted(images)]
+
+    def boot_image_locations(self, isa, host):
+        """The locations of the boot image for the instruction set isa as dex2oat takes them, on the
+        device or in the target files if host: the path of the first file of each image without the
+        directory of the instruction set."""
+        return ":".join(os.path.join(os.path.dirname(os.path.dirname(path)) if host else BOOT_IMAGE_DIRECTORY, os.path.basename(path))
+                        for path, _, _, _ in self.boot_images(isa))
+
+    def compile_boot_image(self, isa, out, threads):
+        """Compile the boot image for the instruction set isa as dexpreopt compiled the one in the target
+        files, with threads threads, into the directory of the instruction set in the directory out,
+        which is then the boot image directory of the compiled one, returning the paths of the files
+        of each image in the target files."""
+        images = self.boot_images(isa)
+        directory = os.path.dirname(images[0][0])
+        # the header of the first file of an image only has the boot classpath of the images it
+        # extends and of itself if it is not an extension, while the files compiled against the boot
+        # image have the whole of it
+        odex = sorted(glob.glob(os.path.join(glob.escape(os.path.join(os.path.dirname(directory), "oat", isa)), "*.odex")))
+        if not odex:
+            fail(f"there is no file compiled against the boot image in {directory} to take its boot classpath from")
+        boot_classpath = self.header(odex[0])[1]["bootclasspath"].split(":")
+        os.makedirs(os.path.join(out, isa))
+        made = []
+        for i, (path, begin, components, boot_components) in enumerate(images):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            header = self.header(os.path.join(directory, stem + ".oat"))
+            locations = boot_classpath[boot_components:boot_components + components]
+            if header[1]["bootclasspath"].split(":") != boot_classpath[:boot_components or components]:
+                fail(f"the boot classpath of {path} is not the start of the one of {odex[0]}")
+            # dex2oat is given the boot classpath up to the files of the image itself, while its header
+            # only has the files of the images it extends if it is an extension
+            args = self.args(header, isa, "dalvik.vm.image-dex2oat-", boot_classpath[:boot_components + components])
+            for profile in [f"/system/{BOOT_IMAGE_PROFILE}"] + [f"/apex/{apex}/{BOOT_IMAGE_PROFILE}" for apex in sorted(self.apexes)]:
+                profile = self.find(profile)
+                if profile:
+                    args.append(f"--profile-file={profile}")
+            args.append(f"--dirty-image-objects={self.path(DIRTY_IMAGE_OBJECTS)}")
+            if boot_components:
+                args.append("--boot-image=" + ":".join(os.path.join(out, os.path.basename(p)) for p, _, _, _ in images[:i]))
+            else:
+                args += [f"--base={begin:#x}", f"--preloaded-classes={self.path(PRELOADED_CLASSES)}"]
+            for location in locations:
+                args += [f"--dex-file={self.path(location)}", f"--dex-location={location}"]
+            # the files of an image are named after the name of the boot image and the file of the boot
+            # classpath that each one is compiled from, except for the first one of the boot image, which
+            # has the name of the boot image, and dex2oat is given the name of the boot image
+            jars = [os.path.splitext(os.path.basename(location))[0] for location in locations]
+            base = stem
+            if boot_components:
+                base = stem.removesuffix("-" + jars[0])
+                if base == stem:
+                    fail(f"{path} is not named after {locations[0]}, which it is compiled from")
+            names = [stem] + [f"{base}-{jar}" for jar in jars[1:]]
+            args += ["--image-format=lz4hc",
+                     f"--image={os.path.join(out, isa, base)}.art", f"--oat-file={os.path.join(out, isa, base)}.oat",
+                     f"--oat-location={os.path.join(BOOT_IMAGE_DIRECTORY, isa, base)}.oat", f"-j{threads}"]
+            if components > 1 and not os.path.exists(os.path.join(directory, names[1] + ".art")):
+                args.append("--single-image")
+                names = names[:1]
+            run(args)
+            self.check_header(os.path.join(out, isa, stem + ".oat"), os.path.join(directory, stem + ".oat"), header)
+            made.append([os.path.join(directory, n + extension) for n in names for extension in (".art", ".oat", ".vdex")])
+        return made
+
+    def compile_odex(self, odex, out):
+        """Compile the APK or jar that the file at the path odex in the target files was compiled from as
+        dexpreopt compiled it, against the boot image and the files of its class loader context in the
+        target files, into the directory out, returning the paths of the files made by extension."""
+        isa = os.path.basename(os.path.dirname(odex))
+        header = self.header(odex)
+        features, keys = header
+        location = dex_location(self.target_files, odex)
+        # dexpreopt names the file after the kind of what it compiles, which is its soname
+        soname = elf(odex)[1]
+        if not soname:
+            fail(f"{odex} has no soname")
+        made = {".odex": os.path.join(out, soname), ".vdex": os.path.join(out, os.path.splitext(soname)[0] + ".vdex")}
+        args = self.args(header, isa, "dalvik.vm.dex2oat-", keys["bootclasspath"].split(":"))
+        args += [f"--class-loader-context={self.class_loader_context(keys['classpath'], True)}",
+                 f"--stored-class-loader-context={self.class_loader_context(keys['classpath'], False)}",
+                 f"--boot-image={self.boot_image_locations(isa, True)}",
+                 f"--dex-file={self.path(location)}", f"--dex-location={location}",
+                 f"--oat-file={made['.odex']}", "--no-generate-debug-info", "-j1"]
+        # the profile that dexpreopt compiled it with, which is installed next to it for the device to
+        # compile it with too
+        profile = self.find(location + ".prof")
+        if profile:
+            args.append(f"--profile-file={profile}")
+        elif keys["compiler-filter"].endswith("-profile"):
+            fail(f"there is no profile {location}.prof to compile {odex} with")
+        # with the app image of the classes it uses at startup, which the compiled code refers to
+        if keys.get("requires-image") == "true":
+            made[".art"] = os.path.splitext(made[".odex"])[0] + ".art"
+            args += [f"--app-image-file={made['.art']}", "--image-format=lz4", "--resolve-startup-const-strings=true"]
+        run(args, self.root)
+        self.check_header(made[".odex"], odex, header)
+        return made
+
+
+def run(args, cwd=None):
+    """Run the command args in the directory cwd, failing with what it printed if it fails, and return
+    what it printed on its standard output."""
+    result = subprocess.run(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        fail(f"{shlex.join(args)} failed:\n{result.stderr.decode(errors='replace')}{result.stdout.decode(errors='replace')}")
+    return result.stdout.decode(errors="replace")
+
+
+def dex_location(target_files, odex):
+    """The location on the device of the APK or jar that the file at the path odex in the target files
+    directory target_files was compiled from by dexpreopt, which is in the directory of the instruction
+    set in the oat directory next to it, or in the one of the framework directory for a jar in an
+    APEX, which is named after its location."""
+    oat, name = os.path.split(os.path.dirname(odex))[0], os.path.splitext(os.path.basename(odex))[0]
+    if name.startswith("apex@") and name.endswith("@classes"):
+        location = "/" + name[:-len("@classes")].replace("@", "/")
+    else:
+        paths = [os.path.join(os.path.dirname(oat), name + extension) for extension in (".apk", ".jar")]
+        paths = [path for path in paths if os.path.isfile(path)]
+        if len(paths) != 1:
+            fail(f"there is no single APK or jar that {odex} was compiled from")
+        location = device_path(target_files, os.path.relpath(paths[0], target_files))
+    if os.fsencode(location) not in read_file(odex):
+        fail(f"{odex} was not compiled from {location}")
+    return location
+
+
+def run_all(jobs, threads):
+    """Run the functions jobs, threads at a time, stopping at the first that fails."""
+    with concurrent.futures.ThreadPoolExecutor(threads) as pool:
+        futures = [pool.submit(job) for job in jobs]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        except BaseException:
+            pool.shutdown(cancel_futures=True)
+            raise
+
+
+def check_reproduced(made, original):
+    """Check that the file at the path made is the same as the one at the path original but for its
+    hash, as for same_compiled_files."""
+    if not same_compiled_files(made, original):
+        fail(f"compiling {original} again doesn't reproduce it")
+
+
+def preopt_check(target_files, tools, runner):
+    """Check that the dex2oat of the dexpreopt tools in the directory tools, run by runner unless empty,
+    works and reproduces the smallest file compiled by dexpreopt in the target files directory
+    target_files, which is one without an app image, since those have the paths of the files of the
+    class loader context on the host that compiled them in them."""
+    odex = [path for path in glob.glob(os.path.join(glob.escape(target_files), "*", "**", "oat", "*", "*.odex"), recursive=True)
+            if not os.path.exists(os.path.splitext(path)[0] + ".art")]
+    if not odex:
+        fail(f"there are no files compiled by dexpreopt in {target_files}")
+    odex = min(odex, key=os.path.getsize)
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(target_files))) as tmp:
+        for extension, made in Dex2oat(tools, runner, target_files, tmp).compile_odex(odex, tmp).items():
+            check_reproduced(made, os.path.splitext(odex)[0] + extension)
+    print(f"Compiling {device_path(target_files, os.path.relpath(odex, target_files))} again reproduces it")
+
+
+def recompile_preopt(target_files, original, tools, runner, threads, patched):
+    """Compile again, with the dex2oat of the dexpreopt tools in the directory tools, run by runner
+    unless empty, with threads threads, the files compiled by dexpreopt in the target files directory
+    target_files that are stale as for stale_artifacts, printing each of them, from the files they are
+    compiled from and against there, as dexpreopt compiled them. Compiling the boot image of the
+    target files directory original, which those files are from before being patched, must reproduce
+    it first, since the device can't start without it."""
+    stale = stale_artifacts(target_files, patched)
+    replaced = set()
+
+    def install(made, path):
+        # the file replaced is the one that the file at path links to, which is the same for every
+        # instruction set and so may have been replaced already by the file made for another one
+        replaced.add(path)
+        if os.path.islink(path):
+            path = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path)))
+            if path in replaced:
+                if read_file(made) != read_file(path):
+                    fail(f"{path} is not the same for every instruction set, which have links to it")
+                return
+            replaced.add(path)
+        shutil.copymode(path, made)
+        os.replace(made, path)
+
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(target_files))) as tmp:
+        dex2oat = Dex2oat(tools, runner, target_files, tmp)
+
+        # the boot image first, which everything else is compiled against, for every instruction set,
+        # and before it the one of the original files, which has to be reproduced, all at the same time
+        # since much of compiling one only uses a single thread
+        boot_images = {}
+        for path in sorted(stale):
+            if path.endswith(".oat"):
+                boot_images.setdefault(os.path.basename(os.path.dirname(path)), stale[path])
+        if boot_images:
+            jobs = [(Dex2oat(tools, runner, original, tempfile.mkdtemp(dir=tmp)), next(iter(boot_images)))]
+            print(f"Compiling the boot image for {jobs[0][1]} of the original files again, to reproduce it", flush=True)
+            for isa, reason in boot_images.items():
+                jobs.append((dex2oat, isa))
+                print(f"Compiling the boot image for {isa} again, {reason}", flush=True)
+            compiled = [None] * len(jobs)
+
+            def compile_boot_image(i, compiler, isa):
+                out = tempfile.mkdtemp(dir=tmp)
+                compiled[i] = [(os.path.join(out, isa, os.path.basename(path)), path)
+                           for image in compiler.compile_boot_image(isa, out, max(threads // len(jobs), 1)) for path in image]
+            run_all([functools.partial(compile_boot_image, i, *job) for i, job in enumerate(jobs)], len(jobs))
+            for path, original_path in compiled[0]:
+                check_reproduced(path, original_path)
+            print(f"Compiling the boot image for {jobs[0][1]} of the original files again reproduces it", flush=True)
+            for image in compiled[1:]:
+                for path, target in image:
+                    install(path, target)
+
+        def compile_odex(path):
+            print(f"Compiling {device_path(target_files, os.path.relpath(path, target_files))} again, {stale[path]}", flush=True)
+            for extension, made in dex2oat.compile_odex(path, tempfile.mkdtemp(dir=tmp)).items():
+                install(made, os.path.splitext(path)[0] + extension)
+        run_all([functools.partial(compile_odex, path) for path in sorted(stale) if path.endswith(".odex")], threads)
+
+    left = sorted(set(stale) - replaced)
+    if left:
+        fail("these stale files were not compiled again: " + " ".join(left))
 
 
 # the block size and the hash algorithm, SHA-256, of the fs-verity metadata that the build makes
@@ -1282,12 +1738,17 @@ def main():
         apex_verify(args[1], args[2])
     elif len(args) >= 3 and args[0] == "stale-preopt":
         stale_preopt(args[1], args[2:])
+    elif len(args) == 4 and args[0] == "preopt-check":
+        preopt_check(args[1], args[2], args[3])
+    elif len(args) >= 7 and args[0] == "recompile-preopt" and re.fullmatch(r"[1-9][0-9]*", args[5]):
+        recompile_preopt(args[1], args[2], args[3], args[4], int(args[5]), args[6:])
     elif len(args) == 2 and args[0] == "fsverity-update":
         fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
-             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | fsverity-update TARGET_FILES | "
+             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
+             "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED")
 
 
