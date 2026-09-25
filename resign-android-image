@@ -496,7 +496,8 @@ function git_clone_ref
 	local ref="$2"
 	shift 2
 	make_dir "$dir" do_git_clone --branch "$ref" "$@"
-	( cd "$dir" && git fetch --tags && git checkout "$ref" && git pull --rebase ) || exit 1
+	# a tag is checked out detached, with no branch to pull into
+	( cd "$dir" && git fetch --tags && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi ) || exit 1
 }
 
 function download
@@ -988,7 +989,9 @@ function extract_system {
 
 function extract_root {
 	find "$2"/system -mindepth 1 -maxdepth 1 -print0|xargs -0 rm -rf
-	find "$2" -mindepth 1 -maxdepth 1 -print0|xargs -0 chmod u+w
+	# the directories, which can only be moved when writable, rather than whatever the symbolic links
+	# point to on the host
+	find "$2" -mindepth 1 -maxdepth 1 -type d -exec chmod u+w -- {} +
 	find "$2" -mindepth 1 -maxdepth 1 -print0|xargs -0 mv --target-directory="$1"
 	chmod u-w "$1"/config
 }
@@ -1733,7 +1736,7 @@ function make_dynamic_partitions_info {
 }
 
 function make_certs_mac {
-	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f"|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; { grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f" || test "$?" == 1; }|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
 }
 
 function make_certs {
@@ -2379,10 +2382,8 @@ function make_factory_image {
 			simg2simg "$1/super.img" "$1/super" "$max_download_size"
 			rm -f "$1/super.img"
 
-			local super_count=0
-			for f in "$1"/super.[0-9]*; do
-				((super_count++))
-			done
+			local supers=("$1"/super.[0-9]*)
+			local super_count="${#supers[@]}"
 
 			for ((i = 1; i <= super_count; i++)); do
 				mv "$1/super.$(($i - 1))" "$1/super_$i.img"
