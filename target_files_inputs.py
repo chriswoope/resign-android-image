@@ -16,7 +16,8 @@
 #         from the files in the TARGET_FILES directory with, and write to the EXPECTED directory the
 #         metadata the files of each built image are expected to have: a file that METADATA, the dump
 #         of the original image, has keeps the metadata it had there, and any other file gets the
-#         default one that the build would give it
+#         default owner, mode and capabilities that the build would give it, and the label the policy
+#         gives it
 #     target_files_inputs.py fs-verify IMAGE EXPECTED
 #         check that the files of the built IMAGE have exactly the metadata in the EXPECTED file
 #     target_files_inputs.py boot-inputs OUT PARTITION IMAGE [PARTITION IMAGE...]
@@ -45,9 +46,8 @@
 #
 # The SELinux labels of the files of a filesystem image come from the file_contexts of the SELinux
 # policy in the image, which is what a normal build labels the files with, so that files added to the
-# image are labeled as the policy says; a file whose original label is not the one the policy gives it
-# (which should not happen in an image labeled by a normal build, but is checked for every file rather
-# than assumed) has its original label pinned by an extra entry matching exactly its path.
+# image are labeled as the policy says. A file of the original image is checked to get back the label
+# it had, which it does unless its image wasn't labeled by a normal build with the same policy.
 
 import functools
 import hashlib
@@ -68,12 +68,16 @@ import zipfile
 # upper case and are mounted at the directory of their own name, with the system one holding the root
 PARTITIONS = ("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm", "system_dlkm")
 
-# where the file_contexts of each part of the SELinux policy is in the target files, in the order the
-# build concatenates them in, with the path it has in a device that doesn't have a partition for it
-POLICY_FILE_CONTEXTS = (
+# where the file_contexts of each part of the SELinux policy is in the target files, with the path it
+# has in a device that doesn't have a partition for it, in the order the build concatenates them in
+# (system/sepolicy/Android.bp): those of the platform as they are, and then those of the device sorted
+# with fc_sort, which matters since the last of the entries that match a path is the one that counts
+PLATFORM_FILE_CONTEXTS = (
     ("SYSTEM/etc/selinux/plat_file_contexts",),
     ("SYSTEM_EXT/etc/selinux/system_ext_file_contexts", "SYSTEM/system_ext/etc/selinux/system_ext_file_contexts"),
     ("PRODUCT/etc/selinux/product_file_contexts", "SYSTEM/product/etc/selinux/product_file_contexts"),
+)
+DEVICE_FILE_CONTEXTS = (
     ("VENDOR/etc/selinux/vendor_file_contexts", "SYSTEM/vendor/etc/selinux/vendor_file_contexts"),
     ("ODM/etc/selinux/odm_file_contexts", "VENDOR/odm/etc/selinux/odm_file_contexts"),
 )
@@ -105,9 +109,6 @@ XATTR_CAPABILITY = b"security.capability"
 XATTR_INLINE_DATA = b"system.data"
 VFS_CAP_REVISION_2 = 0x02000000
 VFS_CAP_FLAGS_EFFECTIVE = 0x1
-
-# the characters that have a meaning in a file_contexts regex, which is a PCRE2 one
-REGEX_META = re.compile(r"([\\^$.|?*+()\[\]{}])")
 
 
 def fail(message):
@@ -630,13 +631,12 @@ def tree_files(target_files, partition):
     return files
 
 
-def policy_file_contexts(target_files):
+def policy_file_contexts(target_files, parts):
+    """The paths of the file_contexts of the parts of the policy in target_files that it has."""
     paths = []
-    for candidates in POLICY_FILE_CONTEXTS:
+    for candidates in parts:
         found = [p for p in (os.path.join(target_files, c) for c in candidates) if os.path.exists(p)]
         paths += found[:1]
-    if not paths or not paths[0].endswith("/plat_file_contexts"):
-        fail(f"{target_files} has no plat_file_contexts")
     return paths
 
 
@@ -651,10 +651,18 @@ def fs_config_name(partition, path):
 def fs_config(target_files, expected_dir, partitions):
     meta = os.path.join(target_files, "META")
     with tempfile.TemporaryDirectory() as tmp:
+        parts = policy_file_contexts(target_files, PLATFORM_FILE_CONTEXTS)
+        if not parts or not parts[0].endswith("/plat_file_contexts"):
+            fail(f"{target_files} has no plat_file_contexts")
+        device = policy_file_contexts(target_files, DEVICE_FILE_CONTEXTS)
+        if device:
+            parts.append(os.path.join(tmp, "device_file_contexts"))
+            subprocess.run(["fc_sort", "-i", *device, "-o", parts[-1]], check=True)
         policy = os.path.join(tmp, "file_contexts")
-        subprocess.run(["fc_sort", "-i", *policy_file_contexts(target_files), "-o", policy], check=True)
-        policy_bin = os.path.join(tmp, "file_contexts.bin")
-        subprocess.run(["sefcontext_compile", "-o", policy_bin, policy], check=True)
+        with open(policy, "wb") as f:
+            # with a newline after each file, in case one doesn't end with one, as the build does
+            f.writelines(read_file(path) + b"\n" for path in parts)
+        subprocess.run(["sefcontext_compile", "-o", os.path.join(meta, "file_contexts.bin"), policy], check=True)
 
         # fs_config reads the device specific defaults from the etc/fs_config_* files of each
         # partition, which it looks for next to the directory of the system partition it is given
@@ -672,11 +680,11 @@ def fs_config(target_files, expected_dir, partitions):
             with open(metadata) as f:
                 originals.update((join(partition_prefix(partition), path), m) for path, m in json.load(f).items())
 
-        # the label the policy gives each file and the metadata that a file the original image doesn't
-        # have gets by default, as the build computes them, with a directory told apart by a slash
+        # the metadata that a file the original image doesn't have gets by default, as the build
+        # computes it, with a directory told apart by a slash
         paths = [(path, kind) for partition in files for path, kind in sorted(files[partition].items())]
         listing = "".join(path + "/" * (kind == "d") + "\n" for path, kind in paths)
-        output = subprocess.run(["fs_config", "-C", "-D", os.path.join(out, "system"), "-S", policy_bin, "-R", ""],
+        output = subprocess.run(["fs_config", "-C", "-D", os.path.join(out, "system"), "-R", ""],
                                 input=os.fsencode(listing), check=True, stdout=subprocess.PIPE).stdout
         lines = os.fsdecode(output).splitlines()
         if len(lines) != len(paths):
@@ -686,12 +694,9 @@ def fs_config(target_files, expected_dir, partitions):
             # the path goes first, and a path has no spaces
             fields = line.split(" ")[1:]
             attrs = dict(f.split("=", 1) for f in fields[3:])
-            if "selabel" not in attrs:
-                fail(f"the SELinux policy has no label for /{path}")
             defaults[path] = {"uid": int(fields[0]), "gid": int(fields[1]), "mode": int(fields[2], 8),
-                              "caps": int(attrs["capabilities"], 16), "label": attrs["selabel"]}
+                              "caps": int(attrs["capabilities"], 16)}
 
-        pins = {}
         fs_configs = {}
         for partition in files:
             prefix = partition_prefix(partition)
@@ -700,15 +705,6 @@ def fs_config(target_files, expected_dir, partitions):
                 original = originals.get(path)
                 if original and original["type"] == kind:
                     m = {k: original[k] for k in ("uid", "gid", "mode", "caps", "label")}
-                    if kind == "l":
-                        # fs_config looks a symbolic link up as if it were a regular file rather than
-                        # as the link that the build labels, so the label it got may not be the one the
-                        # build gives it
-                        pins[path] = m["label"]
-                    elif m["label"] != defaults[path]["label"]:
-                        print(f"Pinning the label {m['label']} of /{path}, which the policy labels "
-                              f"{defaults[path]['label']}", file=sys.stderr)
-                        pins[path] = m["label"]
                 else:
                     m = defaults[path]
                 expected[path] = dict(m, type=kind)
@@ -716,7 +712,7 @@ def fs_config(target_files, expected_dir, partitions):
                 # the path it has on the device
                 fs_configs.setdefault(fs_config_name(partition, path), []).append(
                     f"{'' if path == prefix else path} {m['uid']} {m['gid']} {m['mode']:o} "
-                    f"selabel={m['label']} capabilities={m['caps']:#x}\n")
+                    f"capabilities={m['caps']:#x}\n")
 
             with open(os.path.join(expected_dir, partition + ".json"), "w") as f:
                 json.dump({unjoin(prefix, path): m for path, m in expected.items()}, f, sort_keys=True)
@@ -724,19 +720,6 @@ def fs_config(target_files, expected_dir, partitions):
         for name, lines in fs_configs.items():
             with text(os.path.join(meta, name), "w") as f:
                 f.writelines(sorted(lines))
-
-        # a path that is only made of characters that have no special meaning in a regex or escaped
-        # ones is sorted after the regexes that have some and thus takes precedence over them, and a
-        # policy entry with the same regex has to go since the two would conflict
-        pin_regexes = {"/" + REGEX_META.sub(r"\\\1", path): label for path, label in sorted(pins.items())}
-        fc = os.path.join(tmp, "pinned_file_contexts")
-        with text(policy) as f, text(fc, "w") as out_fc:
-            for line in f:
-                fields = line.split()
-                if not fields or fields[0] not in pin_regexes:
-                    out_fc.write(line)
-            out_fc.writelines(f"{regex} {label}\n" for regex, label in pin_regexes.items())
-        subprocess.run(["sefcontext_compile", "-o", os.path.join(meta, "file_contexts.bin"), fc], check=True)
 
 
 def fs_verify(image, expected_path):
@@ -749,7 +732,9 @@ def fs_verify(image, expected_path):
             errors.append(f"/{path} is missing")
         elif path not in expected:
             errors.append(f"/{path} should not be there")
-        elif actual[path] != expected[path]:
+        # a file with no expected label, which the original image doesn't have, gets the one the
+        # policy gives it, as it does in a normal build
+        elif {k: v for k, v in actual[path].items() if k in expected[path]} != expected[path]:
             errors.append(f"/{path} is {actual[path]} rather than {expected[path]}")
     if errors:
         fail(f"{image} doesn't hold the expected files:\n" + "\n".join(errors))
