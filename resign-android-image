@@ -296,10 +296,6 @@ if test -z "$unshared"; then
 		deb+=(libc6-dev)
 	fi
 
-	if ! which dexdump >/dev/null; then
-		deb+=(dexdump)
-	fi
-
 	if ! which llvm-objdump >/dev/null; then
 		deb+=(llvm)
 	fi
@@ -657,6 +653,11 @@ make_file "$otatools.zip" download_ci_artifact otatools.zip "$otatools.zip"
 make_dir "$otatools" do_unzip "$otatools.zip"
 # for the tests to use the same ones as the build
 ln -sfn "$otatools" "$dir/otatools"
+
+# dexdump, which the dex code is disassembled with to patch it
+dexpreopt_tools="$(realpath "$var_dir")/dexpreopt_tools-$android_version"
+make_file "$dexpreopt_tools.zip" download_ci_artifact dexpreopt_tools.zip "$dexpreopt_tools.zip"
+make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 
 function download_aapt2 {
 	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
@@ -1301,7 +1302,7 @@ function patch_dex_in_zip {
 	fi
 
 	# the edits are passed on stdin since there can be any number of them
-	printf '%s\0' "$@"|python3 "$data_dir/patch_dex.py" "$out"
+	printf '%s\0' "$@"|python3 "$data_dir/patch_dex.py" "$dexpreopt_tools/dexdump" "$out"
 }
 
 # make WindowState.isSecureLocked() always return false so that FLAG_SECURE windows (and any other

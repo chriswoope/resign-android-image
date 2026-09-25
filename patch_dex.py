@@ -3,7 +3,8 @@
 # Binary-patch the bytecode of the dex files of a jar or an APK in place, so that nothing but the
 # patched instructions changes, rather than disassembling and reassembling everything with apktool.
 #
-# Usage: patch_dex.py ZIP, where ZIP is the jar or APK to patch. Its classes*.dex are patched where
+# Usage: patch_dex.py DEXDUMP ZIP, where DEXDUMP is the dexdump of the Android build tools to
+# disassemble with and ZIP is the jar or APK to patch. Its classes*.dex are patched where
 # they are inside it, which the runtime requires them to be stored uncompressed for anyway, so the
 # zip keeps every offset, every other entry and its size, and the only bytes of it that change are
 # those of the patched instructions and the CRC-32 of the dex files holding them. The edits to apply
@@ -280,12 +281,12 @@ def ranges(path, dex):
     return out
 
 
-def disassemble(path, dex, starts):
-    """Disassemble a dex file, returning its methods and, for each logical dex file in it, the index
-    of every method it refers to"""
+def disassemble(dexdump, path, dex, starts):
+    """Disassemble a dex file with the dexdump at the path dexdump, returning its methods and, for
+    each logical dex file in it, the index of every method it refers to"""
     methods = []
     refs = [{} for _ in starts]
-    dexdump = subprocess.Popen(["dexdump", "-d", path], stdout=subprocess.PIPE,
+    dexdump = subprocess.Popen([dexdump, "-d", path], stdout=subprocess.PIPE,
                                # a string constant can hold anything and none of it matters here
                                encoding="utf-8", errors="replace")
     for line in dexdump.stdout:
@@ -449,13 +450,13 @@ def check(path, before, after, changes):
         fail(f"patching {path} changed the byte at {at:#x}, which no edit was meant to touch")
 
 
-def patch(path, dex, edits, matched):
-    """Apply the edits to the contents of one dex file, recording where each of them matched, and
-    return whether they changed"""
+def patch(dexdump, path, dex, edits, matched):
+    """Apply the edits to the contents of one dex file, disassembled with the dexdump at the path
+    dexdump, recording where each of them matched, and return whether they changed"""
     before = bytes(dex)
     logical = ranges(path, dex)
     starts = [start for start, _ in logical]
-    methods, refs = disassemble(path, dex, starts)
+    methods, refs = disassemble(dexdump, path, dex, starts)
     # rather than silently finding nothing to patch if dexdump ever changes how it prints a method
     if methods and not any(method.insns for method in methods):
         fail(f"no instruction of {path} could be read back from its disassembly")
@@ -480,9 +481,10 @@ def patch(path, dex, edits, matched):
     return bool(changes)
 
 
-def patch_zip(path, edits, names):
-    """Apply the edits to the dex files of a zip, writing back the ones that changed where they are.
-    Nothing is written unless every edit matched something, so that a failure leaves the zip alone"""
+def patch_zip(dexdump, path, edits, names):
+    """Apply the edits to the dex files of a zip, disassembled with the dexdump at the path dexdump,
+    writing back the ones that changed where they are. Nothing is written unless every edit matched
+    something, so that a failure leaves the zip alone"""
     matched = [[] for _ in edits]
     # the zip is patched where it is, so it has to be written to even though the file it was copied
     # from can be read-only, as the files of an APEX payload are
@@ -504,7 +506,7 @@ def patch_zip(path, edits, names):
                 with open(dump, "wb") as g:
                     g.write(dex)
 
-                if not patch(dump, dex, edits, matched):
+                if not patch(dexdump, dump, dex, edits, matched):
                     continue
                 data[start:start + size] = dex
                 for crc in crcs:
@@ -535,8 +537,8 @@ def patch_zip(path, edits, names):
 
 
 def main():
-    if len(sys.argv) != 2:
-        fail("usage: patch_dex.py ZIP, with the edits as NUL-separated arguments on stdin")
+    if len(sys.argv) != 3:
+        fail("usage: patch_dex.py DEXDUMP ZIP, with the edits as NUL-separated arguments on stdin")
     args = sys.stdin.buffer.read().decode().split("\0")
     if args and not args[-1]:
         args.pop()
@@ -555,7 +557,7 @@ def main():
             fail(f"unknown edit: {op}")
         names.append(target)
 
-    patch_zip(sys.argv[1], edits, names)
+    patch_zip(sys.argv[1], sys.argv[2], edits, names)
 
 
 if __name__ == "__main__":
