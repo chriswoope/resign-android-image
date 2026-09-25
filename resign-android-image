@@ -2,6 +2,8 @@
 set -o nounset
 set -o pipefail
 set -e
+# in command substitutions as well
+shopt -s inherit_errexit
 
 # TODO: build updater with changed url
 # TODO: build backup service with changed allowbackup first API version
@@ -352,13 +354,13 @@ function background
 	background_pids+=("$!")
 }
 
-# wait for the commands run by background, failing if any of them failed, which set -e doesn't do for
-# the functions run by make_file, make_dir and with_temp_dir
+# wait for the commands run by background, failing if any of them failed, which a wait for all of them
+# doesn't do
 function wait_background
 {
 	local pid
 	for pid in "${background_pids[@]}"; do
-		wait "$pid" || exit 1
+		wait "$pid"
 	done
 	background_pids=()
 }
@@ -378,7 +380,12 @@ function with_temp
 			if test -z "$keep_tmp"; then
 				trap "rm -rf $tmp" EXIT
 			fi
-			if ! ( set -e; "$func" "$tmp" "$@" ); then
+			# run outside of a condition, where bash would ignore set -e for all of it
+			set +e
+			( set -e; "$func" "$tmp" "$@" )
+			local status="$?"
+			set -e
+			if test "$status" != 0; then
 				echo "Failed to run: $func $tmp $@" >&2
 				exit 1
 			fi
@@ -487,7 +494,7 @@ function git_clone
 	local dir="$1"
 	shift
 	make_dir "$dir" do_git_clone "$@"
-	( cd "$dir" && git pull --rebase ) || exit 1
+	( cd "$dir" && git pull --rebase )
 }
 
 function git_clone_ref
@@ -497,7 +504,7 @@ function git_clone_ref
 	shift 2
 	make_dir "$dir" do_git_clone --branch "$ref" "$@"
 	# a tag is checked out detached, with no branch to pull into
-	( cd "$dir" && git fetch --tags && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi ) || exit 1
+	( cd "$dir" && git fetch --tags && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi )
 }
 
 function download
@@ -648,7 +655,7 @@ while ids := [i for i in json.loads(get("/branch/{}/build-ids/between/{}/1?", br
             sys.exit()
     start = ids[-1]
 sys.exit(f"There is no build of Android {version} on {branch} on the Android CI: put the {artifact} of it at {dest}")
-' "$android_ci" "$android_ci_branch" "$android_ci_target" "$android_version" "$2" "$3")" || exit 1
+' "$android_ci" "$android_ci_branch" "$android_ci_target" "$android_version" "$2" "$3")"
 	download "$1" "$android_ci/submitted/$bid/$android_ci_target/latest/raw/$2"
 }
 
@@ -666,7 +673,7 @@ make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 
 function download_aapt2 {
 	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
-	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1" || exit 1
+	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1"
 	chmod +x "$1"
 }
 
@@ -751,10 +758,10 @@ fi
 
 aosp="$var_dir/aosp-$os"
 mkdir -p "$aosp/build"
-git_clone_ref "$aosp/script" "$git_ref" "$git/script" &
-git_clone_ref "$aosp/build/make" "$git_ref" "$git/platform_build" &
-
-wait
+background_pids=()
+background git_clone_ref "$aosp/script" "$git_ref" "$git/script"
+background git_clone_ref "$aosp/build/make" "$git_ref" "$git/platform_build"
+wait_background
 
 for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
 	if ! test -e "$aosp/build/$i"; then
@@ -769,15 +776,15 @@ function make_signapk_jar {
 	function go {
 		local src="$aosp/build/make/tools/signapk/src/com/android/signapk/CountingOutputStream.java"
 		local patched="$1/CountingOutputStream.java"
-		sed -re 's/^(\s*mBase = )base;$/\1new java.io.BufferedOutputStream(base);/' "$src" > "$patched" || exit 1
+		sed -re 's/^(\s*mBase = )base;$/\1new java.io.BufferedOutputStream(base);/' "$src" > "$patched"
 		if cmp -s "$src" "$patched"; then
 			echo "There is no assignment of the stream to write to in $src" >&2
 			exit 1
 		fi
 		# javac, which the Java runtime has without the JDK
-		java -m jdk.compiler/com.sun.tools.javac.Main -d "$1/classes" "$patched" || exit 1
-		cp "$otatools/framework/signapk.jar.otatools" "$2" || exit 1
-		(cd "$1/classes" && zip -q -X -D -r "$2" com) || exit 1
+		java -m jdk.compiler/com.sun.tools.javac.Main -d "$1/classes" "$patched"
+		cp "$otatools/framework/signapk.jar.otatools" "$2"
+		(cd "$1/classes" && zip -q -X -D -r "$2" com)
 	}
 	with_temp_dir "$1.build" go "$1"
 }
@@ -795,8 +802,8 @@ signapk_jsa="$otatools/framework/signapk.jsa"
 # a class data sharing archive of the classes that signapk loads, which it starts faster with, made by signing
 # framework-res.apk of the target files $3 with it in the directory $1
 function make_signapk_jsa_in {
-	unzip -p "$3" SYSTEM/framework/framework-res.apk > "$1/in.apk" || exit 1
-	java "${signapk_java_args[@]}" -XX:ArchiveClassesAtExit="$2" -Xlog:cds=off -Xlog:cds+dynamic=off -Djava.library.path="$otatools/lib64" -jar "$otatools/framework/signapk.jar" "$key_dir/releasekey.x509.pem" "$key_dir/releasekey.pk8" "$1/in.apk" "$1/out.apk" || exit 1
+	unzip -p "$3" SYSTEM/framework/framework-res.apk > "$1/in.apk"
+	java "${signapk_java_args[@]}" -XX:ArchiveClassesAtExit="$2" -Xlog:cds=off -Xlog:cds+dynamic=off -Djava.library.path="$otatools/lib64" -jar "$otatools/framework/signapk.jar" "$key_dir/releasekey.x509.pem" "$key_dir/releasekey.pk8" "$1/in.apk" "$1/out.apk"
 }
 
 function make_signapk_jsa {
@@ -1019,9 +1026,9 @@ function make_extract_ota_payload {
 		make_file "$dir/ota_meta/$i" make_hardlink "$dir/ota/$i"
 	done
 
-	do_extract_ota_payload "$1" "$ota_zip" "$dir/ota_meta/ab_partitions.txt" || exit 1
+	do_extract_ota_payload "$1" "$ota_zip" "$dir/ota_meta/ab_partitions.txt"
 	mkdir -p "$1/META"
-	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$ota_zip" || exit 1
+	python3 "$data_dir/ota_payload_to_meta.py" -o "$1/META" "$ota_zip"
 	discard_download "$ota_zip"
 }
 
@@ -1038,11 +1045,11 @@ function make_target_files_extracted {
 		mkdir -p "$outdir/target_files_extracted/IMAGES"
 		ls -1 "$dir/ota_payload"|while read i; do
 			if test "$i" == vbmeta.img; then
-				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img") || exit 1
+				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
 			elif test -f "$dir/ota_payload/$i"; then
 				make_file "$outdir/target_files_extracted/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
 			fi
-		done || exit 1
+		done
 	fi
 
 	query=
@@ -1460,11 +1467,11 @@ function dex2oat_runner {
 		fi
 		echo "dex2oat doesn't work in this gVisor sandbox, see $log, so it is run with qemu-user" >&2
 		if ! which qemu-x86_64 >/dev/null; then
-			sudo apt-get -y install qemu-user || exit 1
+			sudo apt-get -y install qemu-user
 		fi
 		dex2oat_runner="$(which qemu-x86_64)"
 	fi
-	python3 "$data_dir/target_files_inputs.py" preopt-check "$1" "$dexpreopt_tools" "$dex2oat_runner" || exit 1
+	python3 "$data_dir/target_files_inputs.py" preopt-check "$1" "$dexpreopt_tools" "$dex2oat_runner"
 }
 
 function make_target_files_intermediates_base {
@@ -1631,16 +1638,16 @@ EOF
 		if test "${#patched_dex[@]}" != 0; then
 			if test -n "$dex2oat"; then
 				dex2oat_runner "$outdir/target_files_extracted"
-				python3 "$data_dir/target_files_inputs.py" recompile-preopt "$1" "$outdir/target_files_extracted" "$dexpreopt_tools" "$dex2oat_runner" "$threads" "${patched_dex[@]}" || exit 1
+				python3 "$data_dir/target_files_inputs.py" recompile-preopt "$1" "$outdir/target_files_extracted" "$dexpreopt_tools" "$dex2oat_runner" "$threads" "${patched_dex[@]}"
 			else
-				python3 "$data_dir/target_files_inputs.py" stale-preopt "$1" "${patched_dex[@]}" || exit 1
+				python3 "$data_dir/target_files_inputs.py" stale-preopt "$1" "${patched_dex[@]}"
 			fi
 		fi
 		# the images are built out of these files by the signing
 		apply_modifications "$1"
 		# with the fs-verity metadata of the files that CompOS compiles from, as the build makes it, for
 		# the files changed or removed above
-		python3 "$data_dir/target_files_inputs.py" fsverity-update "$1" || exit 1
+		python3 "$data_dir/target_files_inputs.py" fsverity-update "$1"
 	fi
 }
 
@@ -1676,7 +1683,7 @@ EOF
 		for b in $image_parts; do
 			if test -e "$dir/ota_payload/$b.img"; then
 				printf '%s\n' "building_${b}_image=true" "${b}_fs_type=ext4" "${b}_selinux_fc=file_contexts.bin" "${b}_disable_sparse=true" >> "$1"
-				python3 "$data_dir/target_files_inputs.py" avb-args "$b" "$dir/ota_payload/$b.img" >> "$1" || exit 1
+				python3 "$data_dir/target_files_inputs.py" avb-args "$b" "$dir/ota_payload/$b.img" >> "$1"
 				# the size of a dynamic partition is the size of its image, while the AVB footer of the
 				# image of any other partition must be at the end of the partition
 				if [[ $dynamic != *" $b "* ]]; then
@@ -1689,14 +1696,14 @@ EOF
 		# build adds a footer to
 		cat "$outdir/boot_inputs/misc_info.txt" >> "$1"
 		if test -e "$dir/ota_payload/dtbo.img"; then
-			python3 "$data_dir/target_files_inputs.py" avb-args dtbo "$dir/ota_payload/dtbo.img" >> "$1" || exit 1
+			python3 "$data_dir/target_files_inputs.py" avb-args dtbo "$dir/ota_payload/dtbo.img" >> "$1"
 		fi
 		if test -e "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img"; then
 			echo has_pvmfw=true >> "$1"
-			python3 "$data_dir/target_files_inputs.py" avb-args pvmfw "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img" >> "$1" || exit 1
+			python3 "$data_dir/target_files_inputs.py" avb-args pvmfw "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img" >> "$1"
 		fi
 		if test -n "$replace_boot"; then
-			python3 "$data_dir/target_files_inputs.py" avb-args boot "$dir/ota_payload/boot.img" >> "$1" || exit 1
+			python3 "$data_dir/target_files_inputs.py" avb-args boot "$dir/ota_payload/boot.img" >> "$1"
 		fi
 		check_vbmeta_partitions
 		printf '%s\n' avb_building_vbmeta_image=true "avb_vbmeta_args=--padding_size 4096 $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img"|tr '\n' ' ')" >> "$1"
@@ -1736,7 +1743,7 @@ function make_dynamic_partitions_info {
 }
 
 function make_certs_mac {
-	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; { grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f" || test "$?" == 1; }|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done; true)|sort|uniq)>"$1" || exit 1
+	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; { grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f" || test "$?" == 1; }|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done)|sort|uniq)>"$1"
 }
 
 function make_certs {
@@ -1757,7 +1764,7 @@ function make_certs {
 				echo "$(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1)" "$i" "$k"
 			fi
 		done
-	)|sort|uniq>"$1" || exit 1
+	)|sort|uniq>"$1"
 }
 
 function make_product_security {
@@ -1799,9 +1806,9 @@ function make_pvmfw_embedded_avbpubkey {
 		exit 1
 	fi
 	if [[ $apex == *.capex ]]; then
-		unzip -p "$apex" original_apex|bsdtar -x -O -f - apex_pubkey > "$1" || exit 1
+		unzip -p "$apex" original_apex|bsdtar -x -O -f - apex_pubkey > "$1"
 	else
-		unzip -p "$apex" apex_pubkey > "$1" || exit 1
+		unzip -p "$apex" apex_pubkey > "$1"
 	fi
 }
 
@@ -1882,7 +1889,7 @@ function make_target_files_signed_zip {
 			to="$(realpath "$2")"
 			# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with
 			if test -e "$signapk_jsa" && ! java "${signapk_java_args[@]}" -Xshare:on -XX:SharedArchiveFile="$signapk_jsa" -cp "$otatools/framework/signapk.jar" -version 2>/dev/null; then
-				rm "$signapk_jsa" || exit 1
+				rm "$signapk_jsa"
 			fi
 			make_file "$signapk_jsa" make_signapk_jsa "$from"
 			mkdir -p "$1/build/make/target/product"
@@ -1906,10 +1913,10 @@ function make_target_files_signed_zip {
 				generate_release_sh="$aosp/script/release.sh"
 			fi
 
-			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}" || exit 1
+			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
 			# check that the sign tools signed all the files they are for, with the payloads they are
 			# in repacked as they were
-			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to" || exit 1
+			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to"
 		fi
 	}
 	with_temp_dir "$outdir/sign_target_files" go "$@"
@@ -1929,7 +1936,7 @@ function make_target_files_signed {
 	# only what is taken from the signed target files, rather than the gigabytes of the files the
 	# images are built from, and each image, which the signing compressed, in a process of its own
 	local zip="$outdir/target_files_signed.zip"
-	unzip -q -o "$zip" 'META/*' '*/build.prop' -d "$1" || exit 1
+	unzip -q -o "$zip" 'META/*' '*/build.prop' -d "$1"
 	unzip -Z1 "$zip" 'IMAGES/*'|xargs -d '\n' -P "$threads" -I {} unzip -q -o "$zip" {} -d "$1"
 }
 
@@ -2057,9 +2064,9 @@ function apply_modifications {
 			precompiled="$vendor_selinux/precompiled_sepolicy"
 		fi
 		# the version of the policy format, from the header of the precompiled policy
-		policy_version="$(od -An -tu4 --endian=little -j16 -N4 "$precompiled")" || exit 1
-		read -r mapping_version < "$vendor_selinux/plat_sepolicy_vers.txt" || exit 1
-		read -r genfs_version < "$vendor_selinux/genfs_labels_version.txt" || exit 1
+		policy_version="$(od -An -tu4 --endian=little -j16 -N4 "$precompiled")"
+		read -r mapping_version < "$vendor_selinux/plat_sepolicy_vers.txt"
+		read -r genfs_version < "$vendor_selinux/genfs_labels_version.txt"
 		cil=()
 		for i in "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil" "$selinux/mapping/$mapping_version.compat.cil" \
 			"$system_ext_selinux/system_ext_sepolicy.cil" "$system_ext_selinux/mapping/$mapping_version.cil" "$system_ext_selinux/mapping/$mapping_version.compat.cil" \
@@ -2099,11 +2106,11 @@ function apply_modifications {
 			fi
 		done >> "$1/SYSTEM/etc/selinux/plat_sepolicy.cil"
 
-		"${secilc[@]}" -o "$precompiled.own" || exit 1
+		"${secilc[@]}" -o "$precompiled.own"
 		mv -f -- "$precompiled.own" "$precompiled"
 		# the hash of the platform policy and of the mapping file, as the build makes it with the mapping
 		# file of the version of the platform, which is the version of the vendor partition built with it
-		hash="$(cat -- "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil"|sha256sum)" || exit 1
+		hash="$(cat -- "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil"|sha256sum)"
 		for i in "$selinux/plat_sepolicy_and_mapping.sha256" "$precompiled.plat_sepolicy_and_mapping.sha256"; do
 			echo "${hash%% *}" > "$i.own"
 			mv -f -- "$i.own" "$i"
@@ -2123,7 +2130,7 @@ function make_target_files_base {
 		cp -a "$outdir/target_files_signed/META" "$1/META"
 
 		outr="$(realpath "$1")"
-		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr") || exit 1
+		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr")
 
 		ls -1 "$dir/ota_meta"|while read i; do
 			if test "$i" != dynamic_partitions_info.txt && test "$i" != misc_info.txt; then
@@ -2203,9 +2210,9 @@ function take_signed_image {
 	local img="$outdir/target_files_signed/IMAGES/$2.img"
 	local orig="$dir/ota_payload/$2.img"
 	if test -e "$outdir/fs_expected/$2.json"; then
-		python3 "$data_dir/target_files_inputs.py" fs-verify "$img" "$outdir/fs_expected/$2.json" || exit 1
+		python3 "$data_dir/target_files_inputs.py" fs-verify "$img" "$outdir/fs_expected/$2.json"
 	elif test -e "$outdir/boot_inputs/expected/$2.json"; then
-		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$outdir/boot_inputs/expected/$2.json" || exit 1
+		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$outdir/boot_inputs/expected/$2.json"
 	elif test "$2" == vbmeta; then
 		if ! diff <(get_avbtool_partitions "$orig"|sort) <(get_avbtool_partitions "$img"|sort) >&2 || test "$(get_avbtool_vbmeta_opts "$orig")" != "$(get_avbtool_vbmeta_opts "$img")"; then
 			echo "The built vbmeta doesn't verify the same partitions with the same rollback index as the original one" >&2
@@ -2237,7 +2244,7 @@ function make_target_files_zip {
 			if test -z "$done" && test -f "$dir/ota_payload/$i"; then
 				make_file "$outdir/target_files/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
 			fi
-		done || exit 1
+		done
 
 		for b in $signed_images; do
 			if test -e "$dir/ota_payload/$b.img" || test -e "$outdir/target_files_signed/IMAGES/$b.img"; then
@@ -2307,8 +2314,8 @@ function check_ota {
 function make_ota {
 	make_file "$outdir/ota_unchecked.zip" make_ota_unchecked
 
-	result="$(set -e; with_temp_dir "$outdir/check_ota" check_ota)"
-	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
+	result="$(with_temp_dir "$outdir/check_ota" check_ota)"
+	if test "$result" == "CHECK SUCCESSFUL"; then
 		ln "$outdir/ota_unchecked.zip" "$1"
 	else
 		echo "OTA key check failed!!!"
@@ -2502,7 +2509,7 @@ function make_factory_unchecked {
 		local zip="$(realpath "$out/image-$device-$out_build.zip")"
 		# files in the zip must be in the proper order
 		factory_image_entries="$(<$dir/factory_image.list)"
-		(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries) || exit 1
+		(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries)
 
 		ls -1 "$dir/factory/$factory_name"|while read i; do
 			if test "$i" == avb_pkmd.bin; then
@@ -2529,8 +2536,8 @@ function make_factory_unchecked {
 function make_factory {
 	make_dir "$outdir/factory_unchecked" make_factory_unchecked
 
-	result="$(set -e; with_temp_dir "$outdir/check_factory" check_factory)"
-	if test "$?" == 0 && test "$result" == "CHECK SUCCESSFUL"; then
+	result="$(with_temp_dir "$outdir/check_factory" check_factory)"
+	if test "$result" == "CHECK SUCCESSFUL"; then
 		mkdir -p "$1/$out_factory_name"
 		ln --target-directory="$1/$out_factory_name" "$outdir/factory_unchecked/$out_factory_name"/*
 	else
@@ -2585,15 +2592,15 @@ function make_factory_zip {
 		done < "$dir/factory.list"
 	)"
 
-	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries) || exit 1
+	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries)
 }
 
 function make_factory_zip_sig {
 	local key="$(realpath "$key_dir/factory.sec")"
 	if test "$sign_factory_images" == signify; then
-		(cd "$outdir/out"; sha256sum --tag "$out_factory_name.zip"|$signify -S -s "$key" -e -m - -x "$1") || exit 1
+		(cd "$outdir/out"; sha256sum --tag "$out_factory_name.zip"|$signify -S -s "$key" -e -m - -x "$1")
 	elif test "$sign_factory_images" == ssh-keygen; then
-		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$out_factory" > "$1" || exit 1
+		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$out_factory" > "$1"
 	fi
 }
 
@@ -2653,7 +2660,7 @@ if test -n "$build_ota"; then
 		if ! test -e "$generate_metadata"; then
 			generate_metadata="$aosp/script/generate_metadata.py"
 		fi
-		"$generate_metadata" "$1/ota.zip" || exit 1
+		"$generate_metadata" "$1/ota.zip"
 		rm -f "$1/ota.zip"
 	}
 
