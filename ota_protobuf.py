@@ -1,4 +1,5 @@
-"""Minimal protobuf decoder, enough to read Android OTA messages without a schema."""
+"""Minimal protobuf decoder and encoder, enough to read Android OTA messages without a schema and to
+write simple messages."""
 
 
 def varint(data, pos):
@@ -60,3 +61,17 @@ def last_bytes(message, number):
 
 def all_bytes(message, number):
     return [value for wire, value in message.get(number, []) if wire == 2]
+
+
+def encode_varint(value):
+    out = bytearray()
+    while value > 0x7f:
+        out.append(value & 0x7f | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def encode_bytes(number, value):
+    """A length-delimited field: bytes, a string or an embedded message."""
+    return encode_varint(number << 3 | 2) + encode_varint(len(value)) + value
