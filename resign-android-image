@@ -1769,7 +1769,11 @@ function make_target_files_signed {
 	make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
 	make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
 
-	unzip -q -o -x "$outdir/target_files_signed.zip" -d "$1"
+	# only what is taken from the signed target files, rather than the gigabytes of the files the
+	# images are built from, and each image, which the signing compressed, in a process of its own
+	local zip="$outdir/target_files_signed.zip"
+	unzip -q -o "$zip" 'META/*' '*/build.prop' -d "$1" || exit 1
+	unzip -Z1 "$zip" 'IMAGES/*'|xargs -d '\n' -P "$(nproc)" -I {} unzip -q -o "$zip" {} -d "$1"
 }
 
 # make the compat change with ID $2 enabled only for the apps targeting SDK version $3 or later, in
