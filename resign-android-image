@@ -1281,7 +1281,8 @@ patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' 
 #     iget v2, v4, Landroid/content/pm/ApplicationInfo;.flags:I // field@0123
 #     const v3, #float 0.000000 // #00008000
 #     and-int/2addr v2, v3
-patch_seedvault=(replace $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
+# The Seedvault of recent builds doesn't test the flag any more, leaving nothing to patch
+patch_seedvault=(replace-if-found $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
 
 # for --adb-until-unlock, have the system server come up believing that USB ADB is enabled, so that ADB
 # keeps working once it takes the USB gadget over from init, which it otherwise immediately takes the

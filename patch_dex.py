@@ -15,6 +15,9 @@
 #                          REGEX (one instruction per line, as dexdump prints it without its offset
 #                          prefix, with the regex anchored to whole lines) with CODE, which can use
 #                          \1... to refer to the groups the regex captured
+#     replace-if-found REGEX CODE
+#                          the same, for code that only some versions have, which is reported rather
+#                          than an error if it matches nothing
 # CODE is instructions separated by newlines, assembled by the small assembler below; a register is
 # named vN, or pN for the N-th argument register as in smali. The new bytecode must fit in the old
 # one and the rest of the old one is filled with nops. A class, a method or a field can only be named
@@ -22,11 +25,11 @@
 # moving everything that follows it, so CODE can offer several bodies separated by a line holding
 # "or" and the first one the dex file has every reference for is the one that gets assembled.
 #
-# An edit that matches nothing anywhere is an error, and so is a method edit whose name matches more
-# than the one method it is meant to patch, so that the build fails loudly instead of silently
-# producing an unpatched or over-patched image if Android renames, moves or duplicates the code being
-# patched. What was patched is reported, and the patched dex file is checked to differ from the
-# original one only where an edit meant to write.
+# An edit that matches nothing anywhere is an error, but for replace-if-found, and so is a method edit
+# whose name matches more than the one method it is meant to patch, so that the build fails loudly
+# instead of silently producing an unpatched or over-patched image if Android renames, moves or
+# duplicates the code being patched. What was patched is reported, and the patched dex file is checked
+# to differ from the original one only where an edit meant to write.
 
 import bisect
 import hashlib
@@ -508,6 +511,9 @@ def patch_zip(path, edits, names):
                     struct.pack_into("<I", data, crc, zlib.crc32(dex))
 
         for (op, _, _), target, where in zip(edits, names, matched):
+            if not where and op == "replace-if-found":
+                print(f"patch_dex.py: found nothing to patch for {target} in {path}", file=sys.stderr)
+                continue
             if not where:
                 fail(f"failed to find {target} to patch")
             if op == "method":
@@ -540,7 +546,7 @@ def main():
     edits = []
     names = []
     for op, target, code in zip(*[iter(args)] * 3):
-        if op == "replace":
+        if op in ("replace", "replace-if-found"):
             # anchoring to whole lines keeps a match aligned with the instructions it covers
             edits.append((op, re.compile(f"^(?:{target})$", re.MULTILINE), code))
         elif op == "method":
