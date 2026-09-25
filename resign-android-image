@@ -1784,13 +1784,14 @@ function make_target_files_signed_zip {
 			ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
 			ln -s "$(realpath "$key_dir")" "$1/keys"
 			cd "$1"
-			key_map="-k build/make/target/product/security/bluetooth=keys/bluetooth"
+			# added to the arguments of sign_target_files_apks in the release script, which gets them as its own
+			local sign_args=(-k build/make/target/product/security/bluetooth=keys/bluetooth)
 			generate_release_sh="$aosp/script/generate-release.sh"
 			if ! test -e "$generate_release_sh"; then
 				generate_release_sh="$aosp/script/release.sh"
 			fi
 
-			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 $KEY_MAP/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 KEY_MAP="$key_map" bash -x || exit 1
+			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}" || exit 1
 			# check that the sign tools signed all the files they are for, with the payloads they are
 			# in repacked as they were
 			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to" || exit 1
