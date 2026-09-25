@@ -39,6 +39,12 @@
 #         it is signed with a key that isn't there, to leave it signed as it is, and the tool that
 #         signs the files in the payload of an APEX that are signed with its payload key with the
 #         payload key the APEX is signed with, if it has any
+#     target_files_inputs.py stale-preopt TARGET_FILES PATCHED [PATCHED...]
+#         remove from the TARGET_FILES directory, printing each of them, the files that dexpreopt
+#         compiled that are stale once the dex code of the APKs and jars at the paths PATCHED in it has
+#         been changed, which go on into the payload of an APEX if a directory in them is an APEX file:
+#         the compiled code of the files themselves and of everything compiled against them, and the
+#         whole boot image if any of it is stale, for the device to compile them again
 #     target_files_inputs.py apex-verify ORIGINAL SIGNED
 #         check that each APEX that the ORIGINAL target files zip gives a sign tool for has, in the
 #         SIGNED target files zip, a payload with the same type of filesystem and the same files in it
@@ -50,6 +56,7 @@
 # it had, which it does unless its image wasn't labeled by a normal build with the same policy.
 
 import functools
+import glob
 import hashlib
 import io
 import json
@@ -63,6 +70,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+
+from ota_protobuf import fields, last_bytes
 
 # the partitions whose images are built from a directory of the target files with the same name in
 # upper case and are mounted at the directory of their own name, with the system one holding the root
@@ -533,6 +542,116 @@ def apex_verify(original, signed):
                 if payloads[0] != payloads[1]:
                     fail(f"{member} has a signed {payloads[1][0]} payload with {payloads[1][1]} signed with its "
                          f"payload key rather than an {payloads[0][0]} one with {payloads[0][1]}")
+
+
+def apex_name(apex):
+    """The name of the APEX or compressed APEX apex, which its payload is mounted at /apex/ after."""
+    with zipfile.ZipFile(apex) as z:
+        # a compressed APEX holds the original one as a whole
+        if "original_apex" in z.namelist():
+            with zipfile.ZipFile(io.BytesIO(z.read("original_apex"))) as original:
+                manifest = original.read("apex_manifest.pb")
+        else:
+            manifest = z.read("apex_manifest.pb")
+    name = last_bytes(fields(manifest), 1)
+    if not name:
+        fail(f"{apex} has no name in its manifest")
+    return os.fsdecode(name)
+
+
+def device_path(target_files, path):
+    """The path on the device of the file at path in the target files directory target_files, which
+    goes on into the payload of an APEX if a directory in it is an APEX file."""
+    parts = path.split("/")
+    for i in range(2, len(parts)):
+        apex = os.path.join(target_files, *parts[:i])
+        if os.path.isfile(apex):
+            return "/".join(["/apex", apex_name(apex), *parts[i:]])
+    if parts[0].lower() not in PARTITIONS or len(parts) < 2:
+        fail(f"{path} is not in the directory of a partition")
+    return "/".join(["", parts[0].lower(), *parts[1:]])
+
+
+# the files that dexpreopt compiles the dex code of an APK or jar into: the compiled code, its dex code
+# (unless left in the APK or jar) and verification data, and the app image of its classes
+PREOPT_EXTENSIONS = (".odex", ".vdex", ".art")
+
+
+def stale_preopt(target_files, patched):
+    """Remove from the target files directory target_files the files compiled by dexpreopt that the
+    dex code of the files at the paths patched in it, which go on into the payload of an APEX as for
+    device_path, being changed makes stale, printing each of them, so that the runtime and odrefresh
+    compile them again on the device rather than reject them, or worse use them."""
+    remove = {}
+    locations = []
+    for path in patched:
+        location = device_path(target_files, path)
+        locations.append(location)
+        # where ART looks for the files compiled from it: the system server jars of APEXes are
+        # compiled into the framework directory of the partition of the APEX, named after their
+        # path with the directories flattened
+        if location.startswith("/apex/"):
+            patterns = [os.path.join(glob.escape(os.path.join(target_files, partition.upper(), "framework", "oat")),
+                                     "*", glob.escape(location[1:].replace("/", "@") + "@classes"))
+                        for partition in PARTITIONS]
+        else:
+            directory, name = os.path.split(os.path.join(target_files, path))
+            patterns = [os.path.join(glob.escape(directory), "oat", "*", glob.escape(os.path.splitext(name)[0]))]
+        for pattern in patterns:
+            for extension in PREOPT_EXTENSIONS:
+                for artifact in glob.glob(pattern + extension):
+                    remove.setdefault(artifact, f"compiled from {location}")
+
+    # compiled code records by their location on the device the dex files it was compiled against (the
+    # boot classpath, with the checksums of the boot image, and the class loader context, with the
+    # checksums of its dex files) and its own ones, so it is stale if it names a patched file. Its
+    # verification data doesn't depend on anything but its own dex code, which the runtime falls back
+    # to once the compiled code is gone
+    boot_image = []
+    for partition in PARTITIONS:
+        for root, dirs, names in os.walk(os.path.join(target_files, partition.upper())):
+            for name in names:
+                path = os.path.join(root, name)
+                # the .oat files are those of the boot image, the others being .odex ones
+                if not name.endswith((".odex", ".oat")) or os.path.islink(path):
+                    continue
+                if name.endswith(".oat"):
+                    boot_image.append(path)
+                data = read_file(path)
+                found = next((location for location in locations if os.fsencode(location) in data), None)
+                if found:
+                    for artifact in path, os.path.splitext(path)[0] + ".art":
+                        if os.path.lexists(artifact):
+                            remove.setdefault(artifact, f"compiled against {found}")
+
+    # the boot image is loaded, and compiled again by odrefresh, as a whole, and its vdex files are in
+    # the directory above that of the files of each instruction set, which link to them
+    stale_boot_image = [path for path in boot_image if path in remove]
+    if stale_boot_image:
+        reason = "in the boot image with " + device_path(target_files, os.path.relpath(stale_boot_image[0], target_files))
+        for path in boot_image:
+            base = os.path.splitext(path)[0]
+            for artifact in path, base + ".art", base + ".vdex":
+                if os.path.lexists(artifact):
+                    remove.setdefault(artifact, reason)
+                    if os.path.islink(artifact):
+                        target = os.path.join(os.path.dirname(artifact), os.readlink(artifact))
+                        remove.setdefault(os.path.normpath(target), reason)
+
+    for artifact, reason in sorted(remove.items()):
+        relative = os.path.relpath(artifact, target_files)
+        print(f"Removing stale {device_path(target_files, relative)}, {reason}")
+        # along with the fs-verity metadata of it that the build makes
+        for path in artifact, artifact + ".fsv_meta":
+            if os.path.lexists(path):
+                os.unlink(path)
+        # and the directories that only held compiled files, as a build that doesn't compile them has
+        # none of
+        top = os.path.join(target_files, relative.split("/")[0])
+        directory = os.path.dirname(artifact)
+        while directory != top and not os.listdir(directory):
+            os.rmdir(directory)
+            directory = os.path.dirname(directory)
 
 
 def partition_prefix(partition):
@@ -1013,10 +1132,12 @@ def main():
         apk_keys(args[1], args[2], args[3])
     elif len(args) == 3 and args[0] == "apex-verify":
         apex_verify(args[1], args[2])
+    elif len(args) >= 3 and args[0] == "stale-preopt":
+        stale_preopt(args[1], args[2:])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
-             "apk-keys TARGET_FILES CERTS META | apex-verify ORIGINAL SIGNED")
+             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | apex-verify ORIGINAL SIGNED")
 
 
 if __name__ == "__main__":

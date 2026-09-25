@@ -144,6 +144,11 @@ function image_file {
 	"$otatools/debugfs_static" -R "cat $2" "$1" 2>/dev/null
 }
 
+# whether ext4 image $1 has a file $2
+function image_has {
+	"$otatools/debugfs_static" -R "stat $2" "$1" 2>/dev/null|grep -q '^Inode:'
+}
+
 # print the value of property $3 in the build.prop file $2 of ext4 image $1
 function image_prop {
 	image_file "$1" "$2"|sed -nre "s/^${3//./\\.}=//p"
@@ -209,6 +214,19 @@ function test_modifications {
 			fail "$jar.jar was not patched"
 		fi
 	done
+
+	# and what was compiled from them and against them is left for the device to compile again, rather
+	# than left stale, while what doesn't depend on them is kept
+	local stale
+	for stale in /system/framework/arm64/boot-framework.oat /system/framework/arm64/boot.art /system/framework/boot-framework.vdex /system/framework/oat/arm64/services.odex /system/framework/oat/arm64/services.vdex /system/framework/oat/arm64/apex@com.android.tethering@javalib@service-connectivity.jar@classes.vdex; do
+		if image_has "$system" "$stale"; then
+			fail "$stale is stale but still in the system image"
+		fi
+	done
+	if image_has "$work/ota/system_ext.img" /priv-app/SystemUI/oat/arm64/SystemUI.odex; then
+		fail "The compiled code of SystemUI is stale but still in the system_ext image"
+	fi
+	image_has "$work/ota/system_ext.img" /priv-app/SystemUI/oat/arm64/SystemUI.vdex || fail "The verified dex code of SystemUI, which doesn't depend on the framework, was removed"
 }
 
 failed=()

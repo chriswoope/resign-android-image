@@ -1401,9 +1401,8 @@ patch_adb_until_unlock=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\nipu
 # apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
-# can be patched directly like a plain system file; the stale precompiled artifacts under
-# /system/framework/oat no longer match the rewritten jar, so the runtime discards them and runs the
-# patched dex instead
+# can be patched directly like a plain system file; what was compiled from them and against them is
+# removed once the target files are put together, see stale-preopt in target_files_inputs.py
 function patch_framework_jar {
 	local out="$1"
 	local jar="$2"
@@ -1443,6 +1442,10 @@ function make_target_files_intermediates_base {
 
 	# the files are patched at the same time, since each of them takes a while
 	local background_pids=()
+	# the paths in the target files of the APKs and jars whose dex code is patched, going on into the
+	# payload of an APEX for the jars in one, which makes what was compiled from them and against them
+	# stale; the Updater is left out since only its resources are
+	local patched_dex=()
 
 	if test "$update_url" != "$orig_update_url"; then
 		mkdir -p "$1/SYSTEM/priv-app/Updater"
@@ -1538,6 +1541,7 @@ EOF
 			if test -e "$outdir/target_files_extracted/$i"; then
 				mkdir -p "$1/SYSTEM/apex"
 				background with_temp_dir "$outdir/patch-tethering-apex" patch_apex {"$1","$outdir/target_files_extracted"}/"$i" patch_service_connectivity
+				patched_dex+=("$i/javalib/service-connectivity.jar")
 				patched=1
 			fi
 		done
@@ -1569,15 +1573,18 @@ EOF
 	fi
 	if test "${#services_jar_patches[@]}" != 0; then
 		background patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
+		patched_dex+=(SYSTEM/framework/services.jar)
 	fi
 	if test "${#framework_jar_patches[@]}" != 0; then
 		background patch_framework_jar "$1" framework.jar "${framework_jar_patches[@]}"
+		patched_dex+=(SYSTEM/framework/framework.jar)
 	fi
 
 	if test -n "$allowbackup"; then
 		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
 			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
 			background patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
+			patched_dex+=(SYSTEM/priv-app/Seedvault/Seedvault.apk)
 		fi
 	fi
 
@@ -1587,9 +1594,11 @@ EOF
 
 	if test "$build_method" == resign; then
 		cp -a -n -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
-		if test -n "$allowbackup"; then
-			# its precompiled code no longer matches the patched APK
-			rm -rf "$1/SYSTEM/priv-app/Seedvault/oat"
+		# the runtime rejects compiled code that no longer matches what it was compiled from or against
+		# and odrefresh only compiles the boot image and the system server jars again when the files
+		# compiled from them are missing, so a stale boot image leaves every process without one
+		if test "${#patched_dex[@]}" != 0; then
+			python3 "$data_dir/target_files_inputs.py" stale-preopt "$1" "${patched_dex[@]}" || exit 1
 		fi
 		# the images are built out of these files by the signing
 		apply_modifications "$1"
