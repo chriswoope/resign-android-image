@@ -1402,7 +1402,8 @@ patch_adb_until_unlock=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\nipu
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
 # can be patched directly like a plain system file; what was compiled from them and against them is
-# removed once the target files are put together, see stale-preopt in target_files_inputs.py
+# removed, and their fs-verity metadata made again, once the target files are put together, see
+# stale-preopt and fsverity-update in target_files_inputs.py
 function patch_framework_jar {
 	local out="$1"
 	local jar="$2"
@@ -1602,6 +1603,9 @@ EOF
 		fi
 		# the images are built out of these files by the signing
 		apply_modifications "$1"
+		# with the fs-verity metadata of the files that CompOS compiles from, as the build makes it, for
+		# the files changed or removed above
+		python3 "$data_dir/target_files_inputs.py" fsverity-update "$1" || exit 1
 	fi
 }
 

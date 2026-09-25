@@ -45,6 +45,10 @@
 #         been changed, which go on into the payload of an APEX if a directory in them is an APEX file:
 #         the compiled code of the files themselves and of everything compiled against them, and the
 #         whole boot image if any of it is stale, for the device to compile them again
+#     target_files_inputs.py fsverity-update TARGET_FILES
+#         make the fs-verity metadata of the files in the TARGET_FILES directory, the .fsv_meta files
+#         and the manifests of the digests in the BuildManifest APKs, match the files again, printing
+#         what changes
 #     target_files_inputs.py apex-verify ORIGINAL SIGNED
 #         check that each APEX that the ORIGINAL target files zip gives a sign tool for has, in the
 #         SIGNED target files zip, a payload with the same type of filesystem and the same files in it
@@ -71,7 +75,7 @@ import sys
 import tempfile
 import zipfile
 
-from ota_protobuf import fields, last_bytes
+from ota_protobuf import all_bytes, encode_bytes, fields, last_bytes
 
 # the partitions whose images are built from a directory of the target files with the same name in
 # upper case and are mounted at the directory of their own name, with the system one holding the root
@@ -654,6 +658,150 @@ def stale_preopt(target_files, patched):
             directory = os.path.dirname(directory)
 
 
+# the block size and the hash algorithm, SHA-256, of the fs-verity metadata that the build makes
+FSVERITY_BLOCK_SIZE = 4096
+FSVERITY_HASH_ALGORITHM = b"sha256"
+FSVERITY_SHA256 = 1
+# the page size that the Merkle tree in an .fsv_meta file is aligned to, for it to be mapped
+FSVERITY_META_TREE_ALIGNMENT = 4096
+# the files that the signing signs, which it builds the images with right after, so that their fs-verity
+# metadata can't be computed from the target files before it: it is left as the build made it, which
+# the release signing of the build left stale already
+SIGNED_EXTENSIONS = (".apk", ".apex", ".capex")
+
+
+def fsverity(data):
+    """The fs-verity digest of data, as `fsverity digest --compact` computes it, and the .fsv_meta file
+    that the build makes for a file holding data, as fsverity_metadata_generator.py does: the version,
+    the fs-verity descriptor that the digest is the hash of, an empty signature and then, at the next
+    page boundary, the Merkle tree with its root level first, for the device to enable fs-verity on the
+    file with without having to compute it."""
+    block = FSVERITY_BLOCK_SIZE
+    level = data + bytes(-len(data) % block)
+    tree = []
+    # each level holds the hashes of the blocks of the one below it, the first of them being the data,
+    # until they fit in one block, whose hash is the root one; a file of at most one block has no tree
+    while len(level) > block:
+        view = memoryview(level)
+        hashes = b"".join(hashlib.sha256(view[i:i + block]).digest() for i in range(0, len(level), block))
+        level = hashes + bytes(-len(hashes) % block)
+        tree.insert(0, level)
+    root = hashlib.sha256(level).digest() if data else bytes(32)
+    # the version, the hash algorithm, the log2 of the block size, the salt size, a reserved field, the
+    # size of the data, the root hash, the salt and the reserved bytes
+    descriptor = (struct.pack("<BBBBIQ", 1, FSVERITY_SHA256, block.bit_length() - 1, 0, 0, len(data))
+                  + root.ljust(64, b"\0") + bytes(32 + 144))
+    # the version and then, after the descriptor, the type and the size of the signature, which is none
+    meta = struct.pack("<I", 1) + descriptor + struct.pack("<II", 0, 0)
+    if tree:
+        meta += bytes(-len(meta) % FSVERITY_META_TREE_ALIGNMENT) + b"".join(tree)
+    return hashlib.sha256(descriptor).digest(), meta
+
+
+def target_files_path(target_files, location):
+    """The path in the target files directory target_files of the file at location on the device,
+    outside of an APEX, which can be relative to the root."""
+    location = location.strip("/")
+    partition, _, rest = location.partition("/")
+    if partition in PARTITIONS and os.path.isdir(os.path.join(target_files, partition.upper())):
+        return os.path.join(target_files, partition.upper(), rest)
+    # a partition that the device doesn't have is a directory of the system one
+    return os.path.join(target_files, "SYSTEM", location)
+
+
+def replace_file(path, data):
+    """Write data to the file at path as a new file, rather than into the one there, which can be a hard
+    link of another."""
+    with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), delete=False) as f:
+        f.write(data)
+    shutil.copymode(path, f.name)
+    os.replace(f.name, path)
+
+
+def fsverity_update(target_files):
+    """Make the fs-verity metadata of the files in the target files directory target_files match them
+    again, printing what changes: the .fsv_meta files next to them and the digests of them in the
+    manifests in the BuildManifest APKs, which CompOS checks the files it compiles from against, and
+    which lose the files that are not there any more. Everything is computed from the files, so that
+    whatever changed them is covered."""
+    digests = {}
+
+    def digest(path):
+        if path not in digests:
+            digests[path] = fsverity(read_file(path))
+        return digests[path]
+
+    def show(path):
+        return device_path(target_files, os.path.relpath(path, target_files))
+
+    manifests = []
+    for partition in PARTITIONS:
+        for root, dirs, names in os.walk(os.path.join(target_files, partition.upper())):
+            dirs.sort()
+            for name in sorted(names):
+                path = os.path.join(root, name)
+                if re.fullmatch(r"BuildManifest.*\.apk", name) and root.endswith("/etc/security/fsverity"):
+                    manifests.append(path)
+                # the .fsv_meta of a symbolic link is one to that of its target
+                if not name.endswith(".fsv_meta") or os.path.islink(path):
+                    continue
+                source = path[:-len(".fsv_meta")]
+                if not os.path.isfile(source) or os.path.islink(source):
+                    fail(f"{path} is not next to the file it is the fs-verity metadata of")
+                if source.endswith(SIGNED_EXTENSIONS):
+                    continue
+                meta = digest(source)[1]
+                if read_file(path) != meta:
+                    print(f"Updating the fs-verity metadata of {show(source)}")
+                    replace_file(path, meta)
+
+    for apk in manifests:
+        member = "assets/build_manifest.pb"
+        with zipfile.ZipFile(apk) as z:
+            manifest = z.read(member)
+        old = {}
+        entries = {}
+        links = {}
+        for entry in all_bytes(fields(manifest), 1):
+            entry = fields(entry)
+            location = os.fsdecode(last_bytes(entry, 1))
+            value = fields(last_bytes(entry, 2))
+            if last_bytes(value, 2) != FSVERITY_HASH_ALGORITHM:
+                fail(f"{location} has a digest that is not a {FSVERITY_HASH_ALGORITHM.decode()} one in {apk}")
+            old[location] = last_bytes(value, 1)
+            path = target_files_path(target_files, location)
+            if os.path.islink(path):
+                # a link gets the digest of its target, as the build gives it
+                links[location] = os.path.normpath(os.path.join(os.path.dirname(location), os.readlink(path)))
+            elif os.path.isfile(path):
+                entries[location] = old[location] if path.endswith(SIGNED_EXTENSIONS) else digest(path)[0]
+            else:
+                print(f"Removing {show(path)}, which is gone, from the fs-verity manifest {show(apk)}")
+        for location, target in links.items():
+            if target in entries:
+                entries[location] = entries[target]
+            else:
+                print(f"Removing {show(target_files_path(target_files, location))}, whose target is gone, from "
+                      f"the fs-verity manifest {show(apk)}")
+        # a map of the path of each file to its digest and its hash algorithm, in the order the
+        # deterministic serialization of the build gives it
+        updated = b"".join(
+            encode_bytes(1, encode_bytes(1, os.fsencode(location)) + encode_bytes(
+                2, encode_bytes(1, entries[location]) + encode_bytes(2, FSVERITY_HASH_ALGORITHM)))
+            for location in sorted(entries, key=os.fsencode))
+        if updated != manifest:
+            for location in sorted(entries):
+                if old[location] != entries[location]:
+                    print(f"Updating the fs-verity digest of {show(target_files_path(target_files, location))} in "
+                          f"the fs-verity manifest {show(apk)}")
+            # the APK is signed again by the signing anyway
+            out = io.BytesIO()
+            with zipfile.ZipFile(apk) as zin, zipfile.ZipFile(out, "w") as zout:
+                for info in zin.infolist():
+                    zout.writestr(info, updated if info.filename == member else zin.read(info))
+            replace_file(apk, out.getvalue())
+
+
 def partition_prefix(partition):
     """The path the files of the image of a partition have in the fs_config and file_contexts."""
     return "" if partition == "system" else partition
@@ -1134,10 +1282,13 @@ def main():
         apex_verify(args[1], args[2])
     elif len(args) >= 3 and args[0] == "stale-preopt":
         stale_preopt(args[1], args[2:])
+    elif len(args) == 2 and args[0] == "fsverity-update":
+        fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
-             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | apex-verify ORIGINAL SIGNED")
+             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | fsverity-update TARGET_FILES | "
+             "apex-verify ORIGINAL SIGNED")
 
 
 if __name__ == "__main__":

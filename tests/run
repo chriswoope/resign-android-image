@@ -227,6 +227,24 @@ function test_modifications {
 		fail "The compiled code of SystemUI is stale but still in the system_ext image"
 	fi
 	image_has "$work/ota/system_ext.img" /priv-app/SystemUI/oat/arm64/SystemUI.vdex || fail "The verified dex code of SystemUI, which doesn't depend on the framework, was removed"
+
+	# and the fs-verity metadata that CompOS checks the files it compiles from against is that of what
+	# they are now: the digest in the manifest is the hash of the fs-verity descriptor in the .fsv_meta
+	# file, which follows its version and holds the size of the file after 8 bytes
+	image_file "$system" /system/etc/security/fsverity/BuildManifest.apk > "$work/BuildManifest.apk"
+	unzip -p "$work/BuildManifest.apk" assets/build_manifest.pb > "$work/build_manifest.pb"
+	for jar in services framework; do
+		image_file "$system" "/system/framework/$jar.jar.fsv_meta" > "$work/$jar.jar.fsv_meta"
+		if cmp -s "$work/$jar.jar.fsv_meta" <(image_file "$work/original/system.img" "/system/framework/$jar.jar.fsv_meta"); then
+			fail "The fs-verity metadata of $jar.jar is that of the original one"
+		fi
+		python3 -c 'import hashlib, struct, sys
+descriptor = open(sys.argv[1], "rb").read()[4:260]
+sys.exit(struct.unpack_from("<Q", descriptor, 8)[0] != int(sys.argv[3]) or hashlib.sha256(descriptor).digest() not in open(sys.argv[2], "rb").read())' "$work/$jar.jar.fsv_meta" "$work/build_manifest.pb" "$(image_file "$system" "/system/framework/$jar.jar"|wc -c)" || fail "The fs-verity manifest doesn't have the digest of the fs-verity metadata of $jar.jar"
+	done
+	if grep -qaF system/framework/arm64/boot-framework.oat "$work/build_manifest.pb"; then
+		fail "The fs-verity manifest still has the stale boot image, which was removed"
+	fi
 }
 
 failed=()
