@@ -2201,7 +2201,17 @@ function make_target_files_signed {
 	# images are built from, and each image, which the signing compressed, in a process of its own
 	local zip="$outdir/target_files_signed.zip"
 	unzip -q -o "$zip" 'META/*' '*/build.prop' -d "$1"
-	unzip -Z1 "$zip" 'IMAGES/*'|xargs -d '\n' -P "$threads" -I {} unzip -q -o "$zip" {} -d "$1"
+	local images=() image
+	mapfile -t images < <(unzip -Z1 "$zip" 'IMAGES/*')
+	wait $!
+	# created beforehand, since unzip fails when another one creates a directory after it found it
+	# missing
+	local -A dirs=()
+	for image in "${images[@]}"; do
+		dirs[$1/${image%/*}]=
+	done
+	printf '%s\0' "${!dirs[@]}"|xargs -0 mkdir -p --
+	printf '%s\n' "${images[@]}"|xargs -d '\n' -P "$threads" -I {} unzip -q -o "$zip" {} -d "$1"
 }
 
 # make the compat change with ID $2 enabled only for the apps targeting SDK version $3 or later, in
