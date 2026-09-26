@@ -669,23 +669,31 @@ fi
 
 # the OTA and the factory images are downloaded into the work directory and discarded once extracted,
 # unless there is a cache to keep them in, so that they are downloaded and verified only once for any
-# number of work directories; the verified ones are marked by a file next to them
+# number of work directories; the verified ones are marked by a file next to them, named after them with .ok
+# appended
 if test -n "$download_cache"; then
 	mkdir -p "$download_cache"
 	ota_zip="$download_cache/${ota_url##*/}.zip"
 	factory_zip_dir="$download_cache"
-	factory_zip_ok="$download_cache/$factory_name.zip.ok"
 else
 	ota_zip="$dir/ota.zip"
 	factory_zip_dir="$dir/factory_zip"
-	factory_zip_ok="$dir/factory_zip.ok"
 fi
+factory_zip_ok="$factory_zip_dir/$factory_name.zip.ok"
 
+# discard the download $1, along with the file marking it as verified, so that it is downloaded again if what
+# was extracted from it is discarded as well and needed again
 function discard_download
 {
 	if test -z "$download_cache"; then
-		discard "$@"
+		discard "$1" "$1.ok"
 	fi
+}
+
+# download the OTA, or the rest of it
+function curl_ota
+{
+	curl --fail "$ota_url.zip" -C - -o "$ota_zip"
 }
 
 # remove a download that turned out not to be the file it is for, which the next run would otherwise resume
@@ -704,7 +712,7 @@ if test -e "$ota_metadata_file"; then
 	ota_metadata="$(< "$ota_metadata_file")"
 else
 	if ! test -e "$ota_zip.ok"; then
-		curl --fail "$ota_url.zip" -C - -o "$ota_zip"
+		curl_ota
 	fi
 	if ! ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"; then
 		echo "$ota_zip is not an OTA zip" >&2
@@ -1046,8 +1054,10 @@ function do_extract_ota_manifest {
 	python3 "$data_dir/extract_android_ota_manifest/extract_android_ota_manifest.py" "$2" "$1"
 }
 
-# the OTA was downloaded already to choose the otatools by
-function verify_ota {
+# the OTA was downloaded already to choose the otatools by, unless what was extracted from it was there, and
+# discarded since
+function download_ota {
+	curl_ota
 	if ! "$otatools/bin/check_ota_package_signature" "$ota_cert" "$ota_zip"; then
 		echo "Failed to verify OTA update signature of $ota_zip!" >&2
 		remove_bad_download "$ota_zip"
@@ -1116,13 +1126,12 @@ function extract_root_and_system {
 }
 
 function make_extract_ota {
-	make_file "$ota_zip.ok" verify_ota
-
 	# the payload is read where it is in the zip
 	unzip -q -d "$1" "$ota_zip" -x payload.bin
 }
 
 function make_extract_ota_payload {
+	make_file "$ota_zip.ok" download_ota
 	make_dir "$dir/ota" make_extract_ota
 
 	make_dir "$dir/ota_meta" do_extract_ota_manifest "$ota_zip"
@@ -2337,6 +2346,9 @@ function take_signed_image {
 
 function make_target_files_zip {
 	if test "$build_method" == resign; then
+		# which is discarded once the OTA is made, while the files marking what was made from it are kept, so
+		# it is made again for the target files that are made again
+		make_dir "$dir/ota_payload" make_extract_ota_payload
 		make_dir "$outdir/target_files" make_target_files_base
 
 		mkdir -p "$outdir/target_files/IMAGES"
