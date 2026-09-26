@@ -2176,7 +2176,15 @@ function make_target_files_signed_zip {
 				generate_release_sh="$aosp/script/release.sh"
 			fi
 
-			(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/'; echo '"$RESIGN_FROM" "$RESIGN_TO"')|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
+			local sign_cmd
+			sign_cmd="$(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/')"
+			# the arguments are added after the key directory, where a change to the release script would otherwise
+			# leave them out without an error, of the only command there is to sign with
+			if [[ $sign_cmd != 'sign_target_files_apks '*'-d "$KEY_DIR" "$@"'* || $sign_cmd == *$'\n'sign_target_files_apks* ]]; then
+				echo "There is no single sign_target_files_apks command with -d \"\$KEY_DIR\" to add the arguments after in $generate_release_sh" >&2
+				exit 1
+			fi
+			printf '%s\n%s\n' "$sign_cmd" '"$RESIGN_FROM" "$RESIGN_TO"'|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
 			# check that the sign tools signed all the files they are for, with the payloads they are
 			# in repacked as they were
 			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to"
