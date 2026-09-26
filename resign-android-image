@@ -378,7 +378,7 @@ function with_temp
 	case "$tmp" in
 		"$path".*)
 			if test -z "$keep_tmp"; then
-				trap "rm -rf $tmp" EXIT
+				trap "rm -rf -- ${tmp@Q}" EXIT
 			fi
 			# run outside of a condition, where bash would ignore set -e for all of it
 			set +e
