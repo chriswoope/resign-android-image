@@ -43,7 +43,7 @@ dom0_service_file=/home/user/bin/resign-current-android-image-service
 dom0_policy_name=10-resign_android_image
 dom0_timer_name=resign-current-android-image
 
-if [[ server_vm_or_ssh =~ @ ]]; then
+if [[ $server_vm_or_ssh =~ @ ]]; then
 	server=
 	updater="ssh $server_vm_or_ssh $serve_file $server_dir"
 else
