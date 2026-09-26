@@ -57,6 +57,8 @@ zip_opt="-6"
 dev_fast_sign=
 build_method=resign
 replace_boot=
+replace_boot_allow_change=()
+replace_boot_allow_new_files=
 generate_keys=
 magisk=
 setx=
@@ -140,6 +142,13 @@ while test "$#" != 0; do
 	elif test "$1" == "--replace-boot"; then
 		replace_boot="$2"
 		shift 1
+	elif test "$1" == "--replace-boot-allow-change"; then
+		# Space-separated literal paths, without shell glob expansion.
+		IFS=' ' read -r -d '' -a paths < <(printf '%s\0' "$2")
+		replace_boot_allow_change+=("${paths[@]}")
+		shift 1
+	elif test "$1" == "--replace-boot-allow-new-files"; then
+		replace_boot_allow_new_files=1
 	elif test "$1" == "--hosts-url"; then
 		hosts_url="$2"
 		shift 1
@@ -412,7 +421,7 @@ if test -n "$replace_boot"; then
 	replace_boot_digest="$(sha256sum < "$replace_boot")"
 fi
 key_dir_path="$(realpath -m -- "$key_dir")"
-options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_until_unlock adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest hosts_url magisk ro_debuggable ro_secure)"
+options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_until_unlock adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest replace_boot_allow_change replace_boot_allow_new_files hosts_url magisk ro_debuggable ro_secure)"
 if test -e "$dir/options" && test "$(< "$dir/options")" != "$options" && test -z "$reuse_changed_options"; then
 	echo "$dir was used with other options, and what was made with them would be used in place of what these ones make:" >&2
 	diff "$dir/options" <(printf '%s\n' "$options") >&2 || true
@@ -1858,19 +1867,14 @@ PAYLOAD_MINOR_VERSION=4
 EOF
 }
 
-# the boot image given with --replace-boot, which must have the kernel of the original one $2: the kernel
-# modules in the other images, which the recovery that OTAs are sideloaded with loads as well, only load
-# into the kernel they were built for
+# Check the replacement with the same verifier as rebuilt boot images. Only explicitly allowed
+# ramdisk contents and additions may differ; the kernel, header and existing metadata must match.
 function make_replaced_boot {
-	function go {
-		"$otatools/bin/unpack_bootimg" --boot_img "$replace_boot" --out "$1/replaced" >/dev/null
-		"$otatools/bin/unpack_bootimg" --boot_img "$2" --out "$1/original" >/dev/null
-		if ! cmp -s "$1/replaced/kernel" "$1/original/kernel"; then
-			echo "The kernel of $replace_boot is not the one of the boot image of build $build, which the kernel modules of the other images are built for" >&2
-			exit 1
-		fi
-	}
-	with_temp_dir "$1.unpacked" go "$2"
+	local extra=()
+	if test -n "$replace_boot_allow_new_files"; then
+		extra+=(--allow-new-files)
+	fi
+	printf '%s\0' "${replace_boot_allow_change[@]}"|python3 "$data_dir/target_files_inputs.py" boot-verify "$replace_boot" "$2" --allow-additions "${extra[@]}"
 	cp -- "$replace_boot" "$1"
 }
 
@@ -2290,7 +2294,8 @@ function take_signed_image {
 			exit 1
 		fi
 	elif test "$2" == boot && test -n "$replace_boot"; then
-		: # it is the one given with --replace-boot, whose kernel was checked
+		# Signing may only change the AVB footer of the already checked replacement.
+		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$replace_boot" </dev/null
 	elif test "$2" == pvmfw; then
 		: # the signing replaced the key embedded in it, and checked that it found the one to replace
 	elif ! diff <(get_avb_info "$orig") <(get_avb_info "$img") >&2; then

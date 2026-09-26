@@ -25,11 +25,12 @@
 #         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
 #         and to OUT/misc_info.txt the misc_info.txt entries they are built with. A boot image without a
 #         ramdisk is left to be used as a prebuilt one, as it is by a normal build
-#     target_files_inputs.py boot-verify IMAGE ORIGINAL < CHANGED
+#     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED
 #         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
 #         files in its ramdisks of the ORIGINAL one, with the same names, metadata and contents, but for
 #         the contents of the files at the paths in the ramdisk, NUL separated, read from the standard
-#         input, which may have changed
+#         input, which may have changed. --allow-additions also allows new paths listed in CHANGED;
+#         --allow-new-files allows any new paths. Existing paths must retain their metadata and order.
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
@@ -1514,6 +1515,8 @@ def cpio_entries(ramdisk):
 def ramdisk_description(ramdisk, changed):
     """The name, mode, owner and device numbers of each file of the ramdisk, and the digest of its contents
     unless its path is in changed."""
+    if os.path.getsize(ramdisk) == 0:
+        return []
     return [[os.fsdecode(name), mode, uid, gid, rdev_major, rdev_minor,
              None if name in changed else hashlib.sha256(contents).hexdigest()]
             for name, mode, uid, gid, rdev_major, rdev_minor, contents in cpio_entries(ramdisk)]
@@ -1701,10 +1704,24 @@ def boot_inputs(out, partitions):
         f.writelines(line + "\n" for line in misc_info)
 
 
-def boot_verify(image, original, changed):
+def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False):
     with tempfile.TemporaryDirectory() as tmp:
         actual = describe_boot_image(image, os.path.join(tmp, "image"), changed)
         expected = describe_boot_image(original, os.path.join(tmp, "original"), changed)
+    if allow_additions or allow_new_files:
+        for (option, a), (expected_option, e) in zip(actual, expected):
+            if option != expected_option or option not in RAMDISK_OPTIONS:
+                continue
+            original_names = {entry[0] for entry in e}
+            # Filter only new paths, retaining the order and metadata of all original entries.
+            # Duplicate entries could overwrite a file when the kernel unpacks the archive.
+            names = [entry[0] for entry in a]
+            if any(any(part in ("", ".", "..") for part in name.split("/")) or "\0" in name for name in names):
+                fail(f"{image}: {option} has a noncanonical ramdisk path")
+            if len(set(names)) != len(names):
+                fail(f"{image}: {option} has duplicate ramdisk paths")
+            a[:] = [entry for entry in a if entry[0] in original_names or not (
+                allow_new_files or (allow_additions and os.fsencode(entry[0]) in changed))]
     if actual != expected:
         errors = []
         for (option, a), (expected_option, e) in zip(actual, expected):
@@ -1739,8 +1756,10 @@ def main():
         fs_verify(args[1], args[2])
     elif len(args) >= 4 and len(args) % 2 == 0 and args[0] == "boot-inputs":
         boot_inputs(args[1], list(zip(args[2::2], args[3::2])))
-    elif len(args) == 3 and args[0] == "boot-verify":
-        boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path))
+    elif len(args) >= 3 and args[0] == "boot-verify" and all(
+            option in ("--allow-additions", "--allow-new-files") for option in args[3:]):
+        boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path),
+                    allow_additions="--allow-additions" in args[3:], allow_new_files="--allow-new-files" in args[3:])
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
     elif len(args) == 4 and args[0] == "apk-keys":
@@ -1757,7 +1776,7 @@ def main():
         fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
-             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL < CHANGED | avb-args PARTITION IMAGE | "
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED")
