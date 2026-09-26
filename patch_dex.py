@@ -17,9 +17,6 @@
 #                          REGEX (one instruction per line, as dexdump prints it without its offset
 #                          prefix, with the regex anchored to whole lines) with CODE, which can use
 #                          \1... to refer to the groups the regex captured
-#     replace-if-found REGEX CODE
-#                          the same, for code that only some versions have, which is reported rather
-#                          than an error if it matches nothing
 #     resource-string OLD NEW
 #                          replace every occurrence of the bytes of OLD in resources.arsc with those
 #                          of NEW, which must be as many, so that nothing in it moves; a string of the
@@ -31,7 +28,7 @@
 # moving everything that follows it, so CODE can offer several bodies separated by a line holding
 # "or" and the first one the dex file has every reference for is the one that gets assembled.
 #
-# An edit that matches nothing anywhere is an error, but for replace-if-found, and so is a method edit
+# An edit that matches nothing anywhere is an error, and so is a method edit
 # whose name matches more than the one method it is meant to patch, so that the build fails loudly
 # instead of silently producing an unpatched or over-patched image if Android renames, moves or
 # duplicates the code being patched. What was patched is reported, and the patched dex file is checked
@@ -54,7 +51,6 @@ import zlib
 # https://source.android.com/docs/core/runtime/instruction-formats
 INSNS = {
     "nop": (0x00, "10x"),
-    "move": (0x01, "12x"),
     "move-result-object": (0x0c, "11x"),
     "return-void": (0x0e, "10x"),
     "return": (0x0f, "11x"),
@@ -617,9 +613,6 @@ def patch_zip(dexdump, path, edits, names):
             patch_resources(path, data, edits, matched, written)
 
         for (op, _, _), target, where in zip(edits, names, matched):
-            if not where and op == "replace-if-found":
-                print(f"patch_dex.py: found nothing to patch for {target} in {path}", file=sys.stderr)
-                continue
             if not where:
                 fail(f"failed to find {target} to patch")
             if op == "method":
@@ -656,7 +649,7 @@ def main():
     edits = []
     names = []
     for op, target, code in zip(*[iter(args)] * 3):
-        if op in ("replace", "replace-if-found"):
+        if op == "replace":
             # anchoring to whole lines keeps a match aligned with the instructions it covers
             edits.append((op, re.compile(f"^(?:{target})$", re.MULTILINE), code))
         elif op in ("method", "resource-string"):

@@ -1648,16 +1648,6 @@ patch_location_mock=(replace 'invoke-virtual(/range)? \{[^}]*\}, Landroid/locati
 # p1 is the flags argument and -0x1401 == ~(0x400 | 0x1000)
 patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' $'const/16 v0, -0x1401\nand-int/2addr p1, v0\nreturn p1')
 
-# make every app backupable regardless of whether its manifest says android:allowBackup="false", by
-# replacing (applicationInfo.flags & FLAG_ALLOW_BACKUP) with the flag itself wherever Seedvault tests it,
-# so that the test always passes. 0x8000 doesn't fit in the literal of an and-int instruction, so it is
-# always loaded into a register first and the and can always be turned into a move of that register:
-#     iget v2, v4, Landroid/content/pm/ApplicationInfo;.flags:I // field@0123
-#     const v3, #float 0.000000 // #00008000
-#     and-int/2addr v2, v3
-# The Seedvault of recent builds doesn't test the flag any more, leaving nothing to patch
-patch_seedvault=(replace-if-found $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
-
 # apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
@@ -1834,14 +1824,6 @@ EOF
 	if test "${#framework_jar_patches[@]}" != 0; then
 		background patch_framework_jar "$1" framework.jar "${framework_jar_patches[@]}"
 		patched_dex+=(SYSTEM/framework/framework.jar)
-	fi
-
-	if test -n "$allowbackup"; then
-		if test -e "$outdir/target_files_extracted/SYSTEM/priv-app/Seedvault/Seedvault.apk"; then
-			mkdir -p "$1/SYSTEM/priv-app/Seedvault"
-			background patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Seedvault/Seedvault.apk "${patch_seedvault[@]}"
-			patched_dex+=(SYSTEM/priv-app/Seedvault/Seedvault.apk)
-		fi
 	fi
 
 	wait_background
