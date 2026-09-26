@@ -31,9 +31,11 @@ This script is intended for personal use or internal use in an organization. You
 
 The script is developed on Debian 13 and may work on Ubuntu and other Debian-based distributions, and will most likely need slight modifications for any other distribution; it should automatically download and install all dependencies. It can work incrementally and needs about 16GB (have 32GB free to be safe) of disk space and 15-30 minutes to do a full resign; 4GB of RAM is enough, but I'm not sure what the minimum RAM is.
 
-It reruns itself with sudo in a mount namespace of its own, in which the tmp directory of the work directory is mounted over /tmp and /var/tmp, so that the large temporary files of the build go into the work directory. Where that isn't possible, such as in a container, use --no-unshare to run it as it is, with TMPDIR set to that directory instead, which only the tools that take the temporary directory from TMPDIR follow.
+It reruns itself with sudo in a mount namespace of its own, in which the tmp directory of the work directory is mounted over /tmp and /var/tmp, so that the large temporary files of the build go into the work directory. Where that isn't possible, such as in a container, use --no-unshare to run it as it is, with TMPDIR set to that directory instead, which only the tools that take the temporary directory from TMPDIR follow. The script passes --unshared to itself when it reruns itself this way, which is not meant to be given by hand.
 
-Use --ota to generate an OTA, --factory-image to generate a factory image flashable payload, and --factory-zip to generate a factory image.
+Use --ota to generate an OTA, --factory-image to generate a factory image flashable payload, and --factory-zip to generate a factory image. With --ota and --factory-zip but not --factory-image, --parallel downloads the upstream factory images while the target files are made and then makes the OTA and the factory image at the same time, rather than one after the other; it is ignored otherwise.
+
+The factory image made with --factory-zip is signed into a .sig file next to it, as selected with --sign-factory-images: ssh-keygen (the default) signs it with `ssh-keygen -Y sign` with the id_ed25519 key of the key directory and the "factory images" namespace, signify signs its SHA-256 digest with the factory.sec signify key of the key directory, whose public key is factory.pub, and an empty argument leaves it unsigned. --generate-keys generates the key that the selected method needs.
 
 The upstream OTA and factory images are downloaded into the work directory and deleted once extracted, unless --keep is given; use --download-cache DIR to download them into DIR instead and keep them there, so that they are downloaded only once for any number of work directories.
 
@@ -55,13 +57,15 @@ The images are built by the standard Android image building code, which sign_tar
 
 The owner, group, mode, capabilities and SELinux label of every file of the filesystem images are read out of the original images, without mounting them, and written to the META/\*filesystem_config.txt and META/file_contexts.bin files that the build takes them from. The labels come from the file_contexts of the SELinux policy in the images, which is how a normal build labels files, so that files added by the modifications get the label the policy gives them, while every file of the original images is checked to get back the label it had there, the build failing rather than keeping the original label if it doesn't. The boot, init_boot and vendor_boot images are unpacked into the BOOT, INIT_BOOT and VENDOR_BOOT directories, the metadata of the files of their ramdisks goes into META/\*_filesystem_config.txt and META/ramdisk_node_list, and their headers and footers into misc_info.txt, while a boot image without a ramdisk (or the one given with --replace-boot), the dtbo image and the pvmfw image are used as prebuilt ones that the build adds a footer to, with the signing also replacing the key of the virt APEX that pvmfw embeds with the one it signs the APEX with; vbmeta is built while signing as well, and every partition it verifies must be one of these. Every built image is then checked against the original one: the files of a filesystem image must be exactly the expected ones, with exactly the expected metadata; a boot image must have the same header and files, and ramdisks holding files with the same names, metadata and contents, but for the contents of the otacerts.zip whose keys the signing replaces and of those that the options change (build.prop and prop.default for the options that change properties, the adbd of the recovery for --recovery-adb-root), since the recovery that the next OTA is sideloaded with is in them; a prebuilt image other than pvmfw must be unchanged, but for the version of avbtool recorded in its footer, while the one given with --replace-boot is checked with the same boot image verifier, allowing only explicitly permitted ramdisk changes; and vbmeta must verify the same partitions with the same rollback index, and every image must verify with it and the AVB key, as the bootloader verifies them. Only ext4 filesystem images and vbmeta images that don't chain to other ones are supported.
 
-For debugging, use --keep to keep intermediate files and --keep-tmp to keep temporary files, -v to show commands executed, --zip-opt 0 to speed up zipping during development, and --timing to show how long making each file took, including the files it needed, on the MADE lines.
+For debugging, use --keep to keep intermediate files and --keep-tmp to keep temporary files, -v to show commands executed, --zip-opt 0 to speed up zipping during development, and --timing to show how long making each file took, including the files it needed, on the MADE lines. --dev-fast-sign deletes every APK (but framework-res.apk), APEX and CAPEX from the extracted images, which makes signing very fast when developing the script, but leaves an OS that doesn't work.
 
 Use --otatools-only to only set up the otatools that the build would use, which the otatools symlink in the work directory then points to, and stop there without building anything.
 
 The files in the work directory are only made when missing, so the options that change what is made (the upstream build, the key directory, the version and every modification) are recorded in its options file, and the script refuses to run in it with other ones, since what was made with the old options would end up in the images; use another work directory, or remove what the changed options affect and pass --reuse-with-changed-options to have the new options recorded instead.
 
-Read the rest of this document and the source code of the script to find out the other options.
+The images are rebuilt from the target files as described above unless one of the other build methods is chosen, which cannot apply any of the modifications: --vbmeta-only only signs vbmeta again with your AVB key, leaving every other image as upstream built it, including the otacerts.zip of the system and of the recovery, which keep trusting only the upstream release key, so the checks of the OTA and factory images made from it fail; --rebuild is incomplete and broken.
+
+The options that modify the OS are described in the rest of this document.
 
 # Tests
 
@@ -135,6 +139,12 @@ By using --recovery-adb-root, the adbd of the recovery, which is in the ramdisk 
 Note that it's a good idea to only enable this when signing an OTA to recover an otherwise inaccessible device.
 
 Security impact: anyone with access to the device can boot it into the recovery and get root through ADB
+
+## ro.debuggable and ro.secure (not recommended)
+
+By using --ro-debuggable, ro.debuggable=1 is set in every build.prop and prop.default, including the ones of the recovery, where it also has the recovery start a root shell on the serial console; by using --ro-secure0, ro.secure=0 is set in them instead. This is not recommended, since several parts of the system assume that functionality that is compiled out in a user build is present when ro.debuggable=1 is set, as described above: use --adb-root to get ADB root instead.
+
+Security impact: at least those of ADB root, and whatever the parts of the system that behave differently in a debuggable or non-secure build expose
 
 ## ADB at boot
 
@@ -237,6 +247,8 @@ Pass a replacement boot.img with `--replace-boot IMAGE`. By default, the existin
 Use `--replace-boot-allow-change "init path/to/file"` to allow content changes to the listed existing ramdisk files and additions at those exact paths. Paths are literal, relative to the ramdisk root, separated by spaces; the option can be repeated. Existing files must retain their metadata and cannot be removed. Use `--replace-boot-allow-new-files` to permit any new ramdisk paths (including directories), while still checking every existing file, except the paths that the ramdisks of vendor_boot or init_boot have, since the kernel unpacks them along with the one of boot, which could then replace the files of the recovery: those must be listed with `--replace-boot-allow-change`. Parent directories added for a listed file must also be allowed. These options do not permit changes to the kernel or boot header.
 
 A Magisk-patched image therefore needs explicit allowances for its changes and must still satisfy the remaining checks. Permitting a change to a boot-critical file does not establish that the modified file will work in recovery.
+
+The --magisk option, which was meant to install Magisk automatically, is not written yet and is refused.
 
 Security impact: unclear, depends on whether Magisk is properly engineered or not
 
