@@ -1343,6 +1343,7 @@ function patch_apex {
 		aligned_tmp="$(mktemp)"
 		cp -a "$work"/aligned.apex "$aligned_tmp"
 		"$otatools/bin/apex_compression_tool" compress --apex_compression_tool_path "$otatools/bin:$PATH" --input "$aligned_tmp" --output "$work/out.apex"
+		rm -f -- "$aligned_tmp"
 	else
 		ln "$work"/aligned.apex "$work/out.apex"
 	fi
@@ -2132,7 +2133,8 @@ function apply_modifications {
 	if test -n "$prop_sed"; then
 		find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -re "$prop_sed"
 	fi
-	sepolicy="$(mktemp)"
+	# the rules to add to the SELinux policy, a line each
+	local sepolicy=
 	su=
 	if test -n "$recovery_adb_root"; then
 		# replace all calls to __android_log_is_debuggable with the constant 1
@@ -2141,15 +2143,15 @@ function apply_modifications {
 	fi
 
 	if test -n "$adb_root"; then
-		echo '(allow adbd adbd (process (setcurrent)))' >> "$sepolicy"
+		sepolicy+=$'(allow adbd adbd (process (setcurrent)))\n'
 		su=1
 	fi
 
 	if false; then
-		#echo '(typetransition dumpstate su_exec process su)' >> "$sepolicy"
+		#sepolicy+=$'(typetransition dumpstate su_exec process su)\n'
 
 		# this would be needed to let shell su to root if we supported a "su" binary, in addition to actually adding the binary
-		echo '(typetransition shell su_exec process su)' >> "$sepolicy"
+		sepolicy+=$'(typetransition shell su_exec process su)\n'
 
 		su=1
 	fi
@@ -2161,7 +2163,7 @@ function apply_modifications {
 		# grep -w su dis.cil|sed -re 's/^(\(typeattributeset [^ ]*) .*\)$/\1 (su))/'|grep -v 'su_exec process su' > su.cil
 
 		# TODO: we are filtering some permissions arbitrarily, we should use a better way to filter them
-		sed -e 's/ nlmsg_getneigh//; s/ get_attestation_key//; s/ migrate_any_key//; s/ su_userfaultfd//' "$data_dir/su.cil"|grep -v '\[userfaultfd\]' >> "$sepolicy"
+		sepolicy+="$(sed -e 's/ nlmsg_getneigh//; s/ get_attestation_key//; s/ migrate_any_key//; s/ su_userfaultfd//' "$data_dir/su.cil"|grep -v '\[userfaultfd\]')"$'\n'
 	fi
 	if test -n "$allowbackup"; then
 		# IGNORE_ALLOW_BACKUP_IN_D2D and IGNORE_FULL_BACKUP_CONTENT_IN_D2D
@@ -2176,7 +2178,7 @@ function apply_modifications {
 		own_file "$1/SYSTEM/etc/hosts"
 		curl --fail "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
 	fi
-	if test "$(wc -l < "$sepolicy")" != 0; then
+	if test -n "$sepolicy"; then
 		# init loads the precompiled policy only while the hashes stored next to it match those of the
 		# policy of the system partitions, and otherwise compiles the policy at every boot, so compile it
 		# here instead, from the CIL files that init would compile it from
@@ -2223,7 +2225,7 @@ function apply_modifications {
 			se_types["$i"]=1
 		done < <(sed -nre 's/^\((type|typeattribute|role) ([^ )]*).*\)$/\2/p' "$1/SYSTEM/etc/selinux/plat_sepolicy.cil" |sort|uniq)
 
-		sed -re 'h; s/[()]//g; s/\S* (\S*) (\S*).*/\1|\2|/; /\|/! s/.*/||/; G; s/\n//;' "$sepolicy"|while IFS='|' read a b r; do
+		printf '%s' "$sepolicy"|sed -re 'h; s/[()]//g; s/\S* (\S*) (\S*).*/\1|\2|/; /\|/! s/.*/||/; G; s/\n//;'|while IFS='|' read a b r; do
 			ok=1
 			for i in $a $b; do
 				if test "$i" != su && test "$i" != self && test -z "${se_types[$i]:-}"; then
@@ -2295,7 +2297,7 @@ function read_prop {
 }
 
 function make_care_map {
-	care_map_txt="$(mktemp)"
+	local care_map_txt=
 	while read b; do
 		ok=
 		for i in $image_parts; do
@@ -2324,14 +2326,13 @@ function make_care_map {
 			size="$("$otatools"/bin/avbtool info_image --image "$outdir/target_files/IMAGES/$b.img"|sed -nre 's/^\s*Original image size:\s*([0-9]+).*/\1/p')"
 			blocks="$(($size / 4096))"
 
-			echo "$b" >> "$care_map_txt"
-			echo "2,0,$blocks" >> "$care_map_txt"
-			echo "$prop" >> "$care_map_txt"
-			echo "$print" >> "$care_map_txt"
+			local entry
+			printf -v entry '%s\n' "$b" "2,0,$blocks" "$prop" "$print"
+			care_map_txt+="$entry"
 		fi
 	done < "$outdir/target_files/META/ab_partitions.txt"
 
-	"$otatools/bin/care_map_generator" "$care_map_txt" "$1"
+	"$otatools/bin/care_map_generator" <(printf '%s' "$care_map_txt") "$1"
 }
 
 # take the image of partition $2 that the signing built, checking that it is made like the original one
