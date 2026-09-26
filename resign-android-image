@@ -293,9 +293,13 @@ fi
 
 # the changes that the options ask for to the properties of every build.prop and prop.default
 prop_sed=""
+# and the one of them that is also made to the AVB properties of the images, whose fingerprints have the
+# build number too
+build_number_sed=""
 if test "$out_build" != "$build"; then
 	# the build number appears both on its own and inside the fingerprints
-	prop_sed="$prop_sed; s/\b$build\b/$out_build/g"
+	build_number_sed="s/\b$build\b/$out_build/g"
+	prop_sed="$prop_sed; $build_number_sed"
 
 	# the updater only offers an update whose timestamp is greater than ro.build.date.utc of the
 	# running build (and update_engine and the recovery refuse to install an older one), so the
@@ -1914,6 +1918,11 @@ EOF
 		fi
 		check_vbmeta_partitions
 		printf '%s\n' avb_building_vbmeta_image=true "avb_vbmeta_args=--padding_size 4096 $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img"|tr '\n' ' ')" >> "$1"
+		# the fingerprints in the AVB properties that the images are given, which are those of the
+		# original images, have the build number of the version, as the ones of the build.prop files do
+		if test -n "$build_number_sed"; then
+			sed -i -re "/^avb_[a-z0-9_]+_args=/ $build_number_sed" "$1"
+		fi
 	fi
 }
 
@@ -2489,7 +2498,9 @@ function verify_built_boot {
 	}|python3 "$data_dir/target_files_inputs.py" boot-verify "$2" "$3" --expected "$1"
 }
 
-# take the image of partition $2 that the signing built, checking that it is made like the original one
+# take the image of partition $2 that the signing built, checking that it is made like the original one, which
+# for a prebuilt one that the signing only added a footer to again means the same footer but for the build number
+# of the version in the fingerprints of its AVB properties
 function take_signed_image {
 	local img="$outdir/target_files_signed/IMAGES/$2.img"
 	local orig="$dir/ota_payload/$2.img"
@@ -2507,7 +2518,7 @@ function take_signed_image {
 		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$replace_boot" </dev/null
 	elif test "$2" == pvmfw; then
 		: # the signing replaced the key embedded in it, and checked that it found the one to replace
-	elif ! diff <(get_avb_info "$orig") <(get_avb_info "$img") >&2; then
+	elif ! diff <(get_avb_info "$orig"|sed -re "$build_number_sed") <(get_avb_info "$img") >&2; then
 		echo "The prebuilt $2.img was changed by adding a footer to it again" >&2
 		exit 1
 	fi
