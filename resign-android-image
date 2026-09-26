@@ -35,6 +35,7 @@ build_factory_zip=
 factory_optimized=
 build_ota=
 want_discard=1
+reuse_changed_options=
 parallel=
 keep_tmp=
 ro_debuggable=
@@ -80,6 +81,8 @@ while test "$#" != 0; do
 		parallel=1
 	elif test "$1" == "--keep"; then
 		want_discard=
+	elif test "$1" == "--reuse-with-changed-options"; then
+		reuse_changed_options=1
 	elif test "$1" == "--keep-tmp"; then
 		keep_tmp=1
 	elif test "$1" == "--timing"; then
@@ -401,6 +404,22 @@ else
 	# only the tools that take the temporary directory from TMPDIR put their temporary files there then
 	export TMPDIR="$(realpath "$dir/tmp")"
 fi
+
+# the files in the work directory are only made when missing, so files made with other options would end up
+# in the images made with these ones: the options that change what is made are recorded there to refuse others
+replace_boot_digest=
+if test -n "$replace_boot"; then
+	replace_boot_digest="$(sha256sum < "$replace_boot")"
+fi
+key_dir_path="$(realpath -m -- "$key_dir")"
+options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_until_unlock adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest hosts_url magisk ro_debuggable ro_secure)"
+if test -e "$dir/options" && test "$(< "$dir/options")" != "$options" && test -z "$reuse_changed_options"; then
+	echo "$dir was used with other options, and what was made with them would be used in place of what these ones make:" >&2
+	diff "$dir/options" <(printf '%s\n' "$options") >&2 || true
+	echo "Use another work directory, or --reuse-with-changed-options once what the changed options affect is removed from it" >&2
+	exit 1
+fi
+printf '%s\n' "$options" > "$dir/options"
 
 # run a command in the background, for wait_background to wait for it: a function using these
 # declares background_pids as local, so that it only waits for the commands it ran itself
