@@ -2336,7 +2336,6 @@ function check_images {
 		echo "The build timestamp of the system is $date_utc rather than $build_date_utc, the one synthesized for version $out_build" >&2
 		exit 1
 	fi
-	echo "CHECK SUCCESSFUL"
 }
 
 function check_ota {
@@ -2344,6 +2343,14 @@ function check_ota {
 	ota_payload_offset "$outdir/ota_unchecked.zip"
 	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions vendor_boot,system,vbmeta >&2
 	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img" "$1/ota_payload/vbmeta.img"
+	# the recovery that the OTA installs verifies the signature of the next OTA to sideload, and the one of its
+	# payload, with the certificates of its otacerts.zip, so it must accept this OTA, which the next ones are
+	# signed like
+	if ! "$otatools/bin/check_ota_package_signature" "$1/recovery_otacerts/keys/releasekey.x509.pem" "$outdir/ota_unchecked.zip" >&2; then
+		echo "The recovery in the OTA doesn't accept the OTA!!!" >&2
+		exit 1
+	fi
+	echo "CHECK SUCCESSFUL"
 }
 
 function make_ota {
@@ -2604,6 +2611,7 @@ function check_factory {
 	fi
 
 	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img" "$1/factory_image/vbmeta.img"
+	echo "CHECK SUCCESSFUL"
 }
 
 

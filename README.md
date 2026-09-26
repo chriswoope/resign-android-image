@@ -92,7 +92,7 @@ On the other hand, if you can update the device with an OTA, you can just sign a
 
 ## Broken OTA updaters with no root
 
-The main way that it could happen is if the OTA boots successfully (so the OS doesn't revert to the previous boot slot), but both the recovery and system updater don't work or have the wrong keys. To try to avoid this situation, this script will re-extract generated OTAs and factory images to make sure that the keys in otacerts.zip are correct. Having root enabled can provide an extra way of applying updates in this case. You may also be able to open the device and reprogram the UFS flash if you really need to.
+The main way that it could happen is if the OTA boots successfully (so the OS doesn't revert to the previous boot slot), but both the recovery and system updater don't work or have the wrong keys. To try to avoid this situation, this script will re-extract generated OTAs and factory images to make sure that the keys in otacerts.zip are correct, and check that the recovery in the OTA accepts the signatures of the OTA and of its payload, as it has to for the next OTA to be sideloaded. Having root enabled can provide an extra way of applying updates in this case. You may also be able to open the device and reprogram the UFS flash if you really need to.
 
 ## Key loss
 
