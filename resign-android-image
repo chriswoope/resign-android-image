@@ -2438,7 +2438,8 @@ function check_otacerts {
 # make sure we have the correct key in recovery so that we can sideload another update, otherwise we can get locked out the device...
 # and that vbmeta is signed with the AVB key that the bootloader is locked with, and that the system is
 # the one of the version being built, with the timestamp that the updater compares: the images are those
-# in the directory $2 but for the system image $3
+# in the directory $2 but for the system image $3. It sets recovery_date_utc and recovery_device to the
+# build timestamp and the device of the recovery
 function check_images {
 	local system="$3"
 	local vbmeta="$2/vbmeta.img"
@@ -2480,6 +2481,31 @@ function check_images {
 		echo "The build timestamp of the system is $date_utc rather than $build_date_utc, the one synthesized for version $out_build" >&2
 		exit 1
 	fi
+	# the recovery refuses a package of another device or older than itself, while the next releases are
+	# only newer than the system, so it must be of this device with the build timestamp of the system
+	python3 "$data_dir/target_files_inputs.py" ramdisk-file prop.default "${boot_images[@]}" > "$1/recovery_prop.default"
+	local -A recovery_props=()
+	while IFS== read -r k v || test -n "$k"; do
+		# the last value of a property is the one it gets
+		if [[ -n $k && $k != '#'* ]]; then
+			recovery_props["$k"]="$v"
+		fi
+	done < "$1/recovery_prop.default"
+	recovery_date_utc="${recovery_props[ro.build.date.utc]:-}"
+	# which init sets, unless it is set already, to the first one set of those of the partitions in the
+	# order it is given
+	recovery_device="${recovery_props[ro.product.device]:-}"
+	local sources source
+	IFS=, read -ra sources <<< "${recovery_props[ro.product.property_source_order]:-product,odm,vendor,system_ext,system}"
+	for source in "${sources[@]}"; do
+		if test -z "$recovery_device"; then
+			recovery_device="${recovery_props[ro.product.$source.device]:-}"
+		fi
+	done
+	if ! [[ $date_utc =~ ^[0-9]+$ ]] || test "$recovery_date_utc" != "$date_utc" || test "$recovery_device" != "$device"; then
+		echo "The recovery is of device $recovery_device with build timestamp $recovery_date_utc rather than of $device with the one of the system, $date_utc!!!" >&2
+		exit 1
+	fi
 }
 
 function check_ota {
@@ -2493,6 +2519,20 @@ function check_ota {
 	# signed like
 	if ! "$otatools/bin/check_ota_package_signature" "$1/recovery_releasekey.x509.pem" "$outdir/ota_unchecked.zip" >&2; then
 		echo "The recovery in the OTA doesn't accept the OTA!!!" >&2
+		exit 1
+	fi
+	# nor one of another device or older than itself, as it would refuse the next ones if they were made
+	# like this one and it isn't
+	local metadata k v post_timestamp= pre_device=
+	metadata="$(unzip -p "$outdir/ota_unchecked.zip" META-INF/com/android/metadata)"
+	while IFS== read -r k v; do
+		case "$k" in
+			post-timestamp) post_timestamp="$v" ;;
+			pre-device) pre_device="$v" ;;
+		esac
+	done <<< "$metadata"
+	if ! [[ $post_timestamp =~ ^[0-9]+$ && "|$pre_device|" == *"|$recovery_device|"* ]] || test "$post_timestamp" -lt "$recovery_date_utc"; then
+		echo "The recovery in the OTA, of device $recovery_device with build timestamp $recovery_date_utc, doesn't accept an OTA for $pre_device with build timestamp $post_timestamp!!!" >&2
 		exit 1
 	fi
 	echo "CHECK SUCCESSFUL"
