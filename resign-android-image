@@ -268,8 +268,9 @@ if test "$out_build" != "$build"; then
 
 	# the updater only offers an update whose timestamp is greater than ro.build.date.utc of the
 	# running build (and update_engine and the recovery refuse to install an older one), so the
-	# timestamp must be replaced with the one synthesized for the version
-	prop_sed="$prop_sed; s/^([a-z0-9_.]*\.date\.utc)=.*/\1=$build_date_utc/; s/^([a-z0-9_.]*\.date)=.*/\1=$(date -u -d "@$build_date_utc")/"
+	# timestamp must be replaced with the one synthesized for the version, and the date shown with it written in
+	# the format of the build rather than in the one of the locale
+	prop_sed="$prop_sed; s/^([a-z0-9_.]*\.date\.utc)=.*/\1=$build_date_utc/; s/^([a-z0-9_.]*\.date)=.*/\1=$(LC_ALL=C date -u -d "@$build_date_utc")/"
 fi
 if test -n "$ro_debuggable"; then
 	prop_sed="$prop_sed; s/^ro.debuggable=.*/ro.debuggable=$ro_debuggable/"
