@@ -2478,7 +2478,7 @@ function make_target_files_zip {
 	rm -rf -- "$outdir/ota_unchecked.zip" "$outdir/factory_image" "$outdir/factory_unchecked" "$outdir/factory"
 
 	if test "$build_method" == resign; then
-		# which is discarded once the OTA is made, while the files marking what was made from it are kept, so
+		# which is discarded once the target files are made, while the files marking what was made from it are kept, so
 		# it is made again for the target files that are made again
 		make_dir "$dir/ota_payload" make_extract_ota_payload
 		make_dir "$outdir/target_files" make_target_files_base
@@ -3002,17 +3002,16 @@ if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 	else
 		make_file "$outdir/target_files.zip" make_target_files_zip
 	fi
-	discard "$outdir/target_files" "$outdir/target_files_signed.zip"
+	# along with the images of the OTA, which only the target files are made from
+	discard "$outdir/target_files" "$outdir/target_files_signed.zip" "$dir/ota_payload"
 
 	if test -n "$parallel"; then
 		background make_file "$out_ota" make_ota
 		background make_file "$out_factory" make_factory_zip
 		wait_background
-		discard "$dir/ota_payload"
 	else
 		if test -n "$build_ota"; then
 			make_file "$out_ota" make_ota
-			discard "$dir/ota_payload"
 		fi
 		if test -n "$build_factory"; then
 			make_dir "$outdir/factory" make_factory
