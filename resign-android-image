@@ -3055,6 +3055,8 @@ if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 			make_file "$out_factory" make_factory_zip
 		fi
 	fi
+	# which the factory images and the target files, for a pvmfw that is only in them, were made from
+	discard "$dir/factory" "$dir/factory.list" "$dir/factory_image" "$dir/factory_image.list"
 fi
 # With no OTA or factory output requested, the target files are the output to keep.
 if test "${#outputs[@]}" != 0; then
