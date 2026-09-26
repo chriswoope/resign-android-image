@@ -724,7 +724,10 @@ function download
 
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
-	# the tag of the sources of the build
+	# the tag of the sources of the build, but always the one of the even build number for an odd one: the tag of an
+	# odd build is only published later, once the embargo on the sources of its security patches ends, so using it
+	# would make the build depend on whether it is published yet, which it almost never is for the recent builds that
+	# are usually resigned
 	git_ref="$build"
 	case "${build: -1}" in
 		1|3|5|7|9) git_ref="${build::-1}$((${build: -1} - 1))" ;;
