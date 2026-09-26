@@ -671,7 +671,7 @@ if test "$os" == grapheneos; then
 		out_factory_word=install
 		factory_optimized=1
 	else
-		factory_name="$device-factory-$build"\
+		factory_name="$device-factory-$build"
 		out_factory_word=factory
 		factory_optimized=
 	fi
