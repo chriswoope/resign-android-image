@@ -25,14 +25,15 @@
 #         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
 #         and to OUT/misc_info.txt the misc_info.txt entries they are built with. A boot image without a
 #         ramdisk is left to be used as a prebuilt one, as it is by a normal build
-#     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... < CHANGED
+#     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED
 #         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
 #         files in its ramdisks of the ORIGINAL one, with the same names, metadata and contents, but for
 #         the contents of the files at the paths in the ramdisk, NUL separated, read from the standard
 #         input, which may have changed. --allow-additions also allows new paths listed in CHANGED;
 #         --allow-new-files allows any new paths but those in the ramdisks of the OTHER boot images
 #         loaded along with IMAGE, which the new file would replace or be replaced by. Existing paths
-#         must retain their metadata and order.
+#         must retain their metadata and order. The files at the paths in the ramdisk of the ORIGINAL
+#         one that DIR has files at must have the contents of those instead.
 #     target_files_inputs.py recovery-cert-check CERTIFICATE
 #         check that the OTA certificate uses RSA parameters and a signature algorithm accepted by
 #         recovery's certificate loader and the RSA-only host OTA signature verifier
@@ -1520,24 +1521,25 @@ def cpio_entries(ramdisk):
         entries.append((name, mode, uid, gid, rdev_major, rdev_minor, contents))
 
 
-def ramdisk_description(ramdisk, changed):
-    """The name, mode, owner and device numbers of each file of the ramdisk, and the digest of its contents
-    unless its path is in changed."""
+def ramdisk_description(ramdisk, changed, replaced):
+    """The name, mode, owner and device numbers of each file of the ramdisk, and the digest of its contents,
+    or of those that replaced has for its path, unless its path is in changed."""
     if os.path.getsize(ramdisk) == 0:
         return []
     return [[os.fsdecode(name), mode, uid, gid, rdev_major, rdev_minor,
-             None if name in changed else hashlib.sha256(contents).hexdigest()]
+             None if name in changed else hashlib.sha256(replaced.get(name, contents)).hexdigest()]
             for name, mode, uid, gid, rdev_major, rdev_minor, contents in cpio_entries(ramdisk)]
 
 
-def describe_boot_image(image, tmp, changed):
+def describe_boot_image(image, tmp, changed, replaced={}):
     """What a built boot image must be the same as the original in: its header, the contents of its
-    files and the files in its ramdisks, but for the contents of those at the paths in changed."""
+    files and the files in its ramdisks, but for the contents of those at the paths in changed, and of
+    those at the paths in replaced, which are those it has for them."""
     out = os.path.join(tmp, "unpacked")
     description = []
     for option, value in unpack_boot_image(image, out):
         if option in RAMDISK_OPTIONS:
-            value = ramdisk_description(value, changed)
+            value = ramdisk_description(value, changed, replaced)
         elif option in BOOT_FILE_OPTIONS:
             with open(value, "rb") as f:
                 value = hashlib.sha256(f.read()).hexdigest()
@@ -1755,14 +1757,20 @@ def ramdisk_file(path, images):
     sys.stdout.buffer.write(found[0][1])
 
 
-def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False, loaded_with=()):
+def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False, loaded_with=(),
+                replaced={}):
     with tempfile.TemporaryDirectory() as tmp:
         actual = describe_boot_image(image, os.path.join(tmp, "image"), changed)
-        expected = describe_boot_image(original, os.path.join(tmp, "original"), changed)
+        expected = describe_boot_image(original, os.path.join(tmp, "original"), changed, replaced)
         # the paths of the ramdisks of the boot images loaded along with the image, which the kernel unpacks
         # its ramdisks over, or the other way around, so that a file new to the image replaces one of theirs,
         # like those of the recovery in the ramdisk of vendor_boot, or is replaced by it
         loaded_names = {os.fsdecode(name) for name, *_ in ramdisk_entries(loaded_with, os.path.join(tmp, "loaded"))}
+    # which would otherwise be expected to be left as they are
+    missing = replaced.keys() - {os.fsencode(entry[0]) for option, value in expected if option in RAMDISK_OPTIONS
+                                 for entry in value}
+    if missing:
+        fail(f"{original} has no files at {' '.join(sorted('/' + os.fsdecode(path) for path in missing))} to replace")
     if allow_additions or allow_new_files:
         for (option, a), (expected_option, e) in zip(actual, expected):
             if option != expected_option or option not in RAMDISK_OPTIONS:
@@ -1802,13 +1810,18 @@ def boot_verify(image, original, changed, allow_additions=False, allow_new_files
 def boot_verify_options(args):
     """The keyword arguments of boot_verify that the options args of boot-verify stand for, or None if they
     aren't valid."""
-    options = {"allow_additions": False, "allow_new_files": False, "loaded_with": []}
+    options = {"allow_additions": False, "allow_new_files": False, "loaded_with": [], "replaced": {}}
     args = iter(args)
     for option in args:
         if option in ("--allow-additions", "--allow-new-files"):
             options[option[2:].replace("-", "_")] = True
         elif option == "--loaded-with" and (image := next(args, None)) is not None:
             options["loaded_with"].append(image)
+        elif option == "--expected" and (tree := next(args, None)) is not None:
+            for root, _, files in os.walk(tree):
+                for name in files:
+                    with open(os.path.join(root, name), "rb") as f:
+                        options["replaced"][os.fsencode(os.path.relpath(os.path.join(root, name), tree))] = f.read()
         else:
             return None
     return options
@@ -1850,7 +1863,7 @@ def main():
         fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
-             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... < CHANGED | avb-args PARTITION IMAGE | "
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE | ramdisk-file PATH IMAGE...")

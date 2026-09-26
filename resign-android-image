@@ -2159,21 +2159,32 @@ function partition_dir {
 	fi
 }
 
+# run the find action that follows on the property files in the directory $1
+function find_props {
+	find "$1" \( -name build.prop -o -name prop.default \) -type f "${@:2}"
+}
+
+# make the changes that the options ask for to the properties in the files whose paths are NUL separated
+# on the standard input
+function edit_props {
+	xargs -0 -r sed -i -re "$prop_sed"
+}
+
 # make the changes that the options ask for to the files in the target files directory $1
 function apply_modifications {
 	# the signing appends a newline to the build.prop files, so they are left with a single one for
 	# them to end with the empty line they end with in the original images
-	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n/'
+	find_props "$1" -print0|xargs -0 sed -i -z -re 's/\n*$/\n/'
 	# the property that --adb-at-boot-any-key-INSECURE clears is checked for so that its absence, or a
 	# rename, doesn't silently leave authorization on
-	if test -n "$adb_any_key" && test -z "$(find "$1" \( -name build.prop -o -name prop.default \) -exec grep -l '^ro\.adb\.secure=' {} +)"; then
+	if test -n "$adb_any_key" && test -z "$(find_props "$1" -exec grep -l '^ro\.adb\.secure=' {} +)"; then
 		echo "Warning: no build.prop sets ro.adb.secure, so --adb-at-boot-any-key-INSECURE may not disable ADB key authorization" >&2
 	fi
 	# the properties are changed in the ramdisks as well, the prop.default of the recovery included:
 	# there ro.debuggable=1 also has the recovery start a root shell on the serial console, next to the
 	# recovery itself, and ro.adb.secure=0 has its adbd accept any host
 	if test -n "$prop_sed"; then
-		find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -re "$prop_sed"
+		find_props "$1" -print0|edit_props
 	fi
 	# the rules to add to the SELinux policy, a line each
 	local sepolicy=
@@ -2382,6 +2393,26 @@ function make_care_map {
 	"$otatools/bin/care_map_generator" <(printf '%s' "$care_map_txt") "$1"
 }
 
+# check that the image $2 of the boot partition $4, which the signing built from the files of its ramdisk,
+# is made like the original one $3, since the recovery, which the next OTA is sideloaded with, is one of
+# them: only the OTA certificates, which the signing replaces and the recovery is checked to trust the
+# release key with, and adbd with --recovery-adb-root may be anything, while the property files must be
+# the original ones with the changes that the options ask for, which are made to copies of them in $1
+function verify_built_boot {
+	local ramdisk="$outdir/boot_inputs/target_files/${4^^}/RAMDISK" expected
+	expected="$(realpath "$1")"
+	if test -n "$prop_sed"; then
+		(cd "$ramdisk" && find_props . -print0|xargs -0 -r cp --parents --target-directory="$expected")
+		find_props "$expected" -print0|edit_props
+	fi
+	{
+		find "$ramdisk" -name otacerts.zip -type f -printf '%P\0'
+		if test -n "$recovery_adb_root" && test "$4" == vendor_boot; then
+			printf '%s\0' system/bin/adbd
+		fi
+	}|python3 "$data_dir/target_files_inputs.py" boot-verify "$2" "$3" --expected "$1"
+}
+
 # take the image of partition $2 that the signing built, checking that it is made like the original one
 function take_signed_image {
 	local img="$outdir/target_files_signed/IMAGES/$2.img"
@@ -2389,19 +2420,7 @@ function take_signed_image {
 	if test -e "$outdir/fs_expected/$2.json"; then
 		python3 "$data_dir/target_files_inputs.py" fs-verify "$img" "$outdir/fs_expected/$2.json"
 	elif test -d "$outdir/boot_inputs/target_files/${2^^}"; then
-		# built from the files of its ramdisk, of which only those that the signing replaces the OTA keys
-		# in, and those that the options change, may have changed, since the recovery, which the next OTA
-		# is sideloaded with, is one of them
-		local ramdisk="$outdir/boot_inputs/target_files/${2^^}/RAMDISK"
-		{
-			find "$ramdisk" -name otacerts.zip -type f -printf '%P\0'
-			if test -n "$prop_sed"; then
-				find "$ramdisk" \( -name build.prop -o -name prop.default \) -type f -printf '%P\0'
-			fi
-			if test -n "$recovery_adb_root" && test "$2" == vendor_boot; then
-				printf '%s\0' system/bin/adbd
-			fi
-		}|python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$orig"
+		with_temp_dir "$outdir/boot_expected_$2" verify_built_boot "$img" "$orig" "$2"
 	elif test "$2" == vbmeta; then
 		if ! diff <(get_avbtool_partitions "$orig"|sort) <(get_avbtool_partitions "$img"|sort) >&2 || test "$(get_avbtool_vbmeta_opts "$orig")" != "$(get_avbtool_vbmeta_opts "$img")"; then
 			echo "The built vbmeta doesn't verify the same partitions with the same rollback index as the original one" >&2

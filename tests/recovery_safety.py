@@ -55,6 +55,13 @@ class BootVerification(unittest.TestCase):
                 boot_verify(changed, self.original, allowed, allow_additions=True, allow_new_files=new_files)
         boot_verify(changed, self.original, {b"init"}, allow_additions=True)
 
+    def test_replaced_contents_must_be_exact(self):
+        changed = self.make_image("changed", {"init": b"modified init", "other": b"unchanged"})
+        boot_verify(changed, self.original, set(), replaced={b"init": b"modified init"})
+        for replaced in [{b"init": b"other init"}, {b"init": b"modified init", b"missing": b""}]:
+            with self.subTest(replaced=replaced), self.assertRaises(SystemExit):
+                boot_verify(changed, self.original, set(), replaced=replaced)
+
     def test_additions(self):
         added = self.make_image("added", {"init": b"original init", "other": b"unchanged", "new": b"new"})
         for allowed, additions in [(set(), True), ({b"new"}, False)]:
