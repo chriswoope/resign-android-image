@@ -502,10 +502,16 @@ def apk_keys(target_files, certs, meta):
     by the certificate it is signed with in the certs file, whose lines hold the SHA-256 digest of a
     certificate, the certificate and the name of its key."""
     keys = {}
+    certificates = {}
     with open(certs) as f:
         for line in f:
             digest, _, key = line.split()
-            keys[digest] = key
+            # the APKs signed with a certificate can only be signed with one key, and the entries of the
+            # mac_permissions.xml files are only given the certificate of a key in place of one of its own
+            if keys.setdefault(digest, key) != key:
+                fail(f"{certs} has the certificate {digest} for both {keys[digest]} and {key}")
+            if certificates.setdefault(key, digest) != digest:
+                fail(f"{certs} has both the certificates {certificates[key]} and {digest} for {key}")
 
     apks = {}
     apexes = {}
