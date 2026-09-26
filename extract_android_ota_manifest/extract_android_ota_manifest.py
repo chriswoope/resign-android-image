@@ -3,6 +3,7 @@
 import hashlib
 import os
 import os.path
+import re
 import shutil
 import struct
 import subprocess
@@ -85,6 +86,19 @@ def main(filename, output_dir):
   with open(os.path.join(output_dir, "ab_partitions.txt"), "w") as abf:
     for p in payload.manifest.partitions:
       print(p.partition_name, file = abf)
+
+  # what the payload runs once it is written, as the build tells it to the payload generator, in lines
+  # that only hold a value without whitespace or backslashes as it is
+  with open(os.path.join(output_dir, "postinstall_config.txt"), "w") as pf:
+    for p in payload.manifest.partitions:
+      if p.run_postinstall:
+        if not (re.fullmatch(r"[a-z0-9_]+", p.partition_name) and re.fullmatch(r"[^\s\\]+", p.postinstall_path)
+                and re.fullmatch(r"[a-z0-9]+", p.filesystem_type)):
+          raise PayloadError("Unexpected postinstall of %r: %r %r" % (p.partition_name, p.postinstall_path, p.filesystem_type))
+        print("RUN_POSTINSTALL_%s=true" % p.partition_name, file = pf)
+        print("POSTINSTALL_PATH_%s=%s" % (p.partition_name, p.postinstall_path), file = pf)
+        print("FILESYSTEM_TYPE_%s=%s" % (p.partition_name, p.filesystem_type), file = pf)
+        print("POSTINSTALL_OPTIONAL_%s=%s" % (p.partition_name, "true" if p.postinstall_optional else "false"), file = pf)
 
   with open(os.path.join(output_dir, "dynamic_partitions_info.txt"), "w") as df:
     if payload.manifest.HasField("dynamic_partition_metadata"):
