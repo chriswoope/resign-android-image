@@ -195,6 +195,39 @@ if test -n "$version" && ! [[ $version =~ ^[0-9]{10}$ ]]; then
 	exit 1
 fi
 
+out_build="${version:-$build}"
+build_date_utc=
+if test "$out_build" != "$build"; then
+	# GrapheneOS build timestamps are the wall clock time of the release build run (the same for all
+	# devices of a release) and are not derived from the build number, so a version that was never
+	# built upstream has no timestamp to use and we have to synthesize one: use the last 100 seconds
+	# of the day of the version, one second per unit of its last two digits. This way timestamps are
+	# ordered like the build numbers they come from, are always later than those of the real releases
+	# of the same day or an earlier one, which are built during their own day, and always earlier
+	# than those of the real releases of a later day, which can thus always still be installed.
+	# The day must be taken in UTC because that's the timezone build numbers are assigned in (build
+	# 2026081300 was built at 03:27:33 UTC, 2025012701 at 04:48:18 UTC and 2025021000 at 06:01:10
+	# UTC, all on the day of their own build number, while in the local time of the GrapheneOS
+	# developers the first two would have belonged to the previous day). This makes being earlier
+	# than any later release exact rather than just likely, since a release built on a later day
+	# always has a timestamp past the end of the day of our version, no matter at what time of the
+	# day releases happen to be built; only being later than the release of the same day relies on
+	# no release ever being built in the last 100 seconds of a day, which leaves about 18 hours of
+	# margin at the times of the day at which releases are currently built.
+	if ! build_date_utc="$(date -u -d "${out_build:0:4}-${out_build:4:2}-${out_build:6:2}" +%s)"; then
+		echo "Version $out_build does not start with a valid YYYYMMDD date" >&2
+		exit 1
+	fi
+	build_date_utc="$((build_date_utc + 86400 - 100 + 10#${out_build:8}))"
+	# and a device refuses an OTA older than the build it runs, both from the updater and when sideloading
+	# it, so a version of a day still to come would leave it refusing every release up to that day
+	TZ=UTC printf -v today '%(%Y%m%d)T' -1
+	if test "${out_build:0:8}" -gt "$today"; then
+		echo "Version $out_build is of a day after today, $today UTC, so a device running it would refuse every release up to that day" >&2
+		exit 1
+	fi
+fi
+
 # the keys given with --adb-key, read here rather than after a long build so that a bad file fails now
 adb_keys_content=
 for i in "${adb_keys[@]}"; do
@@ -904,32 +937,7 @@ function make_keys {
 }
 make_keys
 
-out_build="${version:-$build}"
 out_factory_name="$device-$out_factory_word-$out_build"
-build_date_utc=
-if test "$out_build" != "$build"; then
-	# GrapheneOS build timestamps are the wall clock time of the release build run (the same for all
-	# devices of a release) and are not derived from the build number, so a version that was never
-	# built upstream has no timestamp to use and we have to synthesize one: use the last 100 seconds
-	# of the day of the version, one second per unit of its last two digits. This way timestamps are
-	# ordered like the build numbers they come from, are always later than those of the real releases
-	# of the same day or an earlier one, which are built during their own day, and always earlier
-	# than those of the real releases of a later day, which can thus always still be installed.
-	# The day must be taken in UTC because that's the timezone build numbers are assigned in (build
-	# 2026081300 was built at 03:27:33 UTC, 2025012701 at 04:48:18 UTC and 2025021000 at 06:01:10
-	# UTC, all on the day of their own build number, while in the local time of the GrapheneOS
-	# developers the first two would have belonged to the previous day). This makes being earlier
-	# than any later release exact rather than just likely, since a release built on a later day
-	# always has a timestamp past the end of the day of our version, no matter at what time of the
-	# day releases happen to be built; only being later than the release of the same day relies on
-	# no release ever being built in the last 100 seconds of a day, which leaves about 18 hours of
-	# margin at the times of the day at which releases are currently built.
-	if ! build_date_utc="$(date -u -d "${out_build:0:4}-${out_build:4:2}-${out_build:6:2}" +%s)"; then
-		echo "Version $out_build does not start with a valid YYYYMMDD date" >&2
-		exit 1
-	fi
-	build_date_utc="$((build_date_utc + 86400 - 100 + 10#${out_build:8}))"
-fi
 outdir="$dir/out_$build_method"
 
 # the images that the signing builds, or adds a footer to, for resign
