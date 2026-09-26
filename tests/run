@@ -169,11 +169,9 @@ function test_basic {
 	check_ota_signed "$ota"
 	check_virt_apex_signed "$work/ota/system.img" "$work/ota/pvmfw.img"
 	check_metadata "$build" "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.date.utc)"
-	test "$(image_prop "$work/ota/system.img" /system/build.prop ro.build.version.incremental)" == "$build" || fail "The system image is not of build $build"
 
 	local factory="$out/$device-install-$build.zip"
 	ssh-keygen -Y check-novalidate -n "factory images" -f "$work/keys/id_ed25519.pub" -s "$factory.sig" < "$factory" > /dev/null 2>&1 || fail "$factory is not signed with the generated key"
-	cmp -s <(unzip -p "$factory" "$device-install-$build/avb_pkmd.bin") "$work/keys/avb_pkmd.bin" || fail "$factory doesn't have the generated AVB key to lock the bootloader with"
 }
 
 function test_modifications {
@@ -194,8 +192,6 @@ function test_modifications {
 	check_metadata "$version" "$timestamp"
 
 	local system="$work/ota/system.img"
-	test "$(image_prop "$system" /system/build.prop ro.build.version.incremental)" == "$version" || fail "The system image is not of version $version"
-	test "$(image_prop "$system" /system/build.prop ro.build.date.utc)" == "$timestamp" || fail "The build timestamp is not the one synthesized for version $version"
 	image_prop "$work/ota/vendor.img" /build.prop ro.vendor.build.fingerprint|grep -qw "$version" || fail "The vendor fingerprint doesn't have version $version"
 
 	grep -qxF -f "$work/adbkey.pub" <(image_file "$system" /adb_keys) || fail "/adb_keys doesn't have the ADB key"

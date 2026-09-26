@@ -2277,9 +2277,12 @@ function make_ota_unchecked {
 }
 
 # make sure we have the correct key in recovery so that we can sideload another update, otherwise we can get locked out the device...
+# and that vbmeta is signed with the AVB key that the bootloader is locked with, and that the system is
+# the one of the version being built, with the timestamp that the updater compares
 function check_images {
 	local vendor_boot="$2"
 	local system="$3"
+	local vbmeta="$4"
 	"$otatools/bin/unpack_bootimg" --boot_img "$vendor_boot" --out "$1/vendor_boot" >&2
 	mkdir "$1/vendor_boot_ramdisk" >&2
 	"$otatools/bin/lz4" -d "$1/vendor_boot/vendor_ramdisk00" -|(cd "$1/vendor_boot_ramdisk" && cpio -i) >&2
@@ -2296,14 +2299,36 @@ function check_images {
 		echo "System otacerts.zip has wrong key!!!" >&2
 		exit 1
 	fi
+	local vbmeta_key avb_key
+	vbmeta_key="$("$otatools/bin/avbtool" info_image --image "$vbmeta"|sed -nre 's/^Public key \(sha1\):\s*//p')"
+	read -r avb_key _ < <(sha1sum < "$key_dir/avb_pkmd.bin")
+	if test "$vbmeta_key" != "$avb_key"; then
+		echo "vbmeta is not signed with the AVB key!!!" >&2
+		exit 1
+	fi
+	local k v incremental= date_utc=
+	while IFS== read -r k v; do
+		case "$k" in
+			ro.build.version.incremental) incremental="$v" ;;
+			ro.build.date.utc) date_utc="$v" ;;
+		esac
+	done < <("$debugfs" -R "cat /system/build.prop" "$system" 2>/dev/null)
+	if test "$incremental" != "$out_build"; then
+		echo "The system is of build $incremental rather than $out_build" >&2
+		exit 1
+	fi
+	if test -n "$build_date_utc" && test "$date_utc" != "$build_date_utc"; then
+		echo "The build timestamp of the system is $date_utc rather than $build_date_utc, the one synthesized for version $out_build" >&2
+		exit 1
+	fi
 	echo "CHECK SUCCESSFUL"
 }
 
 function check_ota {
 	mkdir "$1/ota_payload"
 	ota_payload_offset "$outdir/ota_unchecked.zip"
-	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions vendor_boot,system >&2
-	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img"
+	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions vendor_boot,system,vbmeta >&2
+	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img" "$1/ota_payload/vbmeta.img"
 }
 
 function make_ota {
@@ -2554,11 +2579,16 @@ function check_factory {
 		"$otatools"/bin/lpunpack -p system_a "$1/super.img" "$1/lpunpack" >&2
 		mv "$1/lpunpack/system_a.img" "$1/system.img"
 	else
-		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$out_factory_name/image-$device-$out_build.zip" system.img vendor_boot.img >&2
+		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$out_factory_name/image-$device-$out_build.zip" system.img vendor_boot.img vbmeta.img >&2
 		"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
 	fi
-	
-	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img"
+	# the key that the bootloader is locked with after flashing
+	if ! cmp "$outdir/factory_unchecked/$out_factory_name/avb_pkmd.bin" "$key_dir/avb_pkmd.bin" >&2; then
+		echo "The factory image doesn't have the AVB key to lock the bootloader with!!!" >&2
+		exit 1
+	fi
+
+	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img" "$1/factory_image/vbmeta.img"
 }
 
 
