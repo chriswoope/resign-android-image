@@ -2754,7 +2754,26 @@ function make_factory_zip_sig {
 out_ota="$outdir/out/$device-ota_update-$out_build.zip"
 out_factory="$outdir/out/$out_factory_name.zip"
 
-if ! test -e "$out_ota" || ! test -e "$out_factory"; then
+# the outputs asked for, which are made, along with the target files that they are made from, unless they
+# are all there; the target files alone are made when none is asked for
+outputs=()
+if test -n "$build_ota"; then
+	outputs+=("$out_ota")
+fi
+if test -n "$build_factory"; then
+	outputs+=("$outdir/factory")
+fi
+if test -n "$build_factory_zip"; then
+	outputs+=("$out_factory")
+fi
+outputs_missing=
+for i in "${outputs[@]}"; do
+	if ! test -e "$i"; then
+		outputs_missing=1
+	fi
+done
+
+if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 	mkdir -p "$outdir/out"
 	if test -n "$parallel"; then
 		# the factory images are downloaded while the target files are made, and the download is waited
