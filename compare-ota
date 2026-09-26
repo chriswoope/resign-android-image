@@ -1,0 +1,228 @@
+#!/bin/bash
+set -euo pipefail
+
+# Recursively compare two OTA packages, e.g. a known good build with a new one, or an upstream release
+# with its resigned build, and make a unified diff of everything that differs between them.
+#
+# Usage: compare-ota [OPTIONS] WORK OLD.zip NEW.zip
+#
+#   --otatools DIR         the otatools to unpack the images with, like the ones resign-android-image
+#                          downloads into ~/.resign-android-image (default: the only otatools-* there)
+#   --dexpreopt-tools DIR  the dexpreopt tools to take dexdump from (default: the only
+#                          dexpreopt_tools-* in ~/.resign-android-image)
+#   --apktool JAR          the apktool jar to disassemble dex files with the baksmali of
+#                          (default: ~/.resign-android-image/apktool.jar)
+#   --threads N            how many files to unpack at once (default: the number of processors)
+#   --reuse WORK           hard link the extraction of any file that is the same as the one at the same
+#                          path of the other comparison WORK, rather than unpacking it again, e.g. to
+#                          compare the same new build with several others without the space and time
+#                          of unpacking it each time
+#
+# WORK is made, and must not exist: OLD goes into WORK/a and NEW into WORK/b. The files are compared
+# level by level: each archive (zip, APK, APEX, payload, ext4 or erofs image, boot image, vbmeta,
+# compressed ramdisk, cpio or dex file) that differs between them, or is only on one side, is moved to
+# WORK/.packed/SIDE/PATH and unpacked into WORK/SIDE/PATH.d, with its metadata as text in
+# WORK/SIDE/PATH.m (such as the AVB footer, the owner, mode, label and capabilities of each file of an
+# image, the signing certificates of an APK or the manifest of a payload), all the archives of a kind
+# at once, until no differing archive is left. The files that are the same on both sides are hard
+# linked together to save space. The unified diff of WORK/a and WORK/b is then written to WORK/diff.
+#
+# The dex files are disassembled into one smali file per class, so that only the classes that differ
+# are in the diff, and the few classes that baksmali can't disassemble are disassembled by dexdump
+# into WORK/SIDE/PATH.d/.dexdump. The erofs images are extracted with sudo to keep the owners of their
+# files, which are then listed in the metadata. Comparing two OTA packages of a Pixel needs about 15GB
+# of disk space, and more when their APKs and APEXes differ, as between two differently signed builds.
+
+data_dir="$(realpath -- "$(dirname -- "$0")")"
+var_dir="$HOME/.resign-android-image"
+
+otatools=
+dexpreopt_tools=
+apktool="$var_dir/apktool.jar"
+threads=
+reuse=
+
+function usage {
+	sed -n '4,/^$/{s/^# \{0,1\}//; p}' "$0" >&2
+	exit 1
+}
+
+while test "$#" != 0 && [[ $1 == --* ]]; do
+	if test "$#" -lt 2; then
+		usage
+	fi
+	case "$1" in
+		--otatools) otatools="$2" ;;
+		--dexpreopt-tools) dexpreopt_tools="$2" ;;
+		--apktool) apktool="$2" ;;
+		--threads) threads="$2" ;;
+		--reuse) reuse="$(realpath -- "$2")" ;;
+		*) usage ;;
+	esac
+	shift 2
+done
+if test "$#" != 3; then
+	usage
+fi
+
+# the only directory matching the pattern $2 in $var_dir, into the variable named $1
+function only_dir {
+	local -a found=()
+	local i
+	for i in "$var_dir"/$2; do
+		if test -d "$i"; then
+			found+=("$i")
+		fi
+	done
+	if test "${#found[@]}" != 1; then
+		echo "There isn't exactly one $var_dir/$2 directory: pass the one to use with --${1//_/-}" >&2
+		exit 1
+	fi
+	printf -v "$1" '%s' "${found[0]}"
+}
+
+if test -z "$otatools"; then
+	only_dir otatools 'otatools-*'
+fi
+if test -z "$dexpreopt_tools"; then
+	only_dir dexpreopt_tools 'dexpreopt_tools-*'
+fi
+if test -z "$threads"; then
+	threads="$(nproc)"
+elif ! [[ $threads =~ ^[1-9][0-9]*$ ]]; then
+	echo "The number of threads must be a positive integer, but is $threads" >&2
+	exit 1
+fi
+
+work="$(realpath -m -- "$1")"
+old="$(realpath -- "$2")"
+new="$(realpath -- "$3")"
+mkdir -- "$work"
+mkdir -p -- "$work/a" "$work/b" "$work/.packed/a" "$work/.packed/b" "$work/todo"
+
+dexdump="$(realpath -- "$dexpreopt_tools")/dexdump"
+otatools="$(realpath -- "$otatools")"
+PATH="$otatools/bin:$PATH"
+export work reuse data_dir apktool dexdump PATH
+
+# unpack $2, SIDE/PATH relative to $work, which is an archive of the kind $1
+function unpack {
+	local kind="$1" rel="$2"
+	local src="$work/.packed/$rel" d="$work/$rel.d" m="$work/$rel.m" err
+
+	# what an identical file unpacked into in the other comparison is what unpacking this one gives
+	if test -n "$reuse" && test -d "$reuse/$rel.d" && test -f "$reuse/.packed/$rel" && cmp -s -- "$src" "$reuse/.packed/$rel"; then
+		cp -al -- "$reuse/$rel.d" "$d"
+		cp -- "$reuse/$rel.m" "$m"
+		if test -d "$reuse/.packed/$rel.d"; then
+			python3 "$data_dir/compare_ota.py" restore-packed "$reuse/.packed/$rel.d" "$d"
+		fi
+		return
+	fi
+
+	mkdir -- "$d"
+	{
+		file -bL -- "$src"
+		echo "size: $(stat -L -c %s -- "$src")"
+	} > "$m"
+	case "$kind" in
+		zip)
+			# 1 is a warning, such as about extra bytes before the first entry
+			unzip -qq -o "$src" -d "$d" || test "$?" == 1
+			(cd "$(dirname -- "$src")" && zipinfo -l -- "$(basename -- "$src")") >> "$m"
+			if [[ $src =~ \.(apk|apex|capex)$ ]]; then
+				echo "# apksigner" >> "$m"
+				apksigner verify -v --print-certs "$src" >> "$m" 2>&1 || echo "apksigner failed: $?" >> "$m"
+			fi
+			;;
+		payload)
+			ota_extractor -single_thread -payload "$src" -output_dir "$d" 2> >(grep -v ':INFO:' >&2) > /dev/null
+			python3 "$data_dir/compare_ota.py" payload-meta "$src" >> "$m"
+			;;
+		ext4)
+			# not being root, it can't give the files their owners, which are in the metadata instead
+			(cd "$d" && debugfs_static -R 'rdump / .' "$src" 2> >(grep -v '^debugfs \|: Operation not permitted while changing ownership of ' >&2))
+			{
+				# an image without an AVB footer, such as the payload of an APEX, says so
+				echo "# avbtool"
+				avbtool info_image --image "$src" 2>&1 || true
+				echo "# superblock"
+				debugfs_static -R stats "$src" 2> >(grep -v '^debugfs ' >&2)|sed '/^ Group  *0:/,$d'
+				echo "# files"
+				python3 "$data_dir/compare_ota.py" ext4-meta "$src"
+			} >> "$m"
+			;;
+		erofs)
+			sudo "$(type -P fsck.erofs)" --extract="$d" --overwrite --preserve "$src" > /dev/null
+			{
+				echo "# avbtool"
+				avbtool info_image --image "$src" 2>&1 || true
+				echo "# files"
+				sudo find "$d" -mindepth 1 -printf '%P %y %m %U:%G %s %l\n'|sort
+			} >> "$m"
+			sudo chown -R "$(id -u):$(id -g)" -- "$d"
+			;;
+		bootimg)
+			(cd "$d" && unpack_bootimg --boot_img "$src" --out .) >> "$m"
+			{
+				echo "# avbtool"
+				avbtool info_image --image "$src"
+			} >> "$m"
+			;;
+		vbmeta)
+			avbtool info_image --image "$src" >> "$m"
+			;;
+		lz4|gzip)
+			# a ramdisk can have a bootconfig appended to it, which is taken apart
+			python3 "$data_dir/compare_ota.py" split-bootconfig "$src" "$d/bootconfig"|
+				if test "$kind" == lz4; then lz4 -dc; else gzip -dc; fi > "$d/data"
+			;;
+		cpio)
+			python3 "$data_dir/compare_ota.py" cpio-extract "$src" "$d"
+			cpio -itv --numeric-uid-gid --quiet < "$src" >> "$m"
+			;;
+		dex)
+			# baksmali reports each class it can't disassemble on stderr, and those get dexdump's
+			# disassembly instead
+			err="$(java -cp "$apktool" "$data_dir/compare_ota_baksmali.java" "$src" "$d" 2>&1 > /dev/null)" || {
+				printf '%s\n' "$err" >&2
+				return 1
+			}
+			sed -n 's/^Error occurred while disassembling class \(.*\) - skipping class$/\1/p' <<< "$err"|tr . /|
+				python3 "$data_dir/compare_ota.py" dexdump-classes "$dexdump" "$src" "$d/.dexdump"
+			# what baksmali prints for an instruction that it decoded as the wrong one
+			if grep -rlq '^ *#disallowed odex opcode' "$d"; then
+				echo "baksmali misdecoded instructions of $src" >&2
+				return 1
+			fi
+			# the header, without the path of the file
+			"$dexdump" -f "$src"|sed "/^Class #/,\$d; /^Opened '/d; /^Processing '/d" >> "$m"
+			;;
+		*)
+			echo "No way to unpack $kind files" >&2
+			return 1
+			;;
+	esac
+}
+export -f unpack
+
+ln -s -- "$old" "$work/.packed/a/ota_update.zip"
+ln -s -- "$new" "$work/.packed/b/ota_update.zip"
+printf '%s\0' a/ota_update.zip b/ota_update.zip > "$work/todo/zip"
+while true; do
+	shopt -s nullglob
+	kinds=("$work"/todo/*)
+	shopt -u nullglob
+	if test "${#kinds[@]}" == 0; then
+		break
+	fi
+	for i in "${kinds[@]}"; do
+		echo "Unpacking $(tr -cd '\0' < "$i"|wc -c) ${i##*/} files" >&2
+		xargs -0 -r -n 1 -P "$threads" bash -c 'set -euo pipefail; unpack "$@"' _ "${i##*/}" < "$i"
+	done
+	python3 "$data_dir/compare_ota.py" step "$work"
+done
+
+# 1 is for differences having been found
+(cd "$work" && diff -ruN --no-dereference a b) > "$work/diff" || test "$?" == 1
+echo "The differences are in $work/diff" >&2
