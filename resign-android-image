@@ -1213,8 +1213,8 @@ function debugfs_quote {
 }
 
 function extract_image {
-	local out="$2"
-	local img="$3"
+	local out="$1"
+	local img="$2"
 
 	debugfs_quote "$(realpath "$out")"
 	# with what it prints discarded, since it warns about every file whose owner it can't set; it doesn't fail
@@ -1245,7 +1245,7 @@ function get_avb_algorithm {
 }
 
 function make_extract_fs {
-	with_temp_dir "$outdir/mnt" extract_image "$@"
+	extract_image "$@"
 
 	if test -n "$dev_fast_sign"; then
 		find "$1" -type f \( -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex' \) ! -name framework-res.apk -delete
