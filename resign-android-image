@@ -999,10 +999,11 @@ if ! test -x "$fsckerofs" && ! fsckerofs="$(which fsck.erofs)"; then
 fi
 
 aosp="$dir/aosp"
-mkdir -p "$aosp/build" "$var_dir/git-$os"
+mkdir -p "$aosp/build" "$aosp/system" "$var_dir/git-$os"
 background_pids=()
 background make_dir "$aosp/script" do_git_checkout "$git/script" "$git_ref"
 background make_dir "$aosp/build/make" do_git_checkout "$git/platform_build" "$git_ref"
+background make_dir "$aosp/system/update_engine" do_git_checkout "$git/platform_system_update_engine" "$git_ref"
 wait_background
 
 for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
@@ -2003,11 +2004,10 @@ function make_hardlink {
 	ln "$2" "$1"
 }
 
+# the payload versions that the update_engine of the build takes, which the build copies into the target files,
+# for an incremental OTA from them to be made with
 function make_update_engine_config {
-	cat >"$1" <<EOF
-PAYLOAD_MAJOR_VERSION=2
-PAYLOAD_MINOR_VERSION=4
-EOF
+	cp "$aosp/system/update_engine/update_engine.conf" "$1"
 }
 
 # Check the replacement with the same verifier as rebuilt boot images. Only explicitly allowed
