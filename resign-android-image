@@ -2418,6 +2418,23 @@ function make_ota_unchecked {
 	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "${extra_ota[@]}" "$outdir/target_files.zip" "$1"
 }
 
+# check that the otacerts.zip $2 of the $1 holds the certificate of the release key, which it writes to $3,
+# and nothing else: the recovery trusts every certificate in it, and one that it can't load keeps it from
+# loading the others
+function check_otacerts {
+	local entries
+	entries="$(unzip -Z1 "$2")"
+	if test "$entries" != keys/releasekey.x509.pem; then
+		echo "The otacerts.zip of the $1 holds ${entries//$'\n'/ } rather than only keys/releasekey.x509.pem!!!" >&2
+		exit 1
+	fi
+	unzip -p "$2" keys/releasekey.x509.pem > "$3"
+	if ! cmp -s "$3" "$key_dir/releasekey.x509.pem"; then
+		echo "The otacerts.zip of the $1 has wrong key!!!" >&2
+		exit 1
+	fi
+}
+
 # make sure we have the correct key in recovery so that we can sideload another update, otherwise we can get locked out the device...
 # and that vbmeta is signed with the AVB key that the bootloader is locked with, and that the system is
 # the one of the version being built, with the timestamp that the updater compares: the images are those
@@ -2434,20 +2451,13 @@ function check_images {
 		fi
 	done
 	python3 "$data_dir/target_files_inputs.py" ramdisk-file system/etc/security/otacerts.zip "${boot_images[@]}" > "$1/recovery_otacerts.zip"
-	mkdir "$1/recovery_otacerts" >&2
-	unzip -x -d "$1/recovery_otacerts" "$1/recovery_otacerts.zip" >&2
-	if ! cmp "$1/recovery_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
-		echo "Recovery otacerts.zip has wrong key!!!" >&2
-		exit 1
-	fi
+	check_otacerts recovery "$1/recovery_otacerts.zip" "$1/recovery_releasekey.x509.pem"
+	# the key of the certificate that the recovery ends up with, which make_keys checks the one of before
+	# every build, has to be one that the recovery can load
+	python3 "$data_dir/target_files_inputs.py" recovery-cert-check "$1/recovery_releasekey.x509.pem"
 	debugfs_quote "$1/system_otacerts.zip"
 	"$debugfs" -R "dump /system/etc/security/otacerts.zip $debugfs_quote" "$system" >&2
-	mkdir "$1/system_otacerts" >&2
-	unzip -x -d "$1/system_otacerts" "$1/system_otacerts.zip" >&2
-	if ! cmp "$1/system_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
-		echo "System otacerts.zip has wrong key!!!" >&2
-		exit 1
-	fi
+	check_otacerts system "$1/system_otacerts.zip" "$1/system_releasekey.x509.pem"
 	local vbmeta_key avb_key
 	vbmeta_key="$("$otatools/bin/avbtool" info_image --image "$vbmeta"|sed -nre 's/^Public key \(sha1\):\s*//p')"
 	read -r avb_key _ < <(sha1sum < "$key_dir/avb_pkmd.bin")
@@ -2481,7 +2491,7 @@ function check_ota {
 	# the recovery that the OTA installs verifies the signature of the next OTA to sideload, and the one of its
 	# payload, with the certificates of its otacerts.zip, so it must accept this OTA, which the next ones are
 	# signed like
-	if ! "$otatools/bin/check_ota_package_signature" "$1/recovery_otacerts/keys/releasekey.x509.pem" "$outdir/ota_unchecked.zip" >&2; then
+	if ! "$otatools/bin/check_ota_package_signature" "$1/recovery_releasekey.x509.pem" "$outdir/ota_unchecked.zip" >&2; then
 		echo "The recovery in the OTA doesn't accept the OTA!!!" >&2
 		exit 1
 	fi
