@@ -1018,6 +1018,22 @@ function make_keys {
 	if test "$android" -ge 130; then
 		keys="$keys bluetooth"
 	fi
+	# which are only generated all together: a key generated next to others that devices already trust, like an
+	# AVB key next to the release key, makes updates that they install and then can't boot, recovery included
+	local files=() missing=()
+	for i in $keys; do
+		files+=("$key_dir/$i.key")
+	done
+	files+=("$key_dir/avb.pem")
+	for i in "${files[@]}"; do
+		if ! test -e "$i"; then
+			missing+=("$i")
+		fi
+	done
+	if test -n "$generate_keys" && test "${#missing[@]}" != 0 && test "${#missing[@]}" != "${#files[@]}"; then
+		echo "--generate-keys only generates all the keys together, but only ${missing[*]} are missing: devices trusting the others would install updates signed with new ones and fail to boot them, so put them back, or make them yourself if new ones are really what you want" >&2
+		exit 1
+	fi
 	for i in $keys; do
 		if test -n "$generate_keys"; then
 			make_file "$key_dir/$i.key" gen_key
