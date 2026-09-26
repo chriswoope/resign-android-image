@@ -57,7 +57,7 @@ INSNS = {
     "iput-boolean": (0x5c, "22c"),
     "invoke-direct": (0x70, "35c"),
     "invoke-static": (0x71, "35c"),
-    "and-int/2addr": (0xb7, "12x"),
+    "and-int/2addr": (0xb5, "12x"),
 }
 
 # dexdump prints the offset of the code item of each method before disassembling it, e.g.
