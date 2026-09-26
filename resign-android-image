@@ -228,6 +228,29 @@ if test "$out_build" != "$build"; then
 	fi
 fi
 
+# the changes that the options ask for to the properties of every build.prop and prop.default
+prop_sed=""
+if test "$out_build" != "$build"; then
+	# the build number appears both on its own and inside the fingerprints
+	prop_sed="$prop_sed; s/\b$build\b/$out_build/g"
+
+	# the updater only offers an update whose timestamp is greater than ro.build.date.utc of the
+	# running build (and update_engine and the recovery refuse to install an older one), so the
+	# timestamp must be replaced with the one synthesized for the version
+	prop_sed="$prop_sed; s/^([a-z0-9_.]*\.date\.utc)=.*/\1=$build_date_utc/; s/^([a-z0-9_.]*\.date)=.*/\1=$(date -u -d "@$build_date_utc")/"
+fi
+if test -n "$ro_debuggable"; then
+	prop_sed="$prop_sed; s/^ro.debuggable=.*/ro.debuggable=$ro_debuggable/"
+fi
+if test -n "$ro_secure"; then
+	prop_sed="$prop_sed; s/^ro.secure=.*/ro.secure=$ro_secure/"
+fi
+if test -n "$adb_any_key"; then
+	# let adbd accept any host key with no on-screen authorization, the way an eng build does: it
+	# demands an authorized key only while ro.adb.secure is set, so clear it
+	prop_sed="$prop_sed; s/^ro.adb.secure=.*/ro.adb.secure=0/"
+fi
+
 # the keys given with --adb-key, read here rather than after a long build so that a bad file fails now
 adb_keys_content=
 for i in "${adb_keys[@]}"; do
@@ -1997,34 +2020,14 @@ function apply_modifications {
 	# the signing appends a newline to the build.prop files, so they are left with a single one for
 	# them to end with the empty line they end with in the original images
 	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n/'
+	# the property that --adb-at-boot-any-key-INSECURE clears is checked for so that its absence, or a
+	# rename, doesn't silently leave authorization on
+	if test -n "$adb_any_key" && test -z "$(find "$1" \( -name build.prop -o -name prop.default \) -exec grep -l '^ro\.adb\.secure=' {} +)"; then
+		echo "Warning: no build.prop sets ro.adb.secure, so --adb-at-boot-any-key-INSECURE may not disable ADB key authorization" >&2
+	fi
 	# the properties are changed in the ramdisks as well, the prop.default of the recovery included:
 	# there ro.debuggable=1 also has the recovery start a root shell on the serial console, next to the
 	# recovery itself, and ro.adb.secure=0 has its adbd accept any host
-	prop_sed=""
-	if test "$out_build" != "$build"; then
-		# the build number appears both on its own and inside the fingerprints
-		prop_sed="$prop_sed; s/\b$build\b/$out_build/g"
-
-		# the updater only offers an update whose timestamp is greater than ro.build.date.utc of the
-		# running build (and update_engine and the recovery refuse to install an older one), so the
-		# timestamp must be replaced with the one synthesized for the version
-		prop_sed="$prop_sed; s/^([a-z0-9_.]*\.date\.utc)=.*/\1=$build_date_utc/; s/^([a-z0-9_.]*\.date)=.*/\1=$(date -u -d "@$build_date_utc")/"
-	fi
-	if test -n "$ro_debuggable"; then
-		prop_sed="$prop_sed; s/^ro.debuggable=.*/ro.debuggable=$ro_debuggable/"
-	fi
-	if test -n "$ro_secure"; then
-		prop_sed="$prop_sed; s/^ro.secure=.*/ro.secure=$ro_secure/"
-	fi
-	if test -n "$adb_any_key"; then
-		# let adbd accept any host key with no on-screen authorization, the way an eng build does: it
-		# demands an authorized key only while ro.adb.secure is set, so clear it. The property is
-		# checked for so that its absence, or a rename, doesn't silently leave authorization on
-		if test -z "$(find "$1" \( -name build.prop -o -name prop.default \) -exec grep -l '^ro\.adb\.secure=' {} +)"; then
-			echo "Warning: no build.prop sets ro.adb.secure, so --adb-at-boot-any-key-INSECURE may not disable ADB key authorization" >&2
-		fi
-		prop_sed="$prop_sed; s/^ro.adb.secure=.*/ro.adb.secure=0/"
-	fi
 	if test -n "$prop_sed"; then
 		find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -re "$prop_sed"
 	fi
