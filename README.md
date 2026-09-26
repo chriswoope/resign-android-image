@@ -126,6 +126,16 @@ Note that no "su" binary is shipped.
 
 Security impact: an exploit can potentially become persistent by enabling network ADB and whitelisting their own keys; exploits that somehow allow unauthorized ADB access will now give root to the attacker
 
+## Recovery ADB root
+
+ADB root in the recovery is useful in case the device no longer boots enough to get to a normal ADB root.
+
+By using --recovery-adb-root, the adbd of the recovery, which is in the ramdisk of vendor_boot, is binary patched the same way as the one of the system with --adb-root, so that it believes that ro.debuggable=1 is set. The built vendor_boot image is checked to be the original one but for that adbd, the OTA certificates and the properties that the options change.
+
+Note that it's a good idea to only enable this when signing an OTA to recover an otherwise inaccessible device.
+
+Security impact: anyone with access to the device can boot it into the recovery and get root through ADB
+
 ## ADB at boot
 
 A device that fails to complete the boot process cannot be debugged over ADB at all: ADB is off until it is enabled in the settings, the host has to be authorized in a dialog on a screen that a broken boot may never reach, and the GrapheneOS USB-C port setting disables the USB data lines while the device is locked, which it is for the whole of a boot.
@@ -172,6 +182,40 @@ It works by overwriting the bytecode of BpfNetMaps$Dependencies.isLoopbackChecks
 
 Security impact: applications can connect to localhost servers of other profiles, as they could before Android 17; this weakens the isolation between profiles for applications that listen on localhost without authenticating their clients
 
+## Screenshots of any app
+
+Android OS contains an antifeature that allows applications to disable taking a screenshot of your own device's screen when it happens to display graphical content provided by that application, and, since Android 14 and 15, to be told when you take a screenshot of it or record the screen.
+
+By using --always-screenshot, you can remedy the situation, by binary patching services.jar so that:
+- WindowState.isSecureLocked() always returns false, so that windows with FLAG_SECURE are treated as non-secure and screenshots, screen recording and casting can capture every window
+- ActivityRecord.shouldUseAppThemeSnapshot() always returns false, so that the preview of the app in the recent apps is always a real screenshot, even for apps that call Activity.setRecentsScreenshotEnabled(false)
+- WindowManagerService.notifyScreenshotListeners() always returns an empty list, so that no app registered with Activity.registerScreenCaptureCallback() is told that a screenshot was taken
+- WindowManagerService.registerScreenRecordingCallback() always returns false, so that no app registered with Activity.registerScreenRecordingCallback() is told that the screen is being recorded
+
+An app can also make a SurfaceView secure with SurfaceView.setSecure(), which --always-screenshot-surfaceview makes a no-op by binary patching framework.jar. This is a separate option since players of DRM-protected video use it because hardware DRM (Widevine L1) can only output to a secure surface, so it makes such playback fail or fall back to software DRM (L3) at a lower resolution, and the protected video still cannot be captured anyway; what it gains is capturing the SurfaceViews of apps that make them secure purely to stop you from taking a screenshot.
+
+Security impact: malware that gains the ability to capture the screen can also capture the windows that apps protect with FLAG_SECURE, such as password fields or banking apps
+
+Functionality impact: with --always-screenshot-surfaceview, DRM-protected video may fail to play or only play at a lower resolution
+
+## Location.isMock neutering
+
+Android developers graciously included a freedom-respecting feature that allows you to instruct the OS to respond to location queries by asking an application of your choice that can respond arbitrarily rather than using the GPS receiver.
+
+Unfortunately, they also included an antifeature, consisting in the "Location.isMock()" privacy-devastating interface, that disastrously leaks to applications information about whether you confidentially provided such an instruction the OS.
+
+By using --no-location-ismock, you can remedy the situation, by binary patching services.jar to remove every call to Location.setIsFromMockProvider(true) in it, which is what the mock location provider of the system server marks the locations it injects with, so that Location.isMock() and Location.isFromMockProvider() always return false.
+
+Security impact: none affecting you
+
+## Recording the audio of any app
+
+Android OS contains an antifeature that allows applications to stop you from recording the audio they play with the AudioPlaybackCapture API, either with android:allowAudioPlaybackCapture="false" in their manifest or with AudioAttributes.setAllowedCapturePolicy(), and that does so by default for apps targeting SDK < 29.
+
+By using --record-anything, you can remedy the situation, by binary patching AudioAttributes.capturePolicyToFlags() in framework.jar so that it always clears the flags that make the audio server refuse capture, which lets a recording app capture the output of any app whose audio goes through the software mixer, including VoIP apps. The audio of cellular calls cannot be captured this way, since it never goes through the mixer.
+
+Security impact: malware that is granted the permission to capture the screen can also capture the audio of apps that opted out, such as VoIP calls
+
 ## AdAway or custom hosts file
 
 Android developers often release applications infested with advertisements for their own personal gain at your expense.
@@ -204,14 +248,6 @@ Obviously, the OS should ignore such absurd requests instead and we should remed
 
 This is currently not implemented, except for ignoring "allowbackup" as described above; in the meantime, ADB root can let you read and write those files.
 
-## Recovery ADB shell and ADB root
-
-ADB shell and ADB root in the recovery would be nice to have in case the device no longer boots enough to get to a normal ADB root.
-
-Note however that this lets anyone with access to the device to gain root, so it's a good idea to only enable this when signing an OTA to recover an otherwise inaccessible device.
-
-This is currently not implemented.
-
 ## Custom initialization scripts
 
 While ADB root allows to perform occasional tasks as root, it would be nice to be able to specify arbitrary scripts and code to run at boot and potentially stay running all the time.
@@ -228,31 +264,13 @@ This would allow, for instance, to use the MicroG UnifiedNLP network provider.
 
 This is currently not implemented.
 
-## Location.isMock neutering
-
-Android developers graciously included a freedom-respecting feature that allows you to instruct the OS to respond to location queries by asking an application of your choice that can respond arbitrarily rather than using the GPS receiver.
-
-Unfortunately, they also included an antifeature, consisting in the "Location.isMock()" privacy-devastating interface, that disastrously leaks to applications information about whether you confidentially provided such an instruction the OS.
-
-It would be nice to remedy the situation by always returning true to such impudent function calls.
-
-This is currently not implemented.
-
-## Screenshot disable ignoring
-
-Android OS contains an antifeature that allows applications to disable taking a screenshot of your own device's screen when it happens to display graphical content provided by that application.
-
-Obviously  such an absurd request should be completely disregarded.
-
-This is currently not implemented.
-
 ## Screenshot detection prevention
 
 Android OS stores screenshots as normal media, allowing application with the media permission to detect that a screenshot has been taken.
 
 Obviously such a privacy hole should be plugged, by not treating screenshots as media unless/until the user shares them with an app.
 
-This is currently not implemented.
+This is currently not implemented, although --always-screenshot stops the OS from telling apps that registered to be told about screenshots, as described above.
 
 ## SafetyNet bypass (not yet without Magisk)
 
