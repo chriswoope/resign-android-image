@@ -1909,7 +1909,7 @@ function make_certs {
 }
 
 function make_product_security {
-	while read h c k; do echo "$c"|xxd -p -r|openssl x509 -in /dev/stdin -inform DER -outform PEM > $1/$k.x509.pem; done < "$outdir"/certs.txt
+	while read h c k; do echo "$c"|xxd -p -r|openssl x509 -in /dev/stdin -inform DER -outform PEM > "$1/$k.x509.pem"; done < "$outdir"/certs.txt
 }
 
 
