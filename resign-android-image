@@ -80,6 +80,14 @@ threads=
 dex2oat=1
 otatools_only=
 
+# check that the option $1 is followed by its value
+function check_option_value {
+	if test "$#" -lt 2; then
+		echo "$1 must be followed by a value" >&2
+		exit 1
+	fi
+}
+
 while test "$#" != 0; do
 	if test "$1" == "-v"; then
 		setx="-x"
@@ -97,9 +105,11 @@ while test "$#" != 0; do
 	elif test "$1" == "--no-unshare"; then
 		unshare=
 	elif test "$1" == "--download-cache"; then
+		check_option_value "$@"
 		download_cache="$2"
 		shift
 	elif test "$1" == "--threads"; then
+		check_option_value "$@"
 		threads="$2"
 		shift
 	elif test "$1" == "--no-dex2oat"; then
@@ -112,9 +122,11 @@ while test "$#" != 0; do
 
 # functionality modifications
 	elif test "$1" == "--update-url"; then
+		check_option_value "$@"
 		update_url="$2"
 		shift
 	elif test "$1" == "--version"; then
+		check_option_value "$@"
 		version="$2"
 		shift
 	elif test "$1" == "--adb-root"; then
@@ -122,6 +134,7 @@ while test "$#" != 0; do
 	elif test "$1" == "--recovery-adb-root"; then
 		recovery_adb_root=1
 	elif test "$1" == "--adb-key"; then
+		check_option_value "$@"
 		adb_keys+=("$2")
 		shift 1
 	elif test "$1" == "--adb-at-boot"; then
@@ -144,9 +157,11 @@ while test "$#" != 0; do
 	elif test "$1" == "--record-anything"; then
 		record_anything=1
 	elif test "$1" == "--replace-boot"; then
+		check_option_value "$@"
 		replace_boot="$2"
 		shift 1
 	elif test "$1" == "--replace-boot-allow-change"; then
+		check_option_value "$@"
 		# Space-separated literal paths, without shell glob expansion.
 		IFS=' ' read -r -d '' -a paths < <(printf '%s\0' "$2")
 		replace_boot_allow_change+=("${paths[@]}")
@@ -154,6 +169,7 @@ while test "$#" != 0; do
 	elif test "$1" == "--replace-boot-allow-new-files"; then
 		replace_boot_allow_new_files=1
 	elif test "$1" == "--hosts-url"; then
+		check_option_value "$@"
 		hosts_url="$2"
 		shift 1
 	elif test "$1" == "--adaway"; then
@@ -180,11 +196,13 @@ while test "$#" != 0; do
 		build_method=rebuild
 		echo "--rebuild is incomplete and broken" >&2
 	elif test "$1" == "--zip-opt"; then
+		check_option_value "$@"
 		zip_opt="-$2"
 		shift 1
 	elif test "$1" == "--generate-keys"; then
 		generate_keys=1
 	elif test "$1" == "--sign-factory-images"; then
+		check_option_value "$@"
 		sign_factory_images="$2"
 		shift
 	elif test "$1" == "--dev-fast-sign"; then
