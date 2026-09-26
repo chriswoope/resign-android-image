@@ -110,6 +110,10 @@ from ota_protobuf import all_bytes, encode_bytes, fields, last_bytes
 # the partitions whose images are built from a directory of the target files with the same name in
 # upper case and are mounted at the directory of their own name, with the system one holding the root
 PARTITIONS = ("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm", "system_dlkm")
+# the partition in which the build installs the files of each other partition, in a directory named after it,
+# when the device doesn't have that partition (TARGET_COPY_OUT_* in build/make/core/board_config.mk)
+PARENT_PARTITIONS = {"system_ext": "system", "product": "system", "vendor": "system", "system_dlkm": "system",
+                     "odm": "vendor", "vendor_dlkm": "vendor", "odm_dlkm": "vendor"}
 
 # where the file_contexts of each part of the SELinux policy is in the target files, with the path it
 # has in a device that doesn't have a partition for it, in the order the build concatenates them in
@@ -1185,12 +1189,13 @@ def fsverity(data):
 def target_files_path(target_files, location):
     """The path in the target files directory target_files of the file at location on the device,
     outside of an APEX, which can be relative to the root."""
-    location = location.strip("/")
-    partition, _, rest = location.partition("/")
-    if partition in PARTITIONS and os.path.isdir(os.path.join(target_files, partition.upper())):
-        return os.path.join(target_files, partition.upper(), rest)
-    # a partition that the device doesn't have is a directory of the system one
-    return os.path.join(target_files, "SYSTEM", location)
+    partition, _, rest = location.strip("/").partition("/")
+    if partition not in PARTITIONS:
+        fail(f"{location} is not in the directory of a partition")
+    # a partition that the device doesn't have is a directory of the one the build installs it in
+    while partition in PARENT_PARTITIONS and not os.path.isdir(os.path.join(target_files, partition.upper())):
+        partition, rest = PARENT_PARTITIONS[partition], os.path.join(partition, rest)
+    return os.path.join(target_files, partition.upper(), rest)
 
 
 def replace_file(path, data):
