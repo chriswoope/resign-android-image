@@ -18,7 +18,8 @@ if test "$#" -lt 5; then
 	echo "Usage: $0 <work directory> <key directory> <os> <device> <build> [--ota] [--factory-image] [--factory-zip] <options>" >&2
 	exit 1
 fi
-dir="$1"
+# absolute, since it is also used from other directories, such as the one the signing runs in
+dir="$(realpath -m -- "$1")"
 key_dir="$2"
 os="$3"
 device="$4"
@@ -487,7 +488,7 @@ if test -n "$unshare"; then
 	sudo mount --bind "$dir/tmp" /var/tmp
 else
 	# only the tools that take the temporary directory from TMPDIR put their temporary files there then
-	export TMPDIR="$(realpath "$dir/tmp")"
+	export TMPDIR="$dir/tmp"
 fi
 
 # the files in the work directory are only made when missing, so files made with other options would end up
