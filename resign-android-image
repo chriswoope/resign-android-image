@@ -2127,7 +2127,9 @@ function zip_target_files {
 
 function make_target_files_intermediates_zip {
 	make_file "$outdir/target_files_intermediates.done" make_target_files_intermediates
-	discard "$outdir/target_files_extracted"
+	# along with the file marking it as made, for it to be made again if what is made from it is discarded as
+	# well and needed again, as the target files are after the signing
+	discard "$outdir/target_files_extracted" "$outdir/target_files_extracted.done"
 
 	zip_target_files "$1" "$outdir/target_files_intermediates"
 }
@@ -2135,7 +2137,7 @@ function make_target_files_intermediates_zip {
 function make_target_files_signed_zip {
 	function go {
 		make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
-		discard "$outdir/target_files_intermediates"
+		discard "$outdir/target_files_intermediates" "$outdir/target_files_intermediates.done"
 
 		if test "$build_method" == vbmeta; then
 			rm -f "$2"
@@ -2380,7 +2382,7 @@ function apply_modifications {
 function make_target_files_base {
 	if test "$build_method" == resign; then
 		make_dir "$outdir/target_files_signed" make_target_files_signed
-		discard "$outdir/target_files_signed.zip"
+		discard "$outdir/target_files_signed.zip" "$outdir/target_files_intermediates.zip"
 
 		cp -a "$outdir/target_files_signed/META" "$1/META"
 
