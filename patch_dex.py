@@ -520,16 +520,31 @@ def patch(dexdump, path, dex, edits, matched):
     if methods and not any(method.insns for method in methods):
         fail(f"no instruction of {path} could be read back from its disassembly")
 
+    # the methods by the offset of their code item, which the compiler shares between the methods that
+    # have the same code
+    code_items = {}
+    for method in methods:
+        code_items.setdefault(method.offset, []).append(method)
+
     changes = []
     written = []
     for i, (op, target, code) in enumerate(edits):
         if op == "resource-string":
             continue
-        for method in methods:
-            for start, end, match in spans(op, target, method):
-                replace(dex, method, refs[method.index], op,
+        for sharing in code_items.values():
+            # patching a code item patches every method that has it, so the edit has to match all of them,
+            # which an edit of the instructions they share always does, and is applied to it only once
+            patched = [method for method in sharing if spans(op, target, method)]
+            if not patched:
+                continue
+            if len(patched) != len(sharing):
+                fail(f"{patched[0].name} has the code of " +
+                     ", ".join(method.name for method in sharing if method not in patched) +
+                     " as well, which patching it would change too")
+            for start, end, match in spans(op, target, patched[0]):
+                replace(dex, patched[0], refs[patched[0].index], op,
                         match.expand(code) if match else code, start, end, changes, written)
-                matched[i].append((method.name, os.path.basename(path)))
+                matched[i] += [(method.name, os.path.basename(path), start) for method in patched]
 
     if changes:
         for start, end in logical:
@@ -630,14 +645,15 @@ def patch_zip(dexdump, path, edits, names):
                 # so more than one match means it now names something else as well
                 if len(where) != 1:
                     fail(f"{target} names {count(len(where), 'method')} rather than the one it is "
-                         "meant to patch: " + ", ".join(f"{name} in {dex}" for name, dex in where))
+                         "meant to patch: " + ", ".join(f"{name} in {dex}" for name, dex, _ in where))
                 print(f"patch_dex.py: patched {where[0][0]} in {where[0][1]} of {path}", file=sys.stderr)
             elif op == "resource-string":
                 print(f"patch_dex.py: replaced {count(len(where), 'occurrence')} of {target} in "
                       f"{where[0][0]} of {path}", file=sys.stderr)
             else:
-                print(f"patch_dex.py: patched {count(len(where), 'instruction run')} in "
-                      f"{count(len(set(where)), 'method')} of {path}", file=sys.stderr)
+                # a run in a code item that methods share being recorded for each of them
+                print(f"patch_dex.py: patched {count(len({(dex, start) for _, dex, start in where}), 'instruction run')} "
+                      f"in {count(len({(name, dex) for name, dex, _ in where}), 'method')} of {path}", file=sys.stderr)
 
         f.seek(0)
         f.write(data)
