@@ -1,37 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import struct
 import sys
 import zipfile
 from pathlib import Path
 
-from ota_protobuf import all_bytes, fields, last_bytes, last_int
-
-
-def payload_manifest(path):
-    def read_manifest(fp):
-        if fp.read(4) != b"CrAU":
-            raise ValueError("not an Android payload")
-        major = struct.unpack(">Q", fp.read(8))[0]
-        size = struct.unpack(">Q", fp.read(8))[0]
-        if major >= 2:
-            fp.read(4)
-        manifest = fp.read(size)
-        if len(manifest) != size:
-            raise ValueError("truncated payload manifest")
-        return manifest
-
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as ota:
-            names = [n for n in ota.namelist()
-                     if n == "payload.bin" or n.endswith("/payload.bin")]
-            if len(names) != 1:
-                raise ValueError(f"expected one payload.bin, found {len(names)}")
-            with ota.open(names[0]) as fp:
-                return read_manifest(fp)
-
-    with open(path, "rb") as fp:
-        return read_manifest(fp)
+from ota_protobuf import all_bytes, fields, last_bytes, last_int, payload_manifest
 
 
 def yes_no(value):
