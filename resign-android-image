@@ -831,18 +831,18 @@ function make_avb_pkmd {
 	"$otatools/bin/avbtool" extract_public_key --key "$2" --output "$1"
 }
 
+# the key pair generators write the private key to $1, which make_file moves into place once they are
+# done, and the public key to $2
 function gen_signify_key {
-	$signify -G -n -p "$1/key.pub" -s "$1/key.sec"
-	if ! test -s "$1/key.sec" || ! test -s "$1/key.pub"; then
-		echo "Failed to generate keys" >&2
-		exit 1
-	fi
-	mv "$1/key.sec" "$2"
-	mv "$1/key.pub" "$3"
+	# which it only writes to files named like keyname.pub and keyname.sec
+	$signify -G -n -p "$1.pub" -s "$1.sec"
+	mv -- "$1.pub" "$2"
+	mv -- "$1.sec" "$1"
 }
 
 function gen_ssh_key {
 	ssh-keygen -t ed25519 -P '' -f "$1"
+	mv -- "$1.pub" "$2"
 }
 
 function make_keys {
@@ -870,17 +870,18 @@ function make_keys {
 	make_file "$key_dir/avb_pkmd.bin" make_avb_pkmd "$key_dir/avb.pem"
 	if test "$sign_factory_images" == signify; then
 		if test -n "$generate_keys"; then
-			with_temp_dir "$key_dir/factory" gen_signify_key "$key_dir/factory.sec" "$key_dir/factory.pub"
+			make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
 		elif ! test -e "$key_dir/factory.sec"; then
 			echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
 			exit 1
-		elif ! test -e "$key_dir/factory.pub"; then
+		fi
+		if ! test -e "$key_dir/factory.pub"; then
 			echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
 			exit 1
 		fi
 	elif test "$sign_factory_images" == ssh-keygen; then
 		if test -n "$generate_keys"; then
-			make_file "$key_dir/id_ed25519" gen_ssh_key
+			make_file "$key_dir/id_ed25519" gen_ssh_key "$key_dir/id_ed25519.pub"
 		elif ! test -e "$key_dir/id_ed25519"; then
 			echo "Key $key_dir/id_ed25519 not found, use --generate-keys to generate keys automatically" >&2
 			exit 1
