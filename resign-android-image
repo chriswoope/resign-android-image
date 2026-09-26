@@ -1975,8 +1975,9 @@ function apply_modifications {
 	# the signing appends a newline to the build.prop files, so they are left with a single one for
 	# them to end with the empty line they end with in the original images
 	find "$1" \( -name build.prop -o -name prop.default \) -type f -print0|xargs -0 sed -i -z -re 's/\n*$/\n/'
-	# don't set it in the ramdisk, since it causes it to launch a root shell instead of running the recovery normally
-	# grep -vz BOOT|
+	# the properties are changed in the ramdisks as well, the prop.default of the recovery included:
+	# there ro.debuggable=1 also has the recovery start a root shell on the serial console, next to the
+	# recovery itself, and ro.adb.secure=0 has its adbd accept any host
 	prop_sed=""
 	if test "$out_build" != "$build"; then
 		# the build number appears both on its own and inside the fingerprints
