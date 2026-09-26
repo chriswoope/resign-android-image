@@ -253,6 +253,10 @@ if test "$out_build" != "$build"; then
 		echo "Version $out_build is of a day after today, $today UTC, so a device running it would refuse every release up to that day" >&2
 		exit 1
 	fi
+	# while the releases of today may not all be built yet
+	if test "${out_build:0:8}" == "$today"; then
+		echo "Warning: a device running version $out_build will refuse the releases built later today, whose build timestamps are earlier than its one, the end of the day, unless they are resigned with a higher --version" >&2
+	fi
 fi
 
 # the changes that the options ask for to the properties of every build.prop and prop.default
@@ -770,6 +774,19 @@ if ! [[ $ota_metadata =~ $post_build_re ]]; then
 	exit 1
 fi
 android_version="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+
+# a device running the build that the version is made from would refuse it if its build timestamp were earlier
+if test -n "$build_date_utc"; then
+	post_timestamp_re=$'(^|\n)post-timestamp=([0-9]+)(\n|$)'
+	if ! [[ $ota_metadata =~ $post_timestamp_re ]]; then
+		echo "There is no build timestamp in the metadata of the OTA" >&2
+		exit 1
+	fi
+	if test "$build_date_utc" -lt "${BASH_REMATCH[2]}"; then
+		echo "Version $out_build would have an earlier build timestamp than build $build, $(date -u -d "@${BASH_REMATCH[2]}"), so a device running build $build would refuse it" >&2
+		exit 1
+	fi
+fi
 
 # the host tools are taken from the newest build on the Android CI of the same Android version and quarterly
 # platform release as the build
