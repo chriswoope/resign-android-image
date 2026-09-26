@@ -1121,7 +1121,7 @@ function make_target_files_extracted {
 		mkdir -p "$outdir/target_files_extracted/IMAGES"
 		ls -1 "$dir/ota_payload"|while read i; do
 			if test "$i" == vbmeta.img; then
-				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$1/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
+				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$outdir/target_files_extracted/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
 			elif test -f "$dir/ota_payload/$i"; then
 				make_file "$outdir/target_files_extracted/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
 			fi
