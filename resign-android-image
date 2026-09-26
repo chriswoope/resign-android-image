@@ -221,12 +221,18 @@ if test "$os" != grapheneos; then
 	exit 1
 fi
 
+# check that $2, the $1, is a positive integer
+function check_positive_integer {
+	if ! [[ $2 =~ ^[1-9][0-9]*$ ]]; then
+		echo "The $1 must be a positive integer, but is $2" >&2
+		exit 1
+	fi
+}
+
 if test -z "$threads"; then
 	threads="$(nproc)"
-elif ! [[ $threads =~ ^[1-9][0-9]*$ ]]; then
-	echo "The number of threads must be a positive integer, but is $threads" >&2
-	exit 1
 fi
+check_positive_integer "number of threads" "$threads"
 
 # checked now rather than when the factory zip is signed at the end of the build
 if ! [[ $sign_factory_images == @(|signify|ssh-keygen) ]]; then
