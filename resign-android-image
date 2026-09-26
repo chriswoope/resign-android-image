@@ -5,9 +5,6 @@ set -e
 # in command substitutions as well
 shopt -s inherit_errexit
 
-# TODO: build updater with changed url
-# TODO: build backup service with changed allowbackup first API version
-
 data_dir="$(realpath -- "$(dirname -- "$0")")"
 # absolute, since the files in it that are shared by all the runs are told apart by their path
 var_dir="$HOME/.resign-android-image"
