@@ -2681,13 +2681,8 @@ function make_factory_image {
 function make_factory_unchecked {
 	local out="$1/$out_factory_name"
 	mkdir "$out"
-	shift 1
 
 	make_dir "$outdir/factory_image" make_factory_image
-	# NOTE: only OK if we make OTA first
-	if test "$#" != 0 && test "$1" == "--discard"; then
-		discard "$outdir/target_files.zip"
-	fi
 
 	if test -n "$factory_optimized"; then
 		ln "$outdir/factory_image"/* "$out"
@@ -2848,7 +2843,7 @@ if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 			make_dir "$outdir/factory" make_factory
 		fi
 		if test -n "$build_factory_zip"; then
-			make_file "$out_factory" make_factory_zip --discard
+			make_file "$out_factory" make_factory_zip
 		fi
 	fi
 fi
