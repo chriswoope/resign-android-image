@@ -440,7 +440,9 @@ if test -z "$unshared"; then
 	fi
 
 	if test -n "$unshare"; then
-		exec sudo unshare -m -- sudo -u "$USER" "$0" "$dir" "$key_dir" "$os" "$device" "$build" --unshared "${args[@]}"
+		# as the user by its ID, since $USER isn't always set, and with the PATH and HOME of the user, which sudo
+		# would reset, for it to find the same tools and ~/.resign-android-image
+		exec sudo unshare -m -- sudo -u "#$(id -u)" env PATH="$PATH" HOME="$HOME" "$0" "$dir" "$key_dir" "$os" "$device" "$build" --unshared "${args[@]}"
 	fi
 fi
 
