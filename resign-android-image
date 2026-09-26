@@ -341,16 +341,14 @@ if test "$build_method" != resign; then
 	done
 fi
 
-# set byte_length to the length of $1 in bytes, which in a locale like UTF-8 can be more than its length in characters
-function byte_length {
-	local LC_ALL=C
-	byte_length="${#1}"
-}
-byte_length "$update_url"
-update_url_length="$byte_length"
-byte_length "$orig_update_url"
-if test "$update_url_length" != "$byte_length"; then
-	echo "Currently update URL must be exactly $byte_length bytes long since we binary patch it, but is $update_url_length bytes long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen" >&2
+# the update URL is replaced byte for byte in resources that also hold its length in characters, which only
+# stay right for printable ASCII characters, all that a URL is made of anyway, which are a byte each
+if [[ $update_url == *[!\ -~]* ]]; then
+	echo "The update URL must be made of printable ASCII characters, but is $update_url" >&2
+	exit 1
+fi
+if test "${#update_url}" != "${#orig_update_url}"; then
+	echo "Currently update URL must be exactly ${#orig_update_url} characters long since we binary patch it, but is ${#update_url} characters long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen" >&2
 	exit 1
 fi
 
