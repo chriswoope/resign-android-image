@@ -1515,7 +1515,7 @@ function patch_apex {
 	# apexer signs the payload with SHA256_RSA4096 whatever the key, so pass the algorithm of the original
 	# payload, which the signing signs it again with, on to avbtool, which takes the last --algorithm it is given
 	avb_image_algorithm "$work/apex/apex_payload.img"
-	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --signing_args "--algorithm $avb_image_algorithm"--apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
+	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --signing_args "--algorithm $avb_image_algorithm" --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
 
 	cp "$work/original.apex" "$work/modded.apex"
 	modded_apex_r="$(realpath "$work/modded.apex")"
