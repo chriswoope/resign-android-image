@@ -1839,8 +1839,20 @@ PAYLOAD_MINOR_VERSION=4
 EOF
 }
 
-function make_copy {
-	cp -- "$2" "$1"
+# the boot image given with --replace-boot, which must have the kernel of the original one $2: the kernel
+# modules in the other images, which the recovery that OTAs are sideloaded with loads as well, only load
+# into the kernel they were built for
+function make_replaced_boot {
+	function go {
+		"$otatools/bin/unpack_bootimg" --boot_img "$replace_boot" --out "$1/replaced" >/dev/null
+		"$otatools/bin/unpack_bootimg" --boot_img "$2" --out "$1/original" >/dev/null
+		if ! cmp -s "$1/replaced/kernel" "$1/original/kernel"; then
+			echo "The kernel of $replace_boot is not the one of the boot image of build $build, which the kernel modules of the other images are built for" >&2
+			exit 1
+		fi
+	}
+	with_temp_dir "$1.unpacked" go "$2"
+	cp -- "$replace_boot" "$1"
 }
 
 # the public key of the payload of the virt APEX of the original images, which pvmfw has embedded to
@@ -1877,7 +1889,7 @@ function make_target_files_intermediates {
 		# unless it is built from the files of its ramdisk
 		if test -e "$dir/ota_payload/$i.img" && ! test -e "$outdir/boot_inputs/target_files/${i^^}"; then
 			if test "$i" == boot && test -n "$replace_boot"; then
-				make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_copy "$replace_boot"
+				make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_replaced_boot "$dir/ota_payload/$i.img"
 			else
 				make_file "$outdir/target_files_intermediates/PREBUILT_IMAGES/$i.img" make_hardlink "$dir/ota_payload/$i.img"
 			fi
@@ -2259,7 +2271,7 @@ function take_signed_image {
 			exit 1
 		fi
 	elif test "$2" == boot && test -n "$replace_boot"; then
-		: # it is the one given with --replace-boot
+		: # it is the one given with --replace-boot, whose kernel was checked
 	elif test "$2" == pvmfw; then
 		: # the signing replaced the key embedded in it, and checked that it found the one to replace
 	elif ! diff <(get_avb_info "$orig") <(get_avb_info "$img") >&2; then
