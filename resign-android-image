@@ -298,9 +298,22 @@ if test -n "$adb_at_boot" && test -z "$adb_keys_content$adb_any_key"; then
 	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
 fi
 
-if test -n "$adb_keys_content$adb_at_boot" && test "$build_method" != resign; then
-	echo "--adb-key, --adb-at-boot and --adb-until-unlock add files to the system image, which $build_method doesn't rebuild" >&2
-	exit 1
+# the options that change the files in the images, and the variables they set, which only resign rebuilds
+# the images with, while the other build methods would silently ignore them
+declare -A image_option_vars=([--version]=version [--adb-root]=adb_root [--recovery-adb-root]=recovery_adb_root
+	[--adb-key]=adb_keys_content [--adb-at-boot]=adb_at_boot [--adb-until-unlock]=adb_until_unlock
+	[--adb-at-boot-any-key-INSECURE]=adb_any_key [--allowbackup]=allowbackup [--adb-backup]=adb_backup
+	[--cross-profile-localhost]=cross_profile_localhost [--always-screenshot]=always_screenshot
+	[--always-screenshot-surfaceview]=always_screenshot_surfaceview [--no-location-ismock]=no_location_ismock
+	[--record-anything]=record_anything [--replace-boot]=replace_boot [--hosts-url or --adaway]=hosts_url
+	[--ro-debuggable]=ro_debuggable [--ro-secure0]=ro_secure)
+if test "$build_method" != resign; then
+	for i in "${!image_option_vars[@]}"; do
+		if test -n "${!image_option_vars[$i]}"; then
+			echo "$i changes the images, which $build_method doesn't rebuild" >&2
+			exit 1
+		fi
+	done
 fi
 
 if test "${#update_url}" != "${#orig_update_url}"; then
