@@ -49,7 +49,6 @@ adb_root=
 recovery_adb_root=
 adb_keys=()
 adb_at_boot=
-adb_until_unlock=
 adb_any_key=
 allowbackup=
 adb_backup=
@@ -127,9 +126,6 @@ while test "$#" != 0; do
 		shift 1
 	elif test "$1" == "--adb-at-boot"; then
 		adb_at_boot=1
-	elif test "$1" == "--adb-until-unlock"; then
-		adb_at_boot=1
-		adb_until_unlock=1
 	elif test "$1" == "--adb-at-boot-any-key-INSECURE"; then
 		adb_at_boot=1
 		adb_any_key=1
@@ -306,13 +302,13 @@ for i in "${adb_keys[@]}"; do
 done
 
 if test -n "$adb_at_boot" && test -z "$adb_keys_content$adb_any_key"; then
-	echo "--adb-at-boot or --adb-until-unlock without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
+	echo "--adb-at-boot without --adb-key leaves you having to authorize the host on the screen, which is impossible if the point is debugging a boot that doesn't get there; use --adb-at-boot-any-key-INSECURE to instead accept any host key with no authorization at all" >&2
 fi
 
 # the options that change the files in the images, and the variables they set, which only resign rebuilds
 # the images with, while the other build methods would silently ignore them
 declare -A image_option_vars=([--version]=version [--adb-root]=adb_root [--recovery-adb-root]=recovery_adb_root
-	[--adb-key]=adb_keys_content [--adb-at-boot]=adb_at_boot [--adb-until-unlock]=adb_until_unlock
+	[--adb-key]=adb_keys_content [--adb-at-boot]=adb_at_boot
 	[--adb-at-boot-any-key-INSECURE]=adb_any_key [--allowbackup]=allowbackup [--adb-backup]=adb_backup
 	[--cross-profile-localhost]=cross_profile_localhost [--always-screenshot]=always_screenshot
 	[--always-screenshot-surfaceview]=always_screenshot_surfaceview [--no-location-ismock]=no_location_ismock
@@ -471,7 +467,7 @@ fi
 # absolute, since the keys are also used from other directories, such as the one the signing runs in
 key_dir="$(realpath -m -- "$key_dir")"
 key_dir_path="$key_dir"
-options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_until_unlock adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest replace_boot_allow_change replace_boot_allow_new_files hosts_url magisk ro_debuggable ro_secure)"
+options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest replace_boot_allow_change replace_boot_allow_new_files hosts_url magisk ro_debuggable ro_secure)"
 if test -e "$dir/options" && test "$(< "$dir/options")" != "$options" && test -z "$reuse_changed_options"; then
 	echo "$dir was used with other options, and what was made with them would be used in place of what these ones make:" >&2
 	diff "$dir/options" <(printf '%s\n' "$options") >&2 || true
@@ -1639,17 +1635,6 @@ patch_audio_capture_policy=(method 'AudioAttributes.capturePolicyToFlags:(II)I' 
 # The Seedvault of recent builds doesn't test the flag any more, leaving nothing to patch
 patch_seedvault=(replace-if-found $'iget (v[0-9]+), v[0-9]+, Landroid/content/pm/ApplicationInfo;\\.flags:I.*\nconst(?:/[0-9a-z]+)? (v[0-9]+), .*#0*8000\nand-int/2addr \\1, \\2' 'move \1, \2')
 
-# for --adb-until-unlock, have the system server come up believing that USB ADB is enabled, so that ADB
-# keeps working once it takes the USB gadget over from init, which it otherwise immediately takes the
-# ADB function away from.
-# AdbService.systemReady() sets the field holding that belief from the persist.sys.usb.config property
-# and then writes what it decided to the adb_enabled setting, so turning ADB on the way the framework
-# expects would enable USB debugging in /data for good; assigning the field alone touches neither, so
-# ADB is on for as long as this boot lasts, which is all that debugging a boot needs, and the next boot
-# starts from whatever the settings say again. The original body also restores wireless debugging from
-# its own property, which is lost: it has to be enabled again in the settings after every boot
-patch_adb_until_unlock=(method 'AdbService.systemReady:()V' $'const/4 v0, 1\niput-boolean v0, p0, Lcom/android/server/adb/AdbService;.mIsAdbUsbEnabled:Z\nreturn-void')
-
 # apply dex patches to one of the jars in /system/framework: $1 is the target_files directory being
 # built, $2 is the name of the jar and the remaining arguments are the edits to apply to it.
 # Unlike the jars inside an APEX, these jars aren't APK-signed (their integrity comes from AVB), so they
@@ -1782,7 +1767,7 @@ function make_target_files_intermediates_base {
 		mkdir -p "$1/SYSTEM/etc/init"
 		# init parses every .rc file in /system/etc/init
 		cat > "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
-# ADB at boot, added by resign-android-image --adb-at-boot or --adb-until-unlock
+# ADB at boot, added by resign-android-image --adb-at-boot
 
 # turn ADB on as early as possible, so that a boot that hangs before the system server is up can be
 # debugged as well
@@ -1795,9 +1780,6 @@ on property:ro.persistent_properties.ready=true
     # first unlock", while the default of 2 cuts the USB data lines whenever the device is locked,
     # which includes the whole of a boot that never reaches an unlock
     setprop persist.security.usb_mode 3
-EOF
-		if test -z "$adb_until_unlock"; then
-			cat >> "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
 
 # turn USB debugging on the way a debuggable build does: init mirrors persist.sys.usb.config into
 # sys.usb.config at boot, and the system server enables USB debugging from it, so ADB stays on after
@@ -1806,23 +1788,6 @@ EOF
 on property:ro.persistent_properties.ready=true
     setprop persist.sys.usb.config adb
 EOF
-		else
-			cat >> "$1/SYSTEM/etc/init/resign-adb.rc" <<'EOF'
-
-# only the non-persistent sys.usb.config is set, so that nothing is written to /data and the
-# framework, which reads persist.sys.usb.config once at boot to decide whether USB debugging is on,
-# keeps using and showing the setting chosen in Settings: services.jar is patched so that the system
-# server keeps ADB on regardless. It is set again once the persistent properties have been read from
-# /data, since the rule that mirrors persist.sys.usb.config into sys.usb.config has just turned ADB
-# back off
-on boot
-    setprop sys.usb.config adb
-
-# the device has been unlocked, so the boot worked and the debugging access is not needed any more
-on property:sys.user.0.ce_available=true
-    stop adbd
-EOF
-		fi
 	fi
 
 	if test -n "$cross_profile_localhost"; then
@@ -1857,9 +1822,6 @@ EOF
 	fi
 	if test -n "$record_anything"; then
 		framework_jar_patches+=("${patch_audio_capture_policy[@]}")
-	fi
-	if test -n "$adb_until_unlock"; then
-		services_jar_patches+=("${patch_adb_until_unlock[@]}")
 	fi
 	if test "${#services_jar_patches[@]}" != 0; then
 		background patch_framework_jar "$1" services.jar "${services_jar_patches[@]}"
