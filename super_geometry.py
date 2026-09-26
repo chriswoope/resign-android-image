@@ -33,8 +33,6 @@ def super_geometry(tools, directory):
         if images:
             raise ValueError("factory images contain both super.img and split super images")
         images = [directory / "super.img"]
-    elif not images and (directory / "super_empty.img").exists():
-        images = [directory / "super_empty.img"]
     elif not images or {p.name for p in images} != {f"super_{i}.img" for i in range(1, len(images) + 1)}:
         raise ValueError("factory images have no complete sequence of super images")
 
@@ -78,24 +76,21 @@ def super_geometry(tools, directory):
                 raise ValueError("super metadata is missing from the sparse images")
             return bytes(data)
 
-        # Older factory zips ship a compact super_empty.img: one geometry block and one metadata
-        # header, without the reserved block or the backups of a flashable super image.
-        compact = len(sources) == 1 and not isinstance(sources[0], SparseImage) and read(0, 4) == struct.pack("<I", LP_GEOMETRY_MAGIC)
-        geometry = read(0 if compact else LP_RESERVED, LP_GEOMETRY_SIZE)
+        geometry = read(LP_RESERVED, LP_GEOMETRY_SIZE)
         magic, size = struct.unpack_from("<II", geometry)
         if magic != LP_GEOMETRY_MAGIC or size != 52:
             raise ValueError("unsupported super geometry header")
         geometry = geometry[:size]
         if hashlib.sha256(geometry[:8] + bytes(32) + geometry[40:]).digest() != geometry[8:40]:
             raise ValueError("bad super geometry checksum")
-        if not compact and read(LP_RESERVED + LP_GEOMETRY_SIZE, size) != geometry:
+        if read(LP_RESERVED + LP_GEOMETRY_SIZE, size) != geometry:
             raise ValueError("super geometry copies disagree")
         metadata_size, slots, block_size = struct.unpack_from("<III", geometry, 40)
         # build_super_image fixes these for A/B images. Reject layouts it cannot reproduce.
         if (metadata_size, slots, block_size) != (65536, 3, 4096):
             raise ValueError(f"build_super_image cannot reproduce super geometry {(metadata_size, slots, block_size)}")
 
-        offset = LP_GEOMETRY_SIZE if compact else LP_RESERVED + 2 * LP_GEOMETRY_SIZE
+        offset = LP_RESERVED + 2 * LP_GEOMETRY_SIZE
         header = read(offset, 128)
         magic, major, minor, header_size = struct.unpack_from("<IHHI", header)
         if magic != LP_HEADER_MAGIC or major != 10 or minor > 2 or header_size not in (128, 256):

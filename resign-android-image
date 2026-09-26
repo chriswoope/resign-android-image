@@ -1864,10 +1864,6 @@ EOF
 		# and the dynamic partitions as the payload has them, since the last value of an entry is the
 		# one that counts and those of the build misc_info-raven.txt comes from are not the same
 		cat "$dir/ota_payload/META/misc_info.txt" "$dir/ota_payload/META/dynamic_partitions_info.txt" >> "$1"
-		# The payload names groups and their limits, but not the physical devices containing them.
-		# Recover those from the verified factory images rather than inheriting Raven's sizes.
-		make_file "$dir/super_geometry.txt" make_super_geometry
-		cat "$dir/super_geometry.txt" >> "$1"
 		if test -e "$dir/ota_payload/init_boot.img"; then
 			echo "init_boot=true" >> "$1"
 			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
@@ -2784,9 +2780,17 @@ function extract_factory_image {
 	fi
 }
 
-function make_super_geometry {
-	extract_factory_image
-	python3 "$data_dir/super_geometry.py" "$otatools" "$dir/factory_image" > "$1"
+# build the super image $2 of the target files, extracted into the directory $1 as build_super_image extracts them
+# itself, with the geometry of the super partition of the factory images, which the target files don't have since
+# the OTA that they are made from doesn't either: only a build of the factory images downloads them
+function make_super_image {
+	unzip -q "$outdir/target_files.zip" 'IMAGES/*' 'META/*' '*/build.prop' -d "$1"
+	# on a line of its own, since the misc_info.txt that the signing writes doesn't end with a newline
+	{
+		echo
+		python3 "$data_dir/super_geometry.py" "$otatools" "$dir/factory_image"
+	} >> "$1/META/misc_info.txt"
+	"$otatools/bin/build_super_image" "$1" "$2"
 }
 
 # needs out_target_files.zip
@@ -2797,7 +2801,7 @@ function make_factory_image {
 	local super_files=()
 
 	if test -e "$dir/factory_image/super_1.img" || test -e "$dir/factory_image/super.img"; then
-		"$otatools/bin/build_super_image" "$outdir/target_files.zip" "$1/super.img"
+		with_temp_dir "$outdir/super_target_files" make_super_image "$1/super.img"
 		# which only warns when it doesn't build it because an image of a partition in it is missing
 		if ! test -e "$1/super.img"; then
 			echo "build_super_image didn't build super.img" >&2

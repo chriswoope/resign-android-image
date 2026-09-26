@@ -21,24 +21,22 @@ class SuperGeometry(unittest.TestCase):
         self.payload = self.root / "payload"
         self.payload.write_bytes(random.Random(0).randbytes(3 * 1024 * 1024))
 
-    def make_image(self, name, size=32 * 1024 * 1024, *, sparse=True, compact=False, metadata_size=65536):
+    def make_image(self, name, size=32 * 1024 * 1024, *, sparse=True, metadata_size=65536):
         directory = self.root / name
         directory.mkdir()
-        image = directory / ("super_empty.img" if compact else "super.img")
         cmd = ["lpmake", "--metadata-size", str(metadata_size), "--metadata-slots", "3",
                "--super-name", "super", "--device", f"super:{size}", "--virtual-ab",
-               "--partition", f"system_a:readonly:{self.payload.stat().st_size}:default", "--output", str(image)]
-        if not compact:
-            cmd += ["--image", f"system_a={self.payload}"]
+               "--partition", f"system_a:readonly:{self.payload.stat().st_size}:default",
+               "--image", f"system_a={self.payload}", "--output", str(directory / "super.img")]
         if sparse:
             cmd.append("--sparse")
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return directory
 
-    def test_raw_sparse_and_compact(self):
+    def test_raw_and_sparse(self):
         expected = {"super_metadata_device": "super", "super_block_devices": "super",
                     "super_partition_size": 32 * 1024 * 1024, "super_super_device_size": 32 * 1024 * 1024}
-        for name, options in [("raw", {"sparse": False}), ("sparse", {}), ("compact", {"compact": True})]:
+        for name, options in [("raw", {"sparse": False}), ("sparse", {})]:
             with self.subTest(name=name):
                 self.assertEqual(super_geometry(self.tools, self.make_image(name, **options)), expected)
 
