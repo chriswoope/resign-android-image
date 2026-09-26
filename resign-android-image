@@ -2653,6 +2653,7 @@ function make_factory_image {
 					fi
 				done < "$dir/factory_image/$i"
 			} > "$1/$i"
+			chmod --reference="$dir/factory_image/$i" -- "$1/$i"
 		elif test "$i" == flash-all.bat; then
 			{
 				local super_inserted= skip_errorlevel= skip_blank=
