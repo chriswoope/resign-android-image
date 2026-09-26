@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 
-# Binary-patch the bytecode of the dex files of a jar or an APK in place, so that nothing but the
-# patched instructions changes, rather than disassembling and reassembling everything with apktool.
+# Binary-patch the bytecode of the dex files of a jar or an APK, or the strings of its resources, in
+# place, so that nothing but the patched instructions or strings changes, rather than disassembling and
+# reassembling everything with apktool.
 #
 # Usage: patch_dex.py DEXDUMP ZIP, where DEXDUMP is the dexdump of the Android build tools to
-# disassemble with and ZIP is the jar or APK to patch. Its classes*.dex are patched where
-# they are inside it, which the runtime requires them to be stored uncompressed for anyway, so the
-# zip keeps every offset, every other entry and its size, and the only bytes of it that change are
-# those of the patched instructions and the CRC-32 of the dex files holding them. The edits to apply
-# are read from stdin as NUL-separated arguments, three per edit:
+# disassemble with and ZIP is the jar or APK to patch. Its classes*.dex and resources.arsc are patched
+# where they are inside it, which the runtime requires them to be stored uncompressed for anyway, so
+# the zip keeps every offset, every other entry and its size, and the only bytes of it that change are
+# those of the patched instructions or strings and the CRC-32 of the files holding them. The edits to
+# apply are read from stdin as NUL-separated arguments, three per edit:
 #     method NAME CODE     replace the body of every method called NAME, named as dexdump does but
 #                          with the package left out (i.e. "Class.name:signature", where any package
 #                          and any enclosing class match), with CODE
@@ -19,6 +20,10 @@
 #     replace-if-found REGEX CODE
 #                          the same, for code that only some versions have, which is reported rather
 #                          than an error if it matches nothing
+#     resource-string OLD NEW
+#                          replace every occurrence of the bytes of OLD in resources.arsc with those
+#                          of NEW, which must be as many, so that nothing in it moves; a string of the
+#                          resources is its UTF-8 bytes, in the string pools that aapt2 makes
 # CODE is instructions separated by newlines, assembled by the small assembler below; a register is
 # named vN, or pN for the N-th argument register as in smali. The new bytecode must fit in the old
 # one and the rest of the old one is filled with nops. A class, a method or a field can only be named
@@ -422,9 +427,10 @@ def replace(dex, method, refs, op, code, start, end, changes, written):
                     changes.append((offset, offset + width))
 
 
-def dexes(path, data):
+def stored_entries(path, data, pattern):
     """Return the name, the offset and the size of the data and the offsets of the two copies of the
-    CRC-32 of every dex file a zip holds uncompressed"""
+    CRC-32 of every file of a zip whose name matches pattern, failing unless each is stored
+    uncompressed with its CRC-32 in its headers, so that it can be patched where it is"""
     # a zip ends with the end of central directory record, which holds the number of files and where
     # the central directory listing them is
     end = data.rfind(b"PK\x05\x06")
@@ -446,9 +452,10 @@ def dexes(path, data):
         offset, = struct.unpack_from("<I", data, at + 42)
         raw_name = data[at + 46:at + 46 + name_length]
         name = raw_name.decode(errors="replace")
-        if re.fullmatch(r"classes[0-9]*\.dex", name):
-            # the runtime maps the dex file out of the zip rather than unpacking it, so it is always
-            # stored uncompressed and there is nothing to do if that ever stops being the case
+        if re.fullmatch(pattern, name):
+            # the runtime maps a dex file, and the resources.arsc of an app for Android 11 or later,
+            # out of the zip rather than unpacking it, so they are stored uncompressed and there is
+            # nothing to do if that ever stops being the case
             if method != 0 or stored != size:
                 fail(f"{name} is compressed in {path}, so it cannot be patched in place")
             if flags & 8:
@@ -510,6 +517,8 @@ def patch(dexdump, path, dex, edits, matched):
     changes = []
     written = []
     for i, (op, target, code) in enumerate(edits):
+        if op == "resource-string":
+            continue
         for method in methods:
             for start, end, match in spans(op, target, method):
                 replace(dex, method, refs[method.index], op,
@@ -553,10 +562,31 @@ def check_zip(path, written):
                 fail(f"{name} doesn't read back from {path} as it was patched")
 
 
+def patch_resources(path, data, edits, matched, written):
+    """Apply the resource-string edits to the resources.arsc of a zip, recording where each matched"""
+    found = stored_entries(path, data, r"resources\.arsc")
+    if len(found) != 1:
+        fail(f"{path} has {count(len(found), 'resources.arsc')} rather than one")
+    name, start, size, _ = found[0]
+    resources = bytes(data[start:start + size])
+    for i, (op, old, new) in enumerate(edits):
+        if op != "resource-string":
+            continue
+        old, new = old.encode(), new.encode()
+        if not old:
+            fail("an empty string cannot be replaced")
+        if len(new) != len(old):
+            fail(f"{new.decode()!r} is {len(new)} bytes rather than the {len(old)} of {old.decode()!r}, "
+                 "which it replaces")
+        matched[i] += [(name, os.path.basename(path))] * resources.count(old)
+        resources = resources.replace(old, new)
+    set_entry(data, found[0], resources, written)
+
+
 def patch_zip(dexdump, path, edits, names):
-    """Apply the edits to the dex files of a zip, disassembled with the dexdump at the path dexdump,
-    writing back the ones that changed where they are. Nothing is written unless every edit matched
-    something, so that a failure leaves the zip alone"""
+    """Apply the edits to the dex files and the resources of a zip, the dex files being disassembled
+    with the dexdump at the path dexdump, writing back the files that changed where they are. Nothing
+    is written unless every edit matched something, so that a failure leaves the zip alone"""
     matched = [[] for _ in edits]
     written = {}
     # the zip is patched where it is, so it has to be written to even though the file it was copied
@@ -566,22 +596,25 @@ def patch_zip(dexdump, path, edits, names):
         os.chmod(path, mode | 0o200)
     with open(path, "r+b") as f:
         data = bytearray(f.read())
-        found = dexes(path, data)
-        if not found:
-            fail(f"{path} holds no dex file to patch")
+        if any(op != "resource-string" for op, _, _ in edits):
+            found = stored_entries(path, data, r"classes[0-9]*\.dex")
+            if not found:
+                fail(f"{path} holds no dex file to patch")
 
-        # dexdump reads the dex file from a path of its own, so each one is written out to be
-        # disassembled and then patched as the bytes of the zip rather than as that file
-        with tempfile.TemporaryDirectory() as work:
-            for entry in found:
-                name, start, size, _ = entry
-                dex = bytearray(data[start:start + size])
-                dump = os.path.join(work, name)
-                with open(dump, "wb") as g:
-                    g.write(dex)
+            # dexdump reads the dex file from a path of its own, so each one is written out to be
+            # disassembled and then patched as the bytes of the zip rather than as that file
+            with tempfile.TemporaryDirectory() as work:
+                for entry in found:
+                    name, start, size, _ = entry
+                    dex = bytearray(data[start:start + size])
+                    dump = os.path.join(work, name)
+                    with open(dump, "wb") as g:
+                        g.write(dex)
 
-                if patch(dexdump, dump, dex, edits, matched):
-                    set_entry(data, entry, dex, written)
+                    if patch(dexdump, dump, dex, edits, matched):
+                        set_entry(data, entry, dex, written)
+        if any(op == "resource-string" for op, _, _ in edits):
+            patch_resources(path, data, edits, matched, written)
 
         for (op, _, _), target, where in zip(edits, names, matched):
             if not where and op == "replace-if-found":
@@ -596,6 +629,9 @@ def patch_zip(dexdump, path, edits, names):
                     fail(f"{target} names {count(len(where), 'method')} rather than the one it is "
                          "meant to patch: " + ", ".join(f"{name} in {dex}" for name, dex in where))
                 print(f"patch_dex.py: patched {where[0][0]} in {where[0][1]} of {path}", file=sys.stderr)
+            elif op == "resource-string":
+                print(f"patch_dex.py: replaced {count(len(where), 'occurrence')} of {target} in "
+                      f"{where[0][0]} of {path}", file=sys.stderr)
             else:
                 print(f"patch_dex.py: patched {count(len(where), 'instruction run')} in "
                       f"{count(len(set(where)), 'method')} of {path}", file=sys.stderr)
@@ -623,7 +659,7 @@ def main():
         if op in ("replace", "replace-if-found"):
             # anchoring to whole lines keeps a match aligned with the instructions it covers
             edits.append((op, re.compile(f"^(?:{target})$", re.MULTILINE), code))
-        elif op == "method":
+        elif op in ("method", "resource-string"):
             edits.append((op, target, code))
         else:
             fail(f"unknown edit: {op}")

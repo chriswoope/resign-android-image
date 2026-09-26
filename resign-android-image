@@ -1471,24 +1471,6 @@ function patch_apex {
 }
 
 
-function patch_apk_raw {
-	local out_zip="$1/zip.zip"
-	local files="$1/files"
-	local out="$2"
-	local in_zip="$3"
-	local cmd="$4"
-	shift 4
-
-	mkdir -p "$files"
-	unzip -x -d "$files" "$in_zip"
-	"$cmd" "$files" "$@"
-	local out_zip_r
-	out_zip_r="$(realpath "$out_zip")"
-	bsdtar -tf "$in_zip"|(cd "$files" && zip -0 -@ "$out_zip_r")
-	rm -f "$out"
-	"$otatools/bin/zipalign" -f -p 4 "$out_zip" "$out"
-}
-
 function patch_adbd {
 	# the patched bytes are written into the output, which is the input itself when adbd is patched
 	# where it is inside an APEX payload or a ramdisk, and otherwise a copy of it
@@ -1551,11 +1533,11 @@ dex_return_void='return-void'
 # expect to be able to modify it, and the immutable one only if the dex doesn't refer to ArrayList
 dex_return_empty_list=$'new-instance v0, Ljava/util/ArrayList;\ninvoke-direct {v0}, Ljava/util/ArrayList;.<init>:()V\nreturn-object v0\nor\ninvoke-static {}, Ljava/util/Collections;.emptyList:()Ljava/util/List;\nmove-result-object v0\nreturn-object v0'
 
-# patch the code in the dex files of a jar or an APK by binary-patching them where they are inside it
-# rather than disassembling and reassembling them with apktool or even taking them out of the zip and
-# putting them back, so that nothing but the patched instructions changes: $1 is the zip to write, $2 is
-# the zip to patch, which can be the same file, and the remaining arguments are the edits to apply, three
-# arguments each, as documented in patch_dex.py
+# patch the code in the dex files, or the strings of the resources, of a jar or an APK by binary-patching
+# them where they are inside it rather than disassembling and reassembling them with apktool or even taking
+# them out of the zip and putting them back, so that nothing but the patched instructions or strings
+# changes: $1 is the zip to write, $2 is the zip to patch, which can be the same file, and the remaining
+# arguments are the edits to apply, three arguments each, as documented in patch_dex.py
 function patch_dex_in_zip {
 	local out="$1"
 	local in_zip="$2"
@@ -1684,29 +1666,6 @@ function patch_service_connectivity {
 	patch_dex_in_zip "$jar" "$jar" method 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
 }
 
-# replace the update URL in the resources of the Updater, as the bytes it is, since it is the same length and
-# any character is taken as itself, failing if it isn't there
-function patch_updater {
-	python3 -c '
-import os, sys
-# the bytes of the arguments, whatever the locale, which must be as many for the rest of the file to stay where it is
-orig, new = (os.fsencode(arg) for arg in sys.argv[1:3])
-if len(new) != len(orig):
-    sys.exit(f"The update URL must be {len(orig)} bytes long, but is {len(new)}")
-found = False
-for path in sys.argv[3:]:
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            data = f.read()
-        if orig in data:
-            found = True
-            with open(path, "wb") as f:
-                f.write(data.replace(orig, new))
-if not found:
-    sys.exit(f"There is no {orig.decode()} to replace in the resources of the Updater")
-' "$orig_update_url" "$update_url" "$1/res/values/strings.xml" "$1/resources.arsc"
-}
-
 # set dex2oat_runner to the command that the dex2oat of the dexpreopt tools is to be run with, if any, having
 # checked that it works and reproduces what dexpreopt compiled in the target files directory $1. In gVisor,
 # whose platforms that take the GS register for themselves make the runtime in dex2oat abort as it starts, it
@@ -1741,7 +1700,8 @@ function make_target_files_intermediates_base {
 
 	if test "$update_url" != "$orig_update_url"; then
 		mkdir -p "$1/SYSTEM/priv-app/Updater"
-		background with_temp_dir "$outdir/patch-updater" patch_apk_raw {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Updater/Updater.apk patch_updater
+		# the URL is replaced as the bytes it is, which are as many, where the resources are in the APK
+		background patch_dex_in_zip {"$1","$outdir/target_files_extracted"}/SYSTEM/priv-app/Updater/Updater.apk resource-string "$orig_update_url" "$update_url"
 	fi
 
 	if test -n "$adb_root"; then
