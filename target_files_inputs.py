@@ -1408,40 +1408,43 @@ def fs_config(target_files, expected_dir, partitions):
             if os.path.isdir(tree):
                 os.symlink(tree, os.path.join(out, partition))
 
+        # everything is kept by partition, since a path can be in more than one: the root of the
+        # system image holds the mount points of the other partitions and symbolic links into them,
+        # such as vendor_dlkm/etc, which is also the path of the etc directory of vendor_dlkm
         files = {}
         originals = {}
         for partition, metadata in partitions:
             files[partition] = tree_files(target_files, partition)
             with open(metadata) as f:
-                originals.update((join(partition_prefix(partition), path), m) for path, m in json.load(f).items())
+                originals[partition] = {join(partition_prefix(partition), path): m for path, m in json.load(f).items()}
 
         # the metadata that a file the original image doesn't have gets by default, as the build
         # computes it, with a directory told apart by a slash
-        paths = [(path, kind) for partition in files for path, kind in sorted(files[partition].items())]
-        listing = "".join(path + "/" * (kind == "d") + "\n" for path, kind in paths)
+        paths = [(partition, path, kind) for partition in files for path, kind in sorted(files[partition].items())]
+        listing = "".join(path + "/" * (kind == "d") + "\n" for _, path, kind in paths)
         output = subprocess.run(["fs_config", "-C", "-D", os.path.join(out, "system"), "-R", ""],
                                 input=os.fsencode(listing), check=True, stdout=subprocess.PIPE).stdout
         lines = os.fsdecode(output).splitlines()
         if len(lines) != len(paths):
             fail("fs_config did not print a line for each file")
         defaults = {}
-        for (path, _), line in zip(paths, lines):
+        for (partition, path, _), line in zip(paths, lines):
             # the path goes first, and a path has no spaces
             fields = line.split(" ")[1:]
             attrs = dict(f.split("=", 1) for f in fields[3:])
-            defaults[path] = {"uid": int(fields[0]), "gid": int(fields[1]), "mode": int(fields[2], 8),
-                              "caps": int(attrs["capabilities"], 16)}
+            defaults[partition, path] = {"uid": int(fields[0]), "gid": int(fields[1]), "mode": int(fields[2], 8),
+                                         "caps": int(attrs["capabilities"], 16)}
 
         fs_configs = {}
         for partition in files:
             prefix = partition_prefix(partition)
             expected = {}
             for path, kind in files[partition].items():
-                original = originals.get(path)
+                original = originals[partition].get(path)
                 if original and original["type"] == kind:
                     m = {k: original[k] for k in ("uid", "gid", "mode", "caps", "label")}
                 else:
-                    m = defaults[path]
+                    m = defaults[partition, path]
                 expected[path] = dict(m, type=kind)
                 # e2fsdroid looks the root of every image up by an empty path, and every other file by
                 # the path it has on the device
