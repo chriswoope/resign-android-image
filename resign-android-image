@@ -377,7 +377,7 @@ if test -z "$unshared"; then
 		deb+=(python3-protobuf)
 	fi
 
-	if ! which unshare >/dev/null; then
+	if ! which unshare >/dev/null || ! which flock >/dev/null; then
 		deb+=(util-linux)
 	fi
 
@@ -733,6 +733,21 @@ function remove_bad_download
 	rm -f -- "$@"
 }
 
+# run the command that follows the download $1 while holding a lock on it, so that downloading it again, in
+# parallel in this run or in another run sharing the download cache, waits for the download in progress to be
+# done rather than appending to the same file along with it
+function with_download_lock
+{
+	local fd
+	exec {fd}>>"$1.lock"
+	if ! flock -n "$fd"; then
+		echo "Waiting for the download of $1 in progress" >&2
+		flock "$fd"
+	fi
+	"${@:2}"
+	exec {fd}>&-
+}
+
 # the Android version and quarterly platform release of the build, which is the prefix of its build ID (like CP2A
 # in CP2A.260705.006 of Android 17), from the fingerprint in the metadata of its OTA, where it was extracted or else
 # in the OTA itself, which is downloaded already for this before it is verified with the otatools chosen by it
@@ -741,7 +756,7 @@ if test -e "$ota_metadata_file"; then
 	ota_metadata="$(< "$ota_metadata_file")"
 else
 	if ! test -e "$ota_zip.ok"; then
-		curl_ota
+		with_download_lock "$ota_zip" curl_ota
 	fi
 	if ! ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"; then
 		echo "$ota_zip is not an OTA zip" >&2
@@ -1172,7 +1187,7 @@ function make_extract_ota {
 }
 
 function make_extract_ota_payload {
-	make_file "$ota_zip.ok" download_ota
+	with_download_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
 	make_dir "$dir/ota" make_extract_ota
 
 	make_dir "$dir/ota_meta" do_extract_ota_manifest "$ota_zip"
@@ -2569,7 +2584,6 @@ function make_ota {
 }
 
 function download_factory {
-	mkdir -p "$factory_zip_dir"
 	curl --fail "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
 	curl --fail "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
 	if test "$(head -n 1 "$factory_zip_dir/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
@@ -2588,6 +2602,12 @@ function download_factory {
 	touch "$1"
 }
 
+# download the factory images and verify them, unless that is done already
+function make_factory_download {
+	mkdir -p "$factory_zip_dir"
+	with_download_lock "$factory_zip_dir/$factory_name.zip" make_file "$factory_zip_ok" download_factory
+}
+
 function do_unzip_img2simg {
 	unzip -q -p "$3" "$4" > "$1"/img
 	"$otatools/bin/img2simg" "$1"/img "$2" 4096
@@ -2600,7 +2620,7 @@ function do_ln_dir {
 function extract_factory_image {
 	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory_image.list"; then
 		if ! test -e "$dir/factory" || ! test -e "$dir/factory.list"; then
-			make_file "$factory_zip_ok" download_factory
+			make_factory_download
 
 			make_dir "$dir/factory" do_unzip "$factory_zip_dir/$factory_name.zip"
 			make_file "$dir/factory.list" do_unzip_list "$factory_zip_dir/$factory_name.zip"
@@ -2885,8 +2905,9 @@ if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 	if test -n "$parallel"; then
 		# the factory images are downloaded while the target files are made, and the download is waited
 		# for rather than stopped, since killing it would leave its curl writing to the file that
-		# making the factory zip goes on to download into
-		background make_file "$factory_zip_ok" download_factory
+		# making the factory zip goes on to download into; making the target files waits for it if it needs
+		# the factory images too, for a pvmfw that is only in them
+		background make_factory_download
 		background make_file "$outdir/target_files.zip" make_target_files_zip
 		wait_background
 	else
