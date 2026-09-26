@@ -9,9 +9,10 @@ shopt -s inherit_errexit
 # TODO: build backup service with changed allowbackup first API version
 
 data_dir="$(realpath -- "$(dirname -- "$0")")"
+# absolute, since the files in it that are shared by all the runs are told apart by their path
 var_dir="$HOME/.resign-android-image"
-
 mkdir -p "$var_dir"
+var_dir="$(realpath -- "$var_dir")"
 
 dir="$1"
 key_dir="$2"
@@ -518,7 +519,8 @@ function with_temp
 					echo "Failed to produce output file: $func $tmp $@" >&2
 					exit 1
 				fi
-				mv "$tmp" "$path"
+				# which fails rather than moving the directory into one that another run made in the meantime
+				mv -T "$tmp" "$path"
 			elif test -n "$complete"; then
 				$complete "$tmp"
 			fi
@@ -533,6 +535,17 @@ function with_temp
 
 make_indent=
 function make_any
+{
+	# the files shared by all the runs are made by one run at a time, for the others to wait for it and use what
+	# it made rather than make them again at the same time
+	if ! test -e "$1" && [[ $1 == "$var_dir"/* ]]; then
+		with_lock "$1" make_any_unlocked "$@"
+	else
+		make_any_unlocked "$@"
+	fi
+}
+
+function make_any_unlocked
 {
 	local path="$1"
 	local mktemp="$2"
@@ -830,9 +843,20 @@ sys.exit(f"There is no build of Android {version} on {branch} on the Android CI:
 	download "$1" "$android_ci/submitted/$bid/$android_ci_target/latest/raw/$2"
 }
 
-otatools="$(realpath "$var_dir")/otatools-$android_version"
+# extract the otatools $2 into $1, with the tools and the jar that are replaced below moved out of the way while
+# the otatools are still where no other run can use them
+function make_otatools {
+	unzip -q -d "$1" "$2"
+	if test -e "$1/bin/aapt2"; then
+		mv "$1/bin/aapt2" "$1/bin/aapt2.otatools"
+	fi
+	mv "$1/bin/deapexer" "$1/bin/deapexer.otatools"
+	mv "$1/framework/signapk.jar" "$1/framework/signapk.jar.otatools"
+}
+
+otatools="$var_dir/otatools-$android_version"
 make_file "$otatools.zip" download_ci_artifact otatools.zip "$otatools.zip"
-make_dir "$otatools" do_unzip "$otatools.zip"
+make_dir "$otatools" make_otatools "$otatools.zip"
 # for the tests to use the same ones as the build
 ln -sfn "$otatools" "$dir/otatools"
 if test -n "$otatools_only"; then
@@ -841,7 +865,7 @@ fi
 
 # dexdump, which the dex code is disassembled with to patch it, and dex2oat and the other tools that dexpreopt
 # compiles it with
-dexpreopt_tools="$(realpath "$var_dir")/dexpreopt_tools-$android_version"
+dexpreopt_tools="$var_dir/dexpreopt_tools-$android_version"
 make_file "$dexpreopt_tools.zip" download_ci_artifact dexpreopt_tools.zip "$dexpreopt_tools.zip"
 make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 
@@ -875,9 +899,6 @@ EOF
 
 # replace aapt2 with Maven version so that it can actually parse Android 14 QPR2 apks
 # and wrap it so that it outputs sdkVersion= in addition to minSdkVersion= since sign_target_files_apks expects that
-if test -e "$otatools/bin/aapt2" && ! test -e "$otatools/bin/aapt2.otatools"; then
-	mv "$otatools/bin/aapt2" "$otatools/bin/aapt2.otatools"
-fi
 make_file "$otatools/bin/aapt2.maven" download_aapt2
 make_file "$otatools/bin/aapt2" make_aapt2_wrapper
 
@@ -915,9 +936,6 @@ EOF
 
 # wrap deapexer so that it can list the files of an erofs APEX payload, like the one of the virt APEX,
 # written again every time so that a change to the wrapper takes effect
-if ! test -e "$otatools/bin/deapexer.otatools"; then
-	mv "$otatools/bin/deapexer" "$otatools/bin/deapexer.otatools"
-fi
 with_temp "$otatools/bin/deapexer" "mktemp -u" mv make_deapexer_wrapper
 
 export PATH="$otatools/bin:$PATH"
@@ -972,9 +990,6 @@ function make_signapk_jar {
 	with_temp_dir "$1.build" go "$1"
 }
 
-if ! test -e "$otatools/framework/signapk.jar.otatools"; then
-	mv "$otatools/framework/signapk.jar" "$otatools/framework/signapk.jar.otatools"
-fi
 make_file "$otatools/framework/signapk.jar" make_signapk_jar
 
 # the Java options that sign_target_files_apks runs signapk with, which replace its default ones, the maximum
