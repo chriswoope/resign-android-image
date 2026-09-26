@@ -14,6 +14,10 @@ var_dir="$HOME/.resign-android-image"
 mkdir -p "$var_dir"
 var_dir="$(realpath -- "$var_dir")"
 
+if test "$#" -lt 5; then
+	echo "Usage: $0 <work directory> <key directory> <os> <device> <build> [--ota] [--factory-image] [--factory-zip] <options>" >&2
+	exit 1
+fi
 dir="$1"
 key_dir="$2"
 os="$3"
