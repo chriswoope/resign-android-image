@@ -2895,7 +2895,10 @@ if test "${#outputs[@]}" == 0 || test -n "$outputs_missing"; then
 		fi
 	fi
 fi
-discard "$outdir/target_files.zip"
+# With no OTA or factory output requested, the target files are the output to keep.
+if test "${#outputs[@]}" != 0; then
+	discard "$outdir/target_files.zip"
+fi
 # unless it is the factory image asked for with --factory-image
 if test -z "$build_factory"; then
 	discard "$outdir/factory"
