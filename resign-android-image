@@ -439,14 +439,20 @@ function background
 }
 
 # wait for the commands run by background, failing if any of them failed, which a wait for all of them
-# doesn't do
+# doesn't do: all of them are waited for even then, since killing one wouldn't stop the processes it
+# started, which would go on writing into the work directory after the script is done
 function wait_background
 {
-	local pid
+	local pid failed=
 	for pid in "${background_pids[@]}"; do
-		wait "$pid"
+		if ! wait "$pid"; then
+			failed=1
+		fi
 	done
 	background_pids=()
+	if test -n "$failed"; then
+		exit 1
+	fi
 }
 
 function with_temp
