@@ -1864,6 +1864,10 @@ EOF
 		# and the dynamic partitions as the payload has them, since the last value of an entry is the
 		# one that counts and those of the build misc_info-raven.txt comes from are not the same
 		cat "$dir/ota_payload/META/misc_info.txt" "$dir/ota_payload/META/dynamic_partitions_info.txt" >> "$1"
+		# The payload names groups and their limits, but not the physical devices containing them.
+		# Recover those from the verified factory images rather than inheriting Raven's sizes.
+		make_file "$dir/super_geometry.txt" make_super_geometry
+		cat "$dir/super_geometry.txt" >> "$1"
 		if test -e "$dir/ota_payload/init_boot.img"; then
 			echo "init_boot=true" >> "$1"
 			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
@@ -2768,6 +2772,11 @@ function extract_factory_image {
 			discard "$dir/factory/$factory_name/image-$device-$build.zip"
 		fi
 	fi
+}
+
+function make_super_geometry {
+	extract_factory_image
+	python3 "$data_dir/super_geometry.py" "$otatools" "$dir/factory_image" > "$1"
 }
 
 # needs out_target_files.zip

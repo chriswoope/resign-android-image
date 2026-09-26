@@ -39,6 +39,8 @@ The factory image made with --factory-zip is signed into a .sig file next to it,
 
 The upstream OTA and factory images are downloaded into the work directory and deleted once extracted, unless --keep is given; use --download-cache DIR to download them into DIR instead and keep them there, so that they are downloaded only once for any number of work directories.
 
+An OTA-only build also needs the factory images to recover the device's physical super-partition geometry, which the OTA does not contain. The geometry is checked against what the Android image builder can reproduce; unsupported layouts stop the build instead of falling back to another device's sizes.
+
 The downloaded images are verified with the signatures GrapheneOS makes for them, and the GrapheneOS repositories whose release scripts the signing uses are checked out at the tag of the build, which must be signed by GrapheneOS as well; the builds from before 2023062300, whose sources have no signed tag, are not supported.
 
 Use --threads N to sign the APKs and APEXes, and extract the images, N at a time instead of as many at a time as there are CPUs.
