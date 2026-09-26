@@ -2177,8 +2177,17 @@ function apply_modifications {
 		set_compat_change_sdk "$1" 171032338 99
 	fi
 	if test -n "$hosts_url"; then
+		# the entries mapping a host name, which can have hyphens and underscores but isn't an address, to
+		# 127.0.0.1, other than the localhost ones that the hosts file has already, from a list that may
+		# have DOS line endings; one with none is taken for not being a hosts file rather than left out
+		local hosts
+		hosts="$(curl --fail "$hosts_url"|sed -nre 's/\r$//; /^127\.0\.0\.1 \.*localhost\.*$/d; /^127\.0\.0\.1 [0-9.]*[a-zA-Z_-][0-9a-zA-Z._-]*$/p')"
+		if test -z "$hosts"; then
+			echo "$hosts_url has no host names mapped to 127.0.0.1 to add to the hosts file" >&2
+			exit 1
+		fi
 		own_file "$1/SYSTEM/etc/hosts"
-		curl --fail "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
+		printf '%s\n' "$hosts" >> "$1/SYSTEM/etc/hosts"
 	fi
 	if test -n "$sepolicy"; then
 		# init loads the precompiled policy only while the hashes stored next to it match those of the
