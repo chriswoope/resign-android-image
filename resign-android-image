@@ -510,9 +510,25 @@ fi
 printf '%s\n' "$options" > "$dir/options"
 
 # run a command in the background, for wait_background to wait for it: a function using these
-# declares background_pids as local, so that it only waits for the commands it ran itself
+# declares background_pids as local, so that it only waits for the commands it ran itself, and may
+# declare background_limit as local too, so that at most that many of them run at the same time
 function background
 {
+	local pid i status=0
+	if test -n "${background_limit:-}" && test "${#background_pids[@]}" -ge "$background_limit"; then
+		# the command takes the place of the first one to be done
+		wait -n -p pid "${background_pids[@]}" || status=$?
+		for i in "${!background_pids[@]}"; do
+			if test "${background_pids[i]}" == "$pid"; then
+				unset 'background_pids[i]'
+			fi
+		done
+		# and isn't run if that one failed: the others are waited for, as wait_background does, and it fails
+		if test "$status" != 0; then
+			wait_background
+			exit 1
+		fi
+	fi
 	"$@" &
 	background_pids+=("$!")
 }
@@ -1319,8 +1335,9 @@ function make_target_files_extracted {
 		done
 	fi
 
-	# the images are read by one process each, so they are all read at the same time
-	local background_pids=()
+	# the images are read by one process each, --threads of them at the same time, since reading them all
+	# at once, along with dumping their metadata, can take more memory than there is
+	local background_pids=() background_limit="$threads"
 	for b in $image_parts; do
 		if test "$b" != system && test -e "$dir/ota_payload/$b.img"; then
 			d="$(echo "$b"|tr a-z A-Z)"
