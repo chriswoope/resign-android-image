@@ -93,6 +93,7 @@ import os
 import re
 import shlex
 import shutil
+import ssl
 import stat
 import struct
 import subprocess
@@ -399,13 +400,15 @@ def apk_certificates(name, apk):
                         certificates.add(next(length_prefixed(next(signed_data))))
             offset += 8 + size
     if not certificates:
-        # only signed with the JAR signing of v1, whose signature is a PKCS #7 one
+        # only signed with the JAR signing of v1, whose signature is a PKCS #7 one, whose certificates
+        # openssl only prints in PEM, whatever -outform says
         with zipfile.ZipFile(io.BytesIO(apk)) as z:
             for entry in z.namelist():
                 if re.fullmatch(r"META-INF/[^/]*\.(RSA|DSA|EC)", entry):
-                    der = subprocess.run(["openssl", "pkcs7", "-inform", "DER", "-print_certs", "-outform", "DER"],
-                                         input=z.read(entry), check=True, stdout=subprocess.PIPE).stdout
-                    certificates.add(der)
+                    pem = subprocess.run(["openssl", "pkcs7", "-inform", "DER", "-print_certs"], input=z.read(entry),
+                                         check=True, stdout=subprocess.PIPE).stdout.decode()
+                    certificates.update(ssl.PEM_cert_to_DER_cert(certificate) for certificate in
+                                        re.findall(r"-----BEGIN CERTIFICATE-----\n.*?-----END CERTIFICATE-----", pem, re.S))
     if len(certificates) != 1:
         fail(f"{name} is signed with {len(certificates)} certificates rather than one")
     return certificates.pop()
