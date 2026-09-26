@@ -1558,12 +1558,24 @@ function patch_service_connectivity {
 	patch_dex_in_zip "$jar" "$jar" method 'BpfNetMaps$Dependencies.isLoopbackChecksEnabled:()Z' "$dex_return_false"
 }
 
+# replace the update URL in the resources of the Updater, as the bytes it is, since it is the same length and
+# any character is taken as itself, failing if it isn't there
 function patch_updater {
-	for i in "$1/res/values/strings.xml" "$1/resources.arsc"; do
-		if test -e "$i"; then
-			sed -i -e "s|$orig_update_url|$update_url|g" "$i"
-		fi
-	done
+	python3 -c '
+import os, sys
+orig, new = (arg.encode() for arg in sys.argv[1:3])
+found = False
+for path in sys.argv[3:]:
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        if orig in data:
+            found = True
+            with open(path, "wb") as f:
+                f.write(data.replace(orig, new))
+if not found:
+    sys.exit(f"There is no {orig.decode()} to replace in the resources of the Updater")
+' "$orig_update_url" "$update_url" "$1/res/values/strings.xml" "$1/resources.arsc"
 }
 
 # set dex2oat_runner to the command that the dex2oat of the dexpreopt tools is to be run with, if any, having
