@@ -1046,10 +1046,9 @@ function make_signapk_jsa {
 	with_temp_dir "$1.build" make_signapk_jsa_in "$1" "$2"
 }
 
-function gen_key (
-	umask 077
+function gen_key {
 	openssl genrsa -f4 4096 > "$1"
-)
+}
 
 subject='/CN=GrapheneOS/'
 function make_pem {
@@ -1082,9 +1081,12 @@ function gen_ssh_key {
 	mv -- "$1.pub" "$2"
 }
 
-function make_keys {
+# in a subshell, so that the umask only applies to the keys, which only the user can read then, whatever
+# tool writes them and however it makes the files it writes
+function make_keys (
+	umask 077
 	mkdir -p "$key_dir"
-	keys="releasekey platform shared media networkstack bluetooth"
+	local keys="releasekey platform shared media networkstack bluetooth"
 	# which are only generated all together: a key generated next to others that devices already trust, like an
 	# AVB key next to the release key, makes updates that they install and then can't boot, recovery included
 	local files=() missing=()
@@ -1153,7 +1155,7 @@ function make_keys {
 			exit 1
 		fi
 	fi
-}
+)
 make_keys
 
 out_factory_name="$device-$out_factory_word-$out_build"
