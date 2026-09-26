@@ -1393,6 +1393,13 @@ function tree_manifest {
 	)
 }
 
+# compress the APEX $2 into $3 from a copy of it in the directory $1, which is in the temporary directory, since
+# apex_compression_tool makes a hard link to its input there
+function compress_apex_in {
+	cp -a "$2" "$1/in.apex"
+	"$otatools/bin/apex_compression_tool" compress --apex_compression_tool_path "$otatools/bin:$PATH" --input "$1/in.apex" --output "$3"
+}
+
 function patch_apex {
 	local work="$1"
 	local out="$2"
@@ -1400,7 +1407,7 @@ function patch_apex {
 	local cmd="$4"
 	shift 4
 
-	local type args=() modded_apex_r aligned_tmp
+	local type args=() modded_apex_r
 	type="$(deapexer info --print-type "$apex")"
 	if test "$type" == COMPRESSED; then
 		deapexer decompress --input "$apex" --output "$work"/original.apex
@@ -1463,11 +1470,7 @@ function patch_apex {
 	fi
 
 	if test "$type" == COMPRESSED; then
-		# apex_compression_tool tries to make an hardlink from the input to /tmp, so we need to copy it to /tmp
-		aligned_tmp="$(mktemp)"
-		cp -a "$work"/aligned.apex "$aligned_tmp"
-		"$otatools/bin/apex_compression_tool" compress --apex_compression_tool_path "$otatools/bin:$PATH" --input "$aligned_tmp" --output "$work/out.apex"
-		rm -f -- "$aligned_tmp"
+		with_temp_dir "${TMPDIR:-/tmp}/compress-apex" compress_apex_in "$work/aligned.apex" "$work/out.apex"
 	else
 		ln "$work"/aligned.apex "$work/out.apex"
 	fi
