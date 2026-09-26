@@ -21,10 +21,11 @@
 #     target_files_inputs.py fs-verify IMAGE EXPECTED
 #         check that the files of the built IMAGE have exactly the metadata in the EXPECTED file
 #     target_files_inputs.py boot-inputs OUT PARTITION IMAGE [PARTITION IMAGE...]
-#         write to OUT/target_files the BOOT, INIT_BOOT and VENDOR_BOOT directories and the META files
-#         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
-#         and to OUT/misc_info.txt the misc_info.txt entries they are built with. A boot image without a
-#         ramdisk is left to be used as a prebuilt one, as it is by a normal build
+#         write to OUT/target_files the BOOT, INIT_BOOT, VENDOR_BOOT and VENDOR_KERNEL_BOOT directories and
+#         the META files that the boot images IMAGE of each PARTITION (boot, init_boot, vendor_boot or
+#         vendor_kernel_boot) are built from, and to OUT/misc_info.txt the misc_info.txt entries they are
+#         built with. A boot image without a ramdisk is left to be used as a prebuilt one, as it is by a
+#         normal build
 #     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED
 #         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
 #         files in its ramdisks of the ORIGINAL one, with the same names, metadata and contents, but for
@@ -1654,8 +1655,11 @@ def boot_inputs(out, partitions):
                 share("mkbootimg_version_args", shlex.join(
                     ["--os_version", values["--os_version"], "--os_patch_level", values["--os_patch_level"]]), image)
 
-            elif partition == "vendor_boot":
-                # what goes in a file of its own in VENDOR_BOOT, as the name of the file
+            elif partition in ("vendor_boot", "vendor_kernel_boot"):
+                # the build puts the dtb in vendor_kernel_boot rather than in vendor_boot when there is one
+                if partition == "vendor_boot" and "--dtb" in values and "vendor_kernel_boot" in dict(partitions):
+                    fail(f"{image} has a dtb, which the build only puts in vendor_kernel_boot when there is one")
+                # what goes in a file of its own in the directory of the partition, as the name of the file
                 files = {"--dtb": "dtb", "--vendor_bootconfig": "vendor_bootconfig", "--vendor_cmdline": "vendor_cmdline",
                          "--pagesize": "pagesize", "--base": "base"}
                 known = ("--header_version", "--kernel_offset", "--ramdisk_offset", "--tags_offset", "--dtb_offset",
@@ -1680,8 +1684,8 @@ def boot_inputs(out, partitions):
                                 f.write(value)
                     else:
                         args += [option, value]
-                # the build makes the ramdisk in VENDOR_BOOT/RAMDISK the first one, of the platform type
-                # and with no name, and then adds the others as fragments
+                # the build makes the ramdisk in RAMDISK the first one, of the platform type and with no
+                # name, and then adds the others as fragments
                 if not ramdisks or ramdisks[0][0] not in ([], ["--ramdisk_type", "1", "--ramdisk_name", ""]):
                     fail(f"{image} doesn't start with the unnamed platform ramdisk that the build makes first")
                 extract_ramdisk(ramdisks[0][1], os.path.join(tree, "RAMDISK"), False)
@@ -1704,13 +1708,15 @@ def boot_inputs(out, partitions):
                     with open(os.path.join(tree, "vendor_ramdisk_fragments"), "w") as f:
                         f.write(shlex.join(names))
                 share("mkbootimg header version", values["--header_version"], image)
-                misc_info.append(f"mkbootimg_args={shlex.join(args)}")
-                misc_info.append("vendor_boot=true")
+                share("mkbootimg_args", shlex.join(args), image)
+                misc_info.append(f"{partition}=true")
 
             else:
                 fail(f"{partition} is not a boot image partition")
 
-        if "mkbootimg header version" in shared and "vendor_boot" not in dict(partitions):
+        if "mkbootimg_args" in shared:
+            misc_info.append(f"mkbootimg_args={shared['mkbootimg_args'][0]}")
+        elif "mkbootimg header version" in shared:
             misc_info.append(f"mkbootimg_args={shlex.join(['--header_version', shared['mkbootimg header version'][0]])}")
         if "mkbootimg_version_args" in shared:
             misc_info.append(f"mkbootimg_version_args={shared['mkbootimg_version_args'][0]}")

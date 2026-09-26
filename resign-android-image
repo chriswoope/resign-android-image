@@ -1159,7 +1159,7 @@ out_factory_name="$device-$out_factory_word-$out_build"
 outdir="$dir/out_$build_method"
 
 # the images that the signing builds, or adds a footer to, for resign
-signed_images="$image_parts vbmeta boot init_boot vendor_boot dtbo pvmfw"
+signed_images="$image_parts vbmeta boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw"
 
 mkdir -p "$outdir"
 
@@ -1353,7 +1353,7 @@ function dump_fs_metadata {
 # misc_info.txt entries they are built with and what they are expected to be like once built
 function make_boot_inputs {
 	local args=() b
-	for b in boot init_boot vendor_boot; do
+	for b in boot init_boot vendor_boot vendor_kernel_boot; do
 		# a boot image given with --replace-boot is used as a prebuilt one
 		if test -e "$dir/ota_payload/$b.img" && ! [[ $b == boot && -n $replace_boot ]]; then
 			args+=("$b" "$dir/ota_payload/$b.img")
@@ -2042,7 +2042,7 @@ function make_replaced_boot {
 	fi
 	# whose ramdisks the kernel unpacks the one of boot over, so that a file new to it can replace one of
 	# theirs, like those of the recovery in vendor_boot, which must then be allowed to change explicitly
-	for b in vendor_boot init_boot; do
+	for b in vendor_boot vendor_kernel_boot init_boot; do
 		if test -e "$dir/ota_payload/$b.img"; then
 			extra+=(--loaded-with "$dir/ota_payload/$b.img")
 		fi
@@ -2600,7 +2600,7 @@ function check_images {
 	# the recovery boots with the ramdisks of all of them, the generic one included, and any of them
 	# could hold certificates that the others' are unpacked over
 	local boot_images=() b
-	for b in vendor_boot boot init_boot; do
+	for b in vendor_boot vendor_kernel_boot boot init_boot; do
 		if test -e "$2/$b.img"; then
 			boot_images+=("$2/$b.img")
 		fi
@@ -2666,7 +2666,7 @@ function check_ota {
 	mkdir "$1/ota_payload"
 	ota_payload_offset "$outdir/ota_unchecked.zip"
 	# which skips the partitions that the payload doesn't have
-	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions boot,init_boot,vendor_boot,system,vbmeta >&2
+	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions boot,init_boot,vendor_boot,vendor_kernel_boot,system,vbmeta >&2
 	check_images "$1" "$1/ota_payload" "$1/ota_payload/system.img"
 	# the recovery that the OTA installs verifies the signature of the next OTA to sideload, and the one of its
 	# payload, with the certificates of its otacerts.zip, so it must accept this OTA, which the next ones are
