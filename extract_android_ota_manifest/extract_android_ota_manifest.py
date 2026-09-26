@@ -1,115 +1,53 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+
+# Write to the directory OUT (the current one by default) the ab_partitions.txt and
+# postinstall_config.txt of the target files that the payload of the OTA zip, or the payload.bin, OTA
+# was made from, as its manifest has them.
+#
+# Usage: extract_android_ota_manifest.py OTA [OUT]
 
 import os
-import os.path
 import re
-import struct
 import sys
-import zipfile
 
-# from https://android.googlesource.com/platform/system/update_engine/+/refs/heads/master/scripts/update_payload/
-import update_metadata_pb2
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from ota_protobuf import all_bytes, fields, last_bytes, last_int, payload_manifest
 
-BRILLO_MAJOR_PAYLOAD_VERSION = 2
+# the fields of DeltaArchiveManifest and of PartitionUpdate in update_metadata.proto of update_engine
+MANIFEST_PARTITIONS = 13
+PARTITION_NAME = 1
+RUN_POSTINSTALL = 2
+POSTINSTALL_PATH = 3
+FILESYSTEM_TYPE = 4
+POSTINSTALL_OPTIONAL = 9
 
-class PayloadError(Exception):
-  pass
 
-class Payload(object):
-  class _PayloadHeader(object):
-    _MAGIC = b'CrAU'
+def main(ota, out):
+    partitions = [fields(partition) for partition in all_bytes(fields(payload_manifest(ota)), MANIFEST_PARTITIONS)]
+    os.makedirs(out, exist_ok=True)
 
-    def __init__(self):
-      self.version = None
-      self.manifest_len = None
-      self.metadata_signature_len = None
-      self.size = None
+    with open(os.path.join(out, "ab_partitions.txt"), "w") as f:
+        for partition in partitions:
+            print(last_bytes(partition, PARTITION_NAME).decode(), file=f)
 
-    def ReadFromPayload(self, payload_file):
-      magic = payload_file.read(4)
-      if magic != self._MAGIC:
-        raise PayloadError('Invalid payload magic: %s' % magic)
-      self.version = struct.unpack('>Q', payload_file.read(8))[0]
-      self.manifest_len = struct.unpack('>Q', payload_file.read(8))[0]
-      self.size = 20
-      self.metadata_signature_len = 0
-      if self.version != BRILLO_MAJOR_PAYLOAD_VERSION:
-        raise PayloadError('Unsupported payload version (%d)' % self.version)
-      self.size += 4
-      self.metadata_signature_len = struct.unpack('>I', payload_file.read(4))[0]
+    # what the payload runs once it is written, as the build tells it to the payload generator, in lines
+    # that only hold a value without whitespace or backslashes as it is
+    with open(os.path.join(out, "postinstall_config.txt"), "w") as f:
+        for partition in partitions:
+            if last_int(partition, RUN_POSTINSTALL):
+                name, path, filesystem = ((last_bytes(partition, number) or b"").decode()
+                                          for number in (PARTITION_NAME, POSTINSTALL_PATH, FILESYSTEM_TYPE))
+                if not (re.fullmatch(r"[a-z0-9_]+", name) and re.fullmatch(r"[^\s\\]+", path)
+                        and re.fullmatch(r"[a-z0-9]+", filesystem)):
+                    sys.exit(f"Unexpected postinstall of {name!r}: {path!r} {filesystem!r}")
+                print(f"RUN_POSTINSTALL_{name}=true", file=f)
+                print(f"POSTINSTALL_PATH_{name}={path}", file=f)
+                print(f"FILESYSTEM_TYPE_{name}={filesystem}", file=f)
+                print(f"POSTINSTALL_OPTIONAL_{name}={'true' if last_int(partition, POSTINSTALL_OPTIONAL) else 'false'}",
+                      file=f)
 
-  def __init__(self, payload_file):
-    self.payload_file = payload_file
-    self.header = None
-    self.manifest = None
-    self.data_offset = None
-    self.metadata_signature = None
-    self.metadata_size = None
 
-  def _ReadManifest(self):
-    return self.payload_file.read(self.header.manifest_len)
-
-  def _ReadMetadataSignature(self):
-    self.payload_file.seek(self.header.size + self.header.manifest_len)
-    return self.payload_file.read(self.header.metadata_signature_len);
-
-  def ReadDataBlob(self, offset, length):
-    self.payload_file.seek(self.data_offset + offset)
-    return self.payload_file.read(length)
-
-  def Init(self):
-    self.header = self._PayloadHeader()
-    self.header.ReadFromPayload(self.payload_file)
-    manifest_raw = self._ReadManifest()
-    self.manifest = update_metadata_pb2.DeltaArchiveManifest()
-    self.manifest.ParseFromString(manifest_raw)
-    metadata_signature_raw = self._ReadMetadataSignature()
-    if metadata_signature_raw:
-      self.metadata_signature = update_metadata_pb2.Signatures()
-      self.metadata_signature.ParseFromString(metadata_signature_raw)
-    self.metadata_size = self.header.size + self.header.manifest_len
-    self.data_offset = self.metadata_size + self.header.metadata_signature_len
-
-def main(filename, output_dir):
-  if filename.endswith('.zip'):
-    # only the start of the payload is read, where it is in the OTA file
-    payload_file = zipfile.ZipFile(filename).open('payload.bin')
-  else:
-    payload_file = open(filename, 'rb')
-
-  payload = Payload(payload_file)
-  payload.Init()
-
-  with open(os.path.join(output_dir, "ab_partitions.txt"), "w") as abf:
-    for p in payload.manifest.partitions:
-      print(p.partition_name, file = abf)
-
-  # what the payload runs once it is written, as the build tells it to the payload generator, in lines
-  # that only hold a value without whitespace or backslashes as it is
-  with open(os.path.join(output_dir, "postinstall_config.txt"), "w") as pf:
-    for p in payload.manifest.partitions:
-      if p.run_postinstall:
-        if not (re.fullmatch(r"[a-z0-9_]+", p.partition_name) and re.fullmatch(r"[^\s\\]+", p.postinstall_path)
-                and re.fullmatch(r"[a-z0-9]+", p.filesystem_type)):
-          raise PayloadError("Unexpected postinstall of %r: %r %r" % (p.partition_name, p.postinstall_path, p.filesystem_type))
-        print("RUN_POSTINSTALL_%s=true" % p.partition_name, file = pf)
-        print("POSTINSTALL_PATH_%s=%s" % (p.partition_name, p.postinstall_path), file = pf)
-        print("FILESYSTEM_TYPE_%s=%s" % (p.partition_name, p.filesystem_type), file = pf)
-        print("POSTINSTALL_OPTIONAL_%s=%s" % (p.partition_name, "true" if p.postinstall_optional else "false"), file = pf)
-
-if __name__ == '__main__':
-  try:
-    filename = sys.argv[1]
-  except:
-    print('Usage: %s payload.bin' % sys.argv[0])
-    sys.exit()
-
-  try:
-    output_dir = sys.argv[2]
-  except IndexError:
-    output_dir = os.getcwd()
-
-  if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-  main(filename, output_dir)
+if __name__ == "__main__":
+    if len(sys.argv) not in (2, 3):
+        sys.exit(f"Usage: {sys.argv[0]} OTA [OUT]")
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else os.getcwd())
