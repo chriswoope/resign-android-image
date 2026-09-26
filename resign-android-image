@@ -1408,8 +1408,9 @@ function patch_adbd {
 }
 
 function patch_adbd_in_root {
-	for dir in "$@"; do
-		patch_adbd "$dir/bin/adbd" "$dir/bin/adbd"
+	local root
+	for root in "$@"; do
+		patch_adbd "$root/bin/adbd" "$root/bin/adbd"
 	done
 }
 
