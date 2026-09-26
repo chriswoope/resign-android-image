@@ -2271,6 +2271,13 @@ function make_target_files_zip {
 
 		discard "$outdir/target_files_signed"
 
+		# the bootloader boots neither the system nor the recovery unless vbmeta is signed with the AVB key
+		# and every image it verifies has the digest that it has for it
+		if ! "$otatools/bin/avbtool" verify_image --image "$outdir/target_files/IMAGES/vbmeta.img" --key "$key_dir/avb.pem" >&2; then
+			echo "The images don't verify with vbmeta and the AVB key!!!" >&2
+			exit 1
+		fi
+
 		make_file "$outdir/target_files/META/care_map.pb" make_care_map
 
 		zip_target_files "$1" "$outdir/target_files"
