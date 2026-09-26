@@ -155,9 +155,7 @@ while test "$#" != 0; do
 	elif test "$1" == "--adaway"; then
 		hosts_url=https:"//adaway.org/hosts.txt"
 	elif test "$1" == "--magisk"; then
-		magisk="$2"
-		shift 1
-		echo "Not yet implemented"
+		echo "Magisk installation support in this script has not been written yet, use the official Magisk app and --replace-boot instead to install Magisk manually" >&2
 		exit 1
 
 	elif test "$1" == "--ro-debuggable"; then
@@ -2068,13 +2066,6 @@ function make_target_files_signed_zip {
 	with_temp_dir "$outdir/sign_target_files" go "$@"
 }
 
-function install_magisk {
-	make_dir "$outdir/magisk" do_unzip "$magisk"
-
-	echo "Magisk installation support in this script has not been written yet, use the official Magisk app and --replace-boot instead to install Magisk manually" >&2
-	exit 1
-}
-
 function make_target_files_signed {
 	make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
 	make_file "$outdir/target_files_signed.zip" make_target_files_signed_zip
@@ -2243,10 +2234,6 @@ function apply_modifications {
 			echo "${hash%% *}" > "$i.own"
 			mv -f -- "$i.own" "$i"
 		done
-	fi
-
-	if test -n "$magisk"; then
-		install_magisk "$1"
 	fi
 }
 
