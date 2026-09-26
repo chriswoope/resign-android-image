@@ -57,6 +57,8 @@ The owner, group, mode, capabilities and SELinux label of every file of the file
 
 For debugging, use --keep to keep intermediate files and --keep-tmp to keep temporary files, --setx to show commands executed, --zip-opt 0 to speed up zipping during development, and --timing to show how long making each file took, including the files it needed, on the MADE lines.
 
+Use --otatools-only to only set up the otatools that the build would use, which the otatools symlink in the work directory then points to, and stop there without building anything.
+
 The files in the work directory are only made when missing, so the options that change what is made (the upstream build, the key directory, the version and every modification) are recorded in its options file, and the script refuses to run in it with other ones, since what was made with the old options would end up in the images; use another work directory, or remove what the changed options affect and pass --reuse-with-changed-options to have the new options recorded instead.
 
 Read the rest of this document and the source code of the script to find out the other options.

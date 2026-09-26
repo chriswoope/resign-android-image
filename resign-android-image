@@ -74,6 +74,7 @@ download_cache=
 timing=
 threads=
 dex2oat=1
+otatools_only=
 
 while test "$#" != 0; do
 	if test "$1" == "-v"; then
@@ -99,6 +100,8 @@ while test "$#" != 0; do
 		shift
 	elif test "$1" == "--no-dex2oat"; then
 		dex2oat=
+	elif test "$1" == "--otatools-only"; then
+		otatools_only=1
 	elif test "$1" == "--unshared"; then
 		# internal, passed to the script rerun in its own mount namespace
 		unshared=1
@@ -798,6 +801,9 @@ make_file "$otatools.zip" download_ci_artifact otatools.zip "$otatools.zip"
 make_dir "$otatools" do_unzip "$otatools.zip"
 # for the tests to use the same ones as the build
 ln -sfn "$otatools" "$dir/otatools"
+if test -n "$otatools_only"; then
+	exit 0
+fi
 
 # dexdump, which the dex code is disassembled with to patch it, and dex2oat and the other tools that dexpreopt
 # compiles it with
