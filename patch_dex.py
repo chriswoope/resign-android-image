@@ -31,7 +31,8 @@
 # instead of silently producing an unpatched or over-patched image if Android renames, moves or
 # duplicates the code being patched. What was patched is reported, and the patched dex file is checked
 # to differ from the original one only where an edit meant to write, and to disassemble there as the
-# instructions it was meant to hold.
+# instructions it was meant to hold. Once written, the zip is read back to check that the CRC-32 of
+# every file in it is right and that the patched files are as they were meant to be.
 
 import bisect
 import hashlib
@@ -41,6 +42,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
 import zlib
 
 # the instructions the assembler knows, as opcode and instruction format, see
@@ -442,7 +444,8 @@ def dexes(path, data):
         flags, method = struct.unpack_from("<HH", data, at + 8)
         stored, size, name_length, extra_length, comment_length = struct.unpack_from("<IIHHH", data, at + 20)
         offset, = struct.unpack_from("<I", data, at + 42)
-        name = data[at + 46:at + 46 + name_length].decode(errors="replace")
+        raw_name = data[at + 46:at + 46 + name_length]
+        name = raw_name.decode(errors="replace")
         if re.fullmatch(r"classes[0-9]*\.dex", name):
             # the runtime maps the dex file out of the zip rather than unpacking it, so it is always
             # stored uncompressed and there is nothing to do if that ever stops being the case
@@ -454,6 +457,8 @@ def dexes(path, data):
                 fail(f"{path} has no local header for {name} at offset {offset:#x}")
             # the extra field of the local header is not the one of the central directory entry
             local_name_length, local_extra_length = struct.unpack_from("<HH", data, offset + 26)
+            if data[offset + 30:offset + 30 + local_name_length] != raw_name:
+                fail(f"the local header of {name} in {path} names another file")
             start = offset + 30 + local_name_length + local_extra_length
             out.append((name, start, size, (offset + 14, at + 16)))
         at += 46 + name_length + extra_length + comment_length
@@ -524,11 +529,36 @@ def patch(dexdump, path, dex, edits, matched):
     return bool(changes)
 
 
+def set_entry(data, entry, contents, written):
+    """Put the new contents of a file of a zip, which are as long as the old ones, in its place, with
+    their CRC-32 in both of its headers, and record them in written"""
+    name, start, size, crcs = entry
+    if len(contents) != size:
+        fail(f"{name} is {len(contents)} bytes after patching instead of {size}")
+    data[start:start + size] = contents
+    for crc in crcs:
+        struct.pack_into("<I", data, crc, zlib.crc32(contents))
+    written[name] = bytes(contents)
+
+
+def check_zip(path, written):
+    """Fail unless the zip at path, as written, has the right CRC-32 for every file in it and holds
+    the patched files as they were meant to be"""
+    with zipfile.ZipFile(path) as z:
+        bad = z.testzip()
+        if bad is not None:
+            fail(f"{bad} has a wrong CRC-32 in {path} after patching")
+        for name, contents in written.items():
+            if z.read(name) != contents:
+                fail(f"{name} doesn't read back from {path} as it was patched")
+
+
 def patch_zip(dexdump, path, edits, names):
     """Apply the edits to the dex files of a zip, disassembled with the dexdump at the path dexdump,
     writing back the ones that changed where they are. Nothing is written unless every edit matched
     something, so that a failure leaves the zip alone"""
     matched = [[] for _ in edits]
+    written = {}
     # the zip is patched where it is, so it has to be written to even though the file it was copied
     # from can be read-only, as the files of an APEX payload are
     mode = os.stat(path).st_mode
@@ -543,17 +573,15 @@ def patch_zip(dexdump, path, edits, names):
         # dexdump reads the dex file from a path of its own, so each one is written out to be
         # disassembled and then patched as the bytes of the zip rather than as that file
         with tempfile.TemporaryDirectory() as work:
-            for name, start, size, crcs in found:
+            for entry in found:
+                name, start, size, _ = entry
                 dex = bytearray(data[start:start + size])
                 dump = os.path.join(work, name)
                 with open(dump, "wb") as g:
                     g.write(dex)
 
-                if not patch(dexdump, dump, dex, edits, matched):
-                    continue
-                data[start:start + size] = dex
-                for crc in crcs:
-                    struct.pack_into("<I", data, crc, zlib.crc32(dex))
+                if patch(dexdump, dump, dex, edits, matched):
+                    set_entry(data, entry, dex, written)
 
         for (op, _, _), target, where in zip(edits, names, matched):
             if not where and op == "replace-if-found":
@@ -577,6 +605,7 @@ def patch_zip(dexdump, path, edits, names):
 
     if not mode & 0o200:
         os.chmod(path, mode)
+    check_zip(path, written)
 
 
 def main():
