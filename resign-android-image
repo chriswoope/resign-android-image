@@ -1778,7 +1778,10 @@ on property:ro.persistent_properties.ready=true
     # the USB-C port setting of GrapheneOS, set once the persistent properties have been read from
     # /data since they would override it otherwise: 3 is "charging-only when locked, except before
     # first unlock", while the default of 2 cuts the USB data lines whenever the device is locked,
-    # which includes the whole of a boot that never reaches an unlock
+    # which includes the whole of a boot that never reaches an unlock. This is meant to override the
+    # setting chosen in Settings at every boot, and to be written to /data like any change of it,
+    # where it stays after going back to a build without --adb-at-boot: a boot that can't be debugged
+    # because of a setting chosen since is what --adb-at-boot is there to rule out
     setprop persist.security.usb_mode 3
 
 # turn USB debugging on the way a debuggable build does: init mirrors persist.sys.usb.config into
