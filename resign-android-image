@@ -892,9 +892,10 @@ function download_aapt2 {
 function make_aapt2_wrapper {
 	cat - > "$1" <<"EOF"
 #!/bin/bash
+set -euo pipefail
 aapt2="$(dirname "$0")/aapt2.maven"
-if test "$1" == dump && test "$2" == badging; then
-	exec "$aapt2" "$@"|sed -re 's/^minS(dkVersion:.*)/s\1\nminS\1/'
+if [[ $# -ge 2 && $1 == dump && $2 == badging ]]; then
+	"$aapt2" "$@"|sed -re 's/^minS(dkVersion:.*)/s\1\nminS\1/'
 else
 	exec "$aapt2" "$@"
 fi
@@ -903,9 +904,10 @@ EOF
 }
 
 # replace aapt2 with Maven version so that it can actually parse Android 14 QPR2 apks
-# and wrap it so that it outputs sdkVersion= in addition to minSdkVersion= since sign_target_files_apks expects that
+# and wrap it so that it outputs sdkVersion= in addition to minSdkVersion= since sign_target_files_apks expects that,
+# written again every time so that a change to the wrapper takes effect
 make_file "$otatools/bin/aapt2.maven" download_aapt2
-make_file "$otatools/bin/aapt2" make_aapt2_wrapper
+with_temp "$otatools/bin/aapt2" "mktemp -u" mv make_aapt2_wrapper
 
 function make_deapexer_wrapper {
 	cat - > "$1" <<"EOF"
