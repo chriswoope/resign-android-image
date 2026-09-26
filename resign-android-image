@@ -754,6 +754,12 @@ if test "$os" == grapheneos; then
 	avb_algorithm=SHA256_RSA4096
 fi
 
+# checked before the OTA is downloaded, which would otherwise fail to verify, and be removed, only once downloaded
+if ! test -e "$ota_cert"; then
+	echo "There is no certificate of the OTAs of $device at $ota_cert to verify its OTA with: download-otacerts can add it" >&2
+	exit 1
+fi
+
 # the OTA and the factory images are downloaded into the work directory and discarded once extracted,
 # unless there is a cache to keep them in, so that they are downloaded and verified only once for any
 # number of work directories; the verified ones are marked by a file next to them, named after them with .ok
