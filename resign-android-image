@@ -2123,9 +2123,26 @@ function make_target_files_intermediates {
 function zip_target_files {
 	local zip="$(realpath "$1")"
 	rm -f "$zip"
-	# the list of the files is read as a response file, in which a single quoted name can hold any
-	# character
-	(cd "$2" && find . -mindepth 1 -printf '%P\0'|sed -z "s/'/'\\\\''/g; s/^/'/; s/\$/'/"|tr '\0' '\n'|"$otatools/bin/soong_zip" -d -L 0 -o "$zip" -C . -r /dev/stdin)
+	(
+		cd "$2"
+		# the list of the files is read as a response file, in which a single quoted name can hold any
+		# character, but for the images: soong_zip reads every file it stores into memory whole, which takes
+		# a few times the size of one as big as system.img, more than a small machine has
+		find . -mindepth 1 ! \( -path './IMAGES/*' -type f \) -printf '%P\0'|sed -z "s/'/'\\\\''/g; s/^/'/; s/\$/'/"|tr '\0' '\n'|"$otatools/bin/soong_zip" -d -L 0 -o "$zip" -C . -r /dev/stdin
+		# so they are added by zipfile, which copies them a block at a time, with the time soong_zip gives its
+		# files and the mode it gives them, 755 for an executable file and 644 for any other
+		find . -path './IMAGES/*' -type f -printf '%P\0'|python3 -c '
+import os, shutil, stat, sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "a") as z:
+    date_time = z.infolist()[0].date_time
+    for name in sys.stdin.buffer.read().split(b"\0")[:-1]:
+        info = zipfile.ZipInfo.from_file(name, os.fsdecode(name))
+        info.date_time = date_time
+        info.external_attr = (stat.S_IFREG | (0o755 if info.external_attr >> 16 & stat.S_IXUSR else 0o644)) << 16
+        with open(name, "rb") as src, z.open(info, "w") as dest:
+            shutil.copyfileobj(src, dest)
+' "$zip"
+	)
 }
 
 function make_target_files_intermediates_zip {
