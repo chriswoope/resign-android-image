@@ -31,6 +31,9 @@
 #         the contents of the files at the paths in the ramdisk, NUL separated, read from the standard
 #         input, which may have changed. --allow-additions also allows new paths listed in CHANGED;
 #         --allow-new-files allows any new paths. Existing paths must retain their metadata and order.
+#     target_files_inputs.py recovery-cert-check CERTIFICATE
+#         check that the OTA certificate uses RSA parameters and a signature algorithm accepted by
+#         recovery's certificate loader and the RSA-only host OTA signature verifier
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
@@ -1704,6 +1707,25 @@ def boot_inputs(out, partitions):
         f.writelines(line + "\n" for line in misc_info)
 
 
+def recovery_cert_check(certificate):
+    # Mirror bootable/recovery/otautil/verifier.cpp's certificate restrictions. OpenSSL's signature
+    # verification alone accepts keys that recovery refuses to load. The host OTA verifier only
+    # supports RSA, even though recovery also supports P-256 EC keys.
+    dump = subprocess.run(["openssl", "x509", "-in", certificate, "-text", "-noout"], check=True,
+                          stdout=subprocess.PIPE, text=True).stdout
+    algorithms = re.findall(r"^\s*Signature Algorithm: (\S+)\s*$", dump, re.M)
+    allowed = {"md5WithRSA", "md5WithRSAEncryption", "sha1WithRSAEncryption", "sha256WithRSAEncryption"}
+    if not algorithms or any(algorithm not in allowed for algorithm in algorithms):
+        fail(f"{certificate}: recovery does not support this certificate signature algorithm: {algorithms}")
+    key_type = re.search(r"^\s*Public Key Algorithm: (\S+)\s*$", dump, re.M)
+    bits = re.search(r"^\s*Public-Key: \((\d+) bit\)\s*$", dump, re.M)
+    exponent = re.search(r"^\s*Exponent: (\d+) ", dump, re.M)
+    if (not key_type or key_type[1] != "rsaEncryption" or not bits or int(bits[1]) not in (2048, 4096)
+            or not exponent or int(exponent[1]) not in (3, 65537)):
+        fail(f"{certificate}: OTA signing requires a recovery-compatible RSA key: "
+             "2048 or 4096 bits, with public exponent 3 or 65537")
+
+
 def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False):
     with tempfile.TemporaryDirectory() as tmp:
         actual = describe_boot_image(image, os.path.join(tmp, "image"), changed)
@@ -1760,6 +1782,8 @@ def main():
             option in ("--allow-additions", "--allow-new-files") for option in args[3:]):
         boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path),
                     allow_additions="--allow-additions" in args[3:], allow_new_files="--allow-new-files" in args[3:])
+    elif len(args) == 2 and args[0] == "recovery-cert-check":
+        recovery_cert_check(args[1])
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
     elif len(args) == 4 and args[0] == "apk-keys":
@@ -1779,7 +1803,7 @@ def main():
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
-             "apex-verify ORIGINAL SIGNED")
+             "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE")
 
 
 if __name__ == "__main__":

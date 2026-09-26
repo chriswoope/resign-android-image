@@ -96,6 +96,8 @@ On the other hand, if you can update the device with an OTA, you can just sign a
 
 The main way that it could happen is if the OTA boots successfully (so the OS doesn't revert to the previous boot slot), but both the recovery and system updater don't work or have the wrong keys. To try to avoid this situation, this script will re-extract generated OTAs and factory images to make sure that the keys in otacerts.zip are correct, and check that the recovery in the OTA accepts the signatures of the OTA and of its payload, as it has to for the next OTA to be sideloaded. Having root enabled can provide an extra way of applying updates in this case. You may also be able to open the device and reprogram the UFS flash if you really need to.
 
+The OTA release certificate is checked against recovery's supported algorithms and RSA parameters before signing: RSA-2048 or RSA-4096 with exponent 3 or 65537, and a certificate signature algorithm accepted by recovery. This prevents supplied keys that pass host signature verification but cannot be loaded by recovery. Automatically generated keys already meet these requirements.
+
 ## Key loss
 
 If you lose your private keys, then of course it will be impossible to update the device since the bootloader is locked. Again, having root enabled will allow you to copy everything in /data and restore with no data loss at all (except for things protected with Keymaster keys, where you need to manually decrypt them until key escrow is implemented). Note that an hardware-based solution for this situation requires cracking the Titan M/M2 chip in addition to being able to reprogram the UFS flash.

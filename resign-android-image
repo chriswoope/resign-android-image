@@ -953,6 +953,8 @@ function make_keys {
 			exit 1
 		fi
 	done
+	# A matching key pair is not enough: recovery rejects unsupported certificate/key parameters.
+	python3 "$data_dir/target_files_inputs.py" recovery-cert-check "$key_dir/releasekey.x509.pem"
 	if test -n "$generate_keys"; then
 		make_file "$key_dir/avb.pem" gen_avb_pem
 	elif ! test -e "$key_dir/avb.pem"; then

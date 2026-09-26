@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from target_files_inputs import boot_verify
+from target_files_inputs import boot_verify, recovery_cert_check
 
 
 class BootVerification(unittest.TestCase):
@@ -74,6 +74,29 @@ class BootVerification(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(SystemExit):
                 boot_verify(self.make_image(name, files, **options), self.original, {b"init", b"other"},
                             allow_additions=True, allow_new_files=True)
+
+
+class RecoveryCertificate(unittest.TestCase):
+    def test_supported_and_unsupported_certificates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bits, exponent, supported in [(2048, 65537, True), (4096, 3, True),
+                                               (2048, 17, False), (3072, 65537, False)]:
+                key = root / f"{bits}-{exponent}.pem"
+                subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", f"rsa_keygen_bits:{bits}",
+                                "-pkeyopt", f"rsa_keygen_pubexp:{exponent}", "-out", str(key)],
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for digest in ("sha256", "sha384"):
+                    cert = root / "cert.pem"
+                    subprocess.run(["openssl", "req", "-new", "-x509", f"-{digest}", "-key", str(key),
+                                    "-out", str(cert), "-subj", "/CN=recovery-test/"],
+                                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    with self.subTest(bits=bits, exponent=exponent, digest=digest):
+                        if supported and digest == "sha256":
+                            recovery_cert_check(str(cert))
+                        else:
+                            with self.assertRaises(SystemExit):
+                                recovery_cert_check(str(cert))
 
 
 if __name__ == "__main__":
