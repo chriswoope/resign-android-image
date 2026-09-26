@@ -2733,24 +2733,21 @@ out_factory="$outdir/out/$out_factory_name.zip"
 if ! test -e "$out_ota" || ! test -e "$out_factory"; then
 	mkdir -p "$outdir/out"
 	if test -n "$parallel"; then
-		make_file "$factory_zip_ok" download_factory &
+		# the factory images are downloaded while the target files are made, and the download is waited
+		# for rather than stopped, since killing it would leave its curl writing to the file that
+		# making the factory zip goes on to download into
+		background make_file "$factory_zip_ok" download_factory
+		background make_file "$outdir/target_files.zip" make_target_files_zip
+		wait_background
+	else
+		make_file "$outdir/target_files.zip" make_target_files_zip
 	fi
-
-	make_file "$outdir/target_files.zip" make_target_files_zip
 	discard "$outdir/target_files" "$outdir/target_files_signed.zip"
 
 	if test -n "$parallel"; then
-		# kill the download, we'll just resume it in parallel with making the OTA image
-		kill %1
-		wait
-
-		make_file "$out_ota" make_ota &
-		make_file "$out_factory" make_factory_zip &
-		wait
-		if ! test -e "$out_ota" || ! test -e "$out_factory"; then
-			echo "Parallel build failed" >&2
-			exit 1
-		fi
+		background make_file "$out_ota" make_ota
+		background make_file "$out_factory" make_factory_zip
+		wait_background
 		discard "$dir/ota_payload"
 	else
 		if test -n "$build_ota"; then
