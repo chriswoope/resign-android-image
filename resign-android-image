@@ -31,8 +31,6 @@ args=("$@")
 # resign: resign apks and rebuild the images from their files as a normal build does
 # rebuild: rebuild images
 
-image_parts="system vendor product system_ext odm vendor_dlkm odm_dlkm system_dlkm"
-
 build_factory=
 build_factory_zip=
 factory_optimized=
@@ -1205,6 +1203,8 @@ make_keys
 out_factory_name="$device-$out_factory_word-$out_build"
 outdir="$dir/out_$build_method"
 
+# the partitions whose filesystem images are made of their files
+image_parts="$(python3 "$data_dir/target_files_inputs.py" partitions)"
 # the images that the signing builds, or adds a footer to, for resign
 signed_images="$image_parts vbmeta boot init_boot vendor_boot vendor_kernel_boot dtbo pvmfw"
 

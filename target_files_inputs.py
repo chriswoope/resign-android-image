@@ -8,6 +8,9 @@
 # dropped if it is.
 #
 # Usage:
+#     target_files_inputs.py partitions
+#         print the names of the partitions whose filesystem images are built from the files of the
+#         target files, space separated
 #     target_files_inputs.py fs-dump IMAGE
 #         print the metadata of every file of the ext4 IMAGE as JSON, read from the image itself so
 #         that nothing needs to be mounted
@@ -117,8 +120,9 @@ import zipfile
 from ota_protobuf import all_bytes, encode_bytes, fields, last_bytes
 
 # the partitions whose images are built from a directory of the target files with the same name in
-# upper case and are mounted at the directory of their own name, with the system one holding the root
-PARTITIONS = ("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm", "system_dlkm")
+# upper case and are mounted at the directory of their own name, with the system one holding the root,
+# which are those of PARTITIONS_WITH_CARE_MAP in releasetools/common.py
+PARTITIONS =("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm", "odm_dlkm", "system_dlkm")
 # the partition in which the build installs the files of each other partition, in a directory named after it,
 # when the device doesn't have that partition (TARGET_COPY_OUT_* in build/make/core/board_config.mk)
 PARENT_PARTITIONS = {"system_ext": "system", "product": "system", "vendor": "system", "system_dlkm": "system",
@@ -2040,7 +2044,9 @@ def boot_verify_options(args):
 
 def main():
     args = sys.argv[1:]
-    if len(args) == 2 and args[0] == "fs-dump":
+    if args == ["partitions"]:
+        print(" ".join(PARTITIONS))
+    elif len(args) == 2 and args[0] == "fs-dump":
         fs_dump(args[1])
     elif len(args) == 3 and args[0] == "fs-extracted-verify":
         fs_extracted_verify(args[1], args[2])
@@ -2081,7 +2087,7 @@ def main():
     elif len(args) == 2 and args[0] == "fsverity-update":
         fsverity_update(args[1])
     else:
-        fail("usage: fs-dump IMAGE | fs-extracted-verify IMAGE DIRECTORY | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
+        fail("usage: partitions | fs-dump IMAGE |fs-extracted-verify IMAGE DIRECTORY | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED | avb-args PARTITION IMAGE | "
              "lz4-ramdisks [IMAGE...] | ext4-share-dup-blocks IMAGE... | "
              "apk-keys TARGET_FILES CERTS META | shared-user-certificate TARGET_FILES SHARED_USER_ID | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
