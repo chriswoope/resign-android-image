@@ -619,21 +619,26 @@ function do_unzip_list
 	bsdtar -tf "$2" > "$1"
 }
 
-function do_git_clone
+function do_git_init
 {
-	local out="$1"
-	shift
-	git clone "$@" "$out"
+	git init -q --bare "$1"
 }
 
-function git_clone_ref
+# fetch the ref $3 of the repository at the URL $2 into the repository $4, as refs/fetched/$3, and put its files
+# into $1, all while holding the lock on the repository, since another run can move the ref of a branch
+function git_fetch_checkout
 {
-	local dir="$1"
-	local ref="$2"
-	shift 2
-	make_dir "$dir" do_git_clone --branch "$ref" "$@"
-	# a tag is checked out detached, with no branch to pull into
-	( cd "$dir" && git fetch --tags --force && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi )
+	git -C "$4" fetch -q --no-tags --force "$2" "+$3:refs/fetched/$3"
+	git -C "$4" archive "refs/fetched/$3"|tar -x -C "$1"
+}
+
+# put into $1 the files of the ref $3 of the repository at the URL $2, which is fetched into a repository with no
+# checkout of its own, shared by all the runs, so that runs of different builds don't check out each other's
+function do_git_checkout
+{
+	local repo="$var_dir/git-$os/${2##*/}.git"
+	make_dir "$repo" do_git_init
+	with_lock "$repo" git_fetch_checkout "$@" "$repo"
 }
 
 function download
@@ -957,11 +962,11 @@ if ! test -x "$fsckerofs"; then
 	fsckerofs="$(which fsck.erofs)"
 fi
 
-aosp="$var_dir/aosp-$os"
-mkdir -p "$aosp/build"
+aosp="$dir/aosp"
+mkdir -p "$aosp/build" "$var_dir/git-$os"
 background_pids=()
-background git_clone_ref "$aosp/script" "$git_ref" "$git/script"
-background git_clone_ref "$aosp/build/make" "$git_ref" "$git/platform_build"
+background make_dir "$aosp/script" do_git_checkout "$git/script" "$git_ref"
+background make_dir "$aosp/build/make" do_git_checkout "$git/platform_build" "$git_ref"
 wait_background
 
 for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
