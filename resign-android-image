@@ -322,8 +322,16 @@ if test "$build_method" != resign; then
 	done
 fi
 
-if test "${#update_url}" != "${#orig_update_url}"; then
-	echo Currently update URL must be exactly "${#orig_update_url}" characters long since we binary patch it, but is "${#update_url}" characters long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen
+# set byte_length to the length of $1 in bytes, which in a locale like UTF-8 can be more than its length in characters
+function byte_length {
+	local LC_ALL=C
+	byte_length="${#1}"
+}
+byte_length "$update_url"
+update_url_length="$byte_length"
+byte_length "$orig_update_url"
+if test "$update_url_length" != "$byte_length"; then
+	echo "Currently update URL must be exactly $byte_length bytes long since we binary patch it, but is $update_url_length bytes long: create a shorter CNAME on your host to shorten, or use repeated dots to lengthen" >&2
 	exit 1
 fi
 
@@ -1672,7 +1680,10 @@ function patch_service_connectivity {
 function patch_updater {
 	python3 -c '
 import os, sys
-orig, new = (arg.encode() for arg in sys.argv[1:3])
+# the bytes of the arguments, whatever the locale, which must be as many for the rest of the file to stay where it is
+orig, new = (os.fsencode(arg) for arg in sys.argv[1:3])
+if len(new) != len(orig):
+    sys.exit(f"The update URL must be {len(orig)} bytes long, but is {len(new)}")
 found = False
 for path in sys.argv[3:]:
     if os.path.exists(path):
