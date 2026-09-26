@@ -8,7 +8,7 @@ shopt -s inherit_errexit
 # TODO: build updater with changed url
 # TODO: build backup service with changed allowbackup first API version
 
-data_dir="$(realpath $(dirname "$0"))"
+data_dir="$(realpath -- "$(dirname -- "$0")")"
 var_dir="$HOME/.resign-android-image"
 
 mkdir -p "$var_dir"
