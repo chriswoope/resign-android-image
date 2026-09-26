@@ -696,7 +696,7 @@ if test -e "$ota_metadata_file"; then
 	ota_metadata="$(< "$ota_metadata_file")"
 else
 	if ! test -e "$ota_zip.ok"; then
-		curl "$ota_url.zip" -C - -o "$ota_zip"
+		curl --fail "$ota_url.zip" -C - -o "$ota_zip"
 	fi
 	ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"
 fi
@@ -762,7 +762,7 @@ make_file "$dexpreopt_tools.zip" download_ci_artifact dexpreopt_tools.zip "$dexp
 make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 
 function download_aapt2 {
-	curl -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
+	curl --fail -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
 	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1"
 	chmod +x "$1"
 }
@@ -2116,7 +2116,7 @@ function apply_modifications {
 	fi
 	if test -n "$hosts_url"; then
 		own_file "$1/SYSTEM/etc/hosts"
-		curl "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
+		curl --fail "$hosts_url"|sed -nre '/^127\.0\.0\.1 [0-9.]*[a-zA-Z][0-9a-zA-Z.]*$/p'|grep -vE '^127\.0\.0\.1 \.*localhost\.*$' >> "$1/SYSTEM/etc/hosts"
 	fi
 	if test "$(wc -l < "$sepolicy")" != 0; then
 		# init loads the precompiled policy only while the hashes stored next to it match those of the
@@ -2441,8 +2441,8 @@ function make_ota {
 
 function download_factory {
 	mkdir -p "$factory_zip_dir"
-	curl "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
-	curl "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
+	curl --fail "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
+	curl --fail "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
 	if test "$(head -n 1 "$factory_zip_dir/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
 		if ! ssh-keygen -Y verify -f "$factory_allowed_signers" -I "$factory_identity" -n "factory images" -s "$factory_zip_dir/$factory_name.zip.sig" < "$factory_zip_dir/$factory_name.zip"; then
 			echo "Failed to verify factory image signature of $factory_zip_dir/$factory_name.zip with ssh-keygen!" >&2
