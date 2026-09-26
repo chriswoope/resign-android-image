@@ -160,6 +160,8 @@ The Android upstream OS contains antifeatures called "allowbackup=false" and "`<
 
 By using --allowbackup, you can remedy the situation by making sure that the OS always ignores those decisions made against your interests. It works by making the already existing feature that only applies to apps targeting SDK >= 31 to all apps regardless of app version by patching the compat changes XML.
 
+Seedvault, the backup app of GrapheneOS, also skips the apps that set allowbackup=false on its own, so --allowbackup also binary patches Seedvault.apk to replace every test of the FLAG_ALLOW_BACKUP flag of an app with the flag itself, so that the test always passes. The Seedvault of recent builds doesn't test the flag any more, in which case there is nothing to patch and it is left unchanged.
+
 Unfortunately, the app is still allowed to exclude specific files from backup with `<data-extraction-rules><device-transfer><exclude>`, although hopefully that functionality will not be used. Currently there is no remedy for this, but root access can be used to access and modify the files freely, as it should be.
 
 Security impact: attackers who gain access to the backup system will be able to extract more data, including data that app developers consider to be especially sensitive
