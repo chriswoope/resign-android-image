@@ -2,13 +2,23 @@
 """Recovery safety regressions. Run with the otatools bin directory on PATH, as tests/run unit does."""
 
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from target_files_inputs import boot_verify, recovery_cert_check
+from target_files_inputs import boot_verify, cpio_entries, recovery_cert_check
+
+
+def cpio_record(name, contents=b"", *, ino=1, nlink=1, mode=stat.S_IFREG | 0o644):
+    name += b"\0"
+    values = (ino, mode, 0, 0, nlink, 0, len(contents), 0, 0, 0, 0, len(name), 0)
+    data = b"070701" + b"".join(f"{value:08x}".encode() for value in values) + name
+    data += bytes(-len(data) % 4)
+    data += contents
+    return data + bytes(-len(data) % 4)
 
 
 class BootVerification(unittest.TestCase):
@@ -18,7 +28,7 @@ class BootVerification(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.original = self.make_image("original", {"init": b"original init", "other": b"unchanged"})
 
-    def make_image(self, name, files, *, kernel=b"kernel", cmdline="", mode=0o644, corrupt=False):
+    def make_image(self, name, files, *, kernel=b"kernel", cmdline="", mode=0o644, corrupt=False, archive=None):
         work = self.root / name
         work.mkdir()
         tree = work / "tree"
@@ -30,8 +40,9 @@ class BootVerification(unittest.TestCase):
             target.chmod(mode)
         config = work / "fs_config"
         config.write_text(" 0 0 755\n" + "".join(f"{path} 0 0 {mode:o}\n" for path in files))
-        archive = subprocess.run(["mkbootfs", "-f", str(config), str(tree)], check=True,
-                                 stdout=subprocess.PIPE).stdout
+        if archive is None:
+            archive = subprocess.run(["mkbootfs", "-f", str(config), str(tree)], check=True,
+                                     stdout=subprocess.PIPE).stdout
         compressed = subprocess.run(["lz4", "-l", "-c"], input=archive, check=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
         (work / "ramdisk").write_bytes(b"broken ramdisk" if corrupt else compressed)
@@ -41,6 +52,38 @@ class BootVerification(unittest.TestCase):
                         "--ramdisk", str(work / "ramdisk"), "--cmdline", cmdline, "--output", str(image)],
                        check=True, stdout=subprocess.DEVNULL)
         return str(image)
+
+    def test_appended_archive_and_hardlinks_cannot_bypass_verification(self):
+        trailer = cpio_record(b"TRAILER!!!")
+        original = cpio_record(b"init", b"original init") + cpio_record(b"other", b"unchanged", ino=2) + trailer
+        variants = {
+            "appended": original + cpio_record(b"init", b"replacement") + trailer,
+            "hardlinks": (cpio_record(b"init", b"original init", nlink=2)
+                          + cpio_record(b"other", b"unchanged", nlink=2) + trailer),
+        }
+        for name, archive in variants.items():
+            image = self.make_image(name, {}, archive=archive)
+            with self.subTest(name=name), self.assertRaises(SystemExit):
+                boot_verify(image, self.original, set())
+
+    def test_cpio_padding_directories_and_malformed_entries(self):
+        trailer = cpio_record(b"TRAILER!!!")
+        directory = cpio_record(b"dir", nlink=2, mode=stat.S_IFDIR | 0o755)
+        valid = directory + cpio_record(b"dir/file", b"contents") + trailer
+        variants = [valid, valid + bytes(512), valid[:-1], valid + b"junk",
+                    cpio_record(b"bad\0name") + trailer,
+                    cpio_record(b"file", b"contents")[:115],
+                    b"070701" + b"z" * 104]
+        for i, archive in enumerate(variants):
+            ramdisk = self.root / f"archive-{i}"
+            ramdisk.write_bytes(subprocess.run(["lz4", "-l", "-c"], input=archive,
+                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout)
+            with self.subTest(i=i):
+                if i < 2:
+                    self.assertEqual(len(cpio_entries(ramdisk)), 2)
+                else:
+                    with self.assertRaises(SystemExit):
+                        cpio_entries(ramdisk)
 
     def test_identical_and_corrupt(self):
         boot_verify(self.original, self.original, set())

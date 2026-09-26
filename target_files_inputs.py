@@ -1521,16 +1521,32 @@ def cpio_entries(ramdisk):
     offset = 0
     while True:
         header = data[offset:offset + 110]
-        if header[:6] not in (b"070701", b"070702"):
+        if (len(header) != 110 or header[:6] not in (b"070701", b"070702")
+                or not re.fullmatch(rb"[0-9a-fA-F]{104}", header[6:])):
             fail(f"{ramdisk} is not a newc cpio archive")
-        ino, mode, uid, gid, nlink, mtime, size, dev_major, dev_minor, rdev_major, rdev_minor, name_size, _ = (
+        ino, mode, uid, gid, nlink, mtime, size, dev_major, dev_minor, rdev_major, rdev_minor, name_size, checksum = (
             int(header[6 + 8 * i:14 + 8 * i], 16) for i in range(13))
-        name = data[offset + 110:offset + 110 + name_size - 1]
+        name = data[offset + 110:offset + 110 + name_size]
+        if len(name) != name_size or not name.endswith(b"\0") or b"\0" in name[:-1]:
+            fail(f"{ramdisk} has a malformed cpio name")
+        name = name[:-1]
         offset = (offset + 110 + name_size + 3) & ~3
         contents = data[offset:offset + size]
         offset = (offset + size + 3) & ~3
+        if len(contents) != size or offset > len(data):
+            fail(f"{ramdisk} has a truncated cpio entry")
+        if header[:6] == b"070702" and sum(contents) & 0xffffffff != checksum:
+            fail(f"{ramdisk} has a bad cpio checksum")
         if name == CPIO_TRAILER:
+            # The kernel also unpacks archives after the trailer. Ignoring them would let them
+            # overwrite files that boot-verify just checked, or add a second set of OTA keys.
+            if size or any(data[offset:]):
+                fail(f"{ramdisk} has data after its cpio trailer")
             return entries
+        # Hard links are identified by (device, inode), not by their contents. Rebuilding them as
+        # independent files changes their meaning, and comparing only contents misses that change.
+        if not stat.S_ISDIR(mode) and nlink != 1:
+            fail(f"{ramdisk} has an unsupported cpio link count for {name!r}: {nlink}")
         entries.append((name, mode, uid, gid, rdev_major, rdev_minor, contents))
 
 
