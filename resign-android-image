@@ -71,7 +71,8 @@ version=
 sign_factory_images=ssh-keygen
 # must be as long as the original update URL
 orig_update_url="https://releases.grapheneos.org/"
-update_url="https://noupdateurlset.invalid./"
+# the one given with --update-url, if any
+update_url=
 unshare=1
 unshared=
 download_cache=
@@ -325,7 +326,7 @@ fi
 
 # the options that change the files in the images, and the variables they set, which only resign rebuilds
 # the images with, while the other build methods would silently ignore them
-declare -A image_option_vars=([--version]=version [--adb-root]=adb_root [--recovery-adb-root]=recovery_adb_root
+declare -A image_option_vars=([--update-url]=update_url [--version]=version [--adb-root]=adb_root [--recovery-adb-root]=recovery_adb_root
 	[--adb-key]=adb_keys_content [--adb-at-boot]=adb_at_boot
 	[--adb-at-boot-any-key-INSECURE]=adb_any_key [--allowbackup]=allowbackup [--adb-backup]=adb_backup
 	[--cross-profile-localhost]=cross_profile_localhost [--always-screenshot]=always_screenshot
@@ -340,6 +341,10 @@ if test "$build_method" != resign; then
 		fi
 	done
 fi
+
+# which is replaced even when none is given, so that the updater doesn't download updates it can't install from
+# the official update server
+update_url="${update_url:-https://noupdateurlset.invalid./}"
 
 # the update URL is replaced byte for byte in resources that also hold its length in characters, which only
 # stay right for printable ASCII characters, all that a URL is made of anyway, which are a byte each
