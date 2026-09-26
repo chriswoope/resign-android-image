@@ -509,9 +509,9 @@ def check_disassembly(dexdump, path, dex, starts, written):
                  f"{got} rather than {want}")
 
 
-def patch(dexdump, path, dex, edits, matched):
-    """Apply the edits to the contents of one dex file, disassembled with the dexdump at the path
-    dexdump, recording where each of them matched, and return whether they changed"""
+def patch(dexdump, path, dex, edits, names, matched):
+    """Apply the edits, named by names, to the contents of one dex file, disassembled with the dexdump
+    at the path dexdump, recording where each of them matched, and return whether they changed"""
     before = bytes(dex)
     logical = ranges(path, dex)
     starts = [start for start, _ in logical]
@@ -528,6 +528,9 @@ def patch(dexdump, path, dex, edits, matched):
 
     changes = []
     written = []
+    # the (start, end, edit) of the bytecode that each edit replaced, which every edit finds in the
+    # original disassembly, so that a later one would write over what an earlier one wrote there
+    replaced = []
     for i, (op, target, code) in enumerate(edits):
         if op == "resource-string":
             continue
@@ -542,6 +545,10 @@ def patch(dexdump, path, dex, edits, matched):
                      ", ".join(method.name for method in sharing if method not in patched) +
                      " as well, which patching it would change too")
             for start, end, match in spans(op, target, patched[0]):
+                overlapping = [other for other_start, other_end, other in replaced if start < other_end and other_start < end]
+                if overlapping:
+                    fail(f"{names[i]} matches bytecode of {patched[0].name} that {names[overlapping[0]]} replaced")
+                replaced.append((start, end, i))
                 replace(dex, patched[0], refs[patched[0].index], op,
                         match.expand(code) if match else code, start, end, changes, written)
                 matched[i] += [(method.name, os.path.basename(path), start) for method in patched]
@@ -632,7 +639,7 @@ def patch_zip(dexdump, path, edits, names):
                     with open(dump, "wb") as g:
                         g.write(dex)
 
-                    if patch(dexdump, dump, dex, edits, matched):
+                    if patch(dexdump, dump, dex, edits, names, matched):
                         set_entry(data, entry, dex, written)
         if any(op == "resource-string" for op, _, _ in edits):
             patch_resources(path, data, edits, matched, written)
