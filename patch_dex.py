@@ -66,7 +66,8 @@ INSNS = {
 
 # dexdump prints the offset of the code item of each method before disassembling it, e.g.
 #     0000fc:                                        |[0000fc] a.b.C.isLoopbackChecksEnabled:()Z
-METHOD_RE = re.compile(r"([0-9a-f]+): +\|\[[0-9a-f]+\] (\S+)")
+# with the name taken to the end of the line, since dex files from version 040 on allow spaces in names
+METHOD_RE = re.compile(r"([0-9a-f]+): +\|\[[0-9a-f]+\] (.+)")
 # and then each instruction as its own offset, its code units and its disassembly, e.g.
 #     00010c: 1a00 0500                              |0000: const-string v0, "x" // string@0005
 INSN_RE = re.compile(r"([0-9a-f]+): [0-9a-f. ]+\|[0-9a-f]+: (.*)")
@@ -324,7 +325,12 @@ def disassemble(dexdump, path, dex, starts):
             continue
         match = INSN_RE.fullmatch(line)
         if match and methods:
-            methods[-1].insns.append((int(match.group(1), 16), match.group(2)))
+            offset = int(match.group(1), 16)
+            # rather than giving a method the instructions of another one whose header wasn't recognized,
+            # which an edit would then write past the end of the method with
+            if not methods[-1].start <= offset < methods[-1].end:
+                fail(f"dexdump printed an instruction at {offset:#x} of {path}, outside of {methods[-1].name}")
+            methods[-1].insns.append((offset, match.group(2)))
             ref = REF_RE.search(match.group(2))
             if ref:
                 refs[methods[-1].index][ref.group(1)] = int(ref.group(2), 16)
