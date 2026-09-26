@@ -2507,8 +2507,9 @@ function take_signed_image {
 
 function make_target_files_zip {
 	# what was made from the target files made before, which is only made when missing, including what --keep
-	# kept of it and what failed its check, would otherwise be taken for made from these
-	rm -rf -- "$outdir/ota_unchecked.zip" "$outdir/factory_image" "$outdir/factory_unchecked"
+	# kept of it and what failed its check, would otherwise be taken for made from these: the factory images
+	# made with --factory-image as well, which the factory zip is made from, and which are made again if asked for
+	rm -rf -- "$outdir/ota_unchecked.zip" "$outdir/factory_image" "$outdir/factory_unchecked" "$outdir/factory"
 
 	if test "$build_method" == resign; then
 		# which is discarded once the OTA is made, while the files marking what was made from it are kept, so
