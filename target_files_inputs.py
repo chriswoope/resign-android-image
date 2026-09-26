@@ -11,6 +11,9 @@
 #     target_files_inputs.py fs-dump IMAGE
 #         print the metadata of every file of the ext4 IMAGE as JSON, read from the image itself so
 #         that nothing needs to be mounted
+#     target_files_inputs.py fs-extracted-verify IMAGE DIRECTORY
+#         check the extracted paths, file contents and symlink targets against IMAGE before any
+#         intentional changes, since debugfs does not report extraction failures in its exit status
 #     target_files_inputs.py fs-config TARGET_FILES EXPECTED PARTITION METADATA [PARTITION METADATA...]
 #         write the META/*filesystem_config.txt and META/file_contexts.bin to build each PARTITION
 #         from the files in the TARGET_FILES directory with, and write to the EXPECTED directory the
@@ -238,14 +241,18 @@ class Ext4:
         return struct.unpack_from("<I", raw, 0x4)[0] | struct.unpack_from("<I", raw, 0x6C)[0] << 32
 
     def data(self, ino, raw, offset=0, size=None):
-        """The contents of the file with inode number ino, which must not be stored inline, or the at
-        most size bytes of them at offset."""
+        """The contents of the file with inode number ino, or at most size bytes at offset."""
         flags = struct.unpack_from("<I", raw, 0x20)[0]
+        end = self.size(raw) if size is None else min(offset + size, self.size(raw))
         if flags & INLINE_DATA_FL:
-            fail(f"{self.path}: the contents of inode {ino} are inline, which is not supported")
+            contents = raw[0x28:0x28 + 60] + self.xattrs(ino, raw).get(XATTR_INLINE_DATA, b"")
+            return contents[offset:end]
+        if stat.S_ISLNK(struct.unpack_from("<H", raw)[0]) and self.size(raw) < 60:
+            return raw[0x28 + offset:0x28 + end]
+        if end <= offset:
+            return b""
         if not flags & EXTENTS_FL:
             fail(f"{self.path}: inode {ino} uses block maps, which are not supported")
-        end = self.size(raw) if size is None else min(offset + size, self.size(raw))
         data = bytearray(max(end - offset, 0))
         for logical, length, start in self.extents(ino, raw[0x28:0x28 + 60]):
             # an uninitialized extent, whose length has the top bit set, reads as zeroes
@@ -1304,6 +1311,42 @@ def fs_dump(image):
     json.dump(Ext4(image).files(), sys.stdout, sort_keys=True)
 
 
+def fs_extracted_verify(image, tree):
+    """Check extraction before any patches or intentional deletions. Do not follow host symlinks."""
+    actual = {""}
+    for root, dirs, names in os.walk(tree):
+        actual.update(os.path.relpath(os.path.join(root, name), tree) for name in dirs + names)
+    # The image reader likewise excludes the filesystem's automatically generated lost+found.
+    actual.discard("lost+found")
+    filesystem = Ext4(image)
+    try:
+        for path, ino, raw, metadata in filesystem.walk():
+            if path not in actual:
+                fail(f"{image}: extraction is missing /{path}")
+            actual.remove(path)
+            host = os.path.join(tree, path)
+            mode = os.lstat(host).st_mode
+            kind = metadata["type"]
+            if not {"d": stat.S_ISDIR, "f": stat.S_ISREG, "l": stat.S_ISLNK}[kind](mode):
+                fail(f"{image}: extracted /{path} has the wrong file type")
+            # Walk directories before their children, so that no ancestor can be an unchecked link.
+            if kind == "l":
+                if os.fsencode(os.readlink(host)) != filesystem.data(ino, raw):
+                    fail(f"{image}: extracted /{path} has the wrong symlink target")
+            elif kind == "f":
+                size = filesystem.size(raw)
+                if os.path.getsize(host) != size:
+                    fail(f"{image}: extracted /{path} has the wrong size")
+                with open(host, "rb") as f:
+                    for offset in range(0, size, shutil.COPY_BUFSIZE):
+                        if f.read(shutil.COPY_BUFSIZE) != filesystem.data(ino, raw, offset, shutil.COPY_BUFSIZE):
+                            fail(f"{image}: extracted /{path} has the wrong contents")
+        if actual:
+            fail(f"{image}: extraction has unexpected paths: {sorted(actual)!r}")
+    finally:
+        filesystem.image.close()
+
+
 def avb_args(partition, image):
     """The misc_info.txt entries that make the build add the same AVB footer to partition as image has."""
     info = subprocess.run(["avbtool", "info_image", "--image", image], check=True, stdout=subprocess.PIPE,
@@ -1865,6 +1908,8 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "fs-dump":
         fs_dump(args[1])
+    elif len(args) == 3 and args[0] == "fs-extracted-verify":
+        fs_extracted_verify(args[1], args[2])
     elif len(args) >= 5 and len(args) % 2 == 1 and args[0] == "fs-config":
         partitions = list(zip(args[3::2], args[4::2]))
         unknown = [p for p, _ in partitions if p not in PARTITIONS]
@@ -1896,7 +1941,7 @@ def main():
     elif len(args) == 2 and args[0] == "fsverity-update":
         fsverity_update(args[1])
     else:
-        fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
+        fail("usage: fs-dump IMAGE | fs-extracted-verify IMAGE DIRECTORY | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "

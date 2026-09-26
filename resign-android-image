@@ -1225,7 +1225,7 @@ function extract_image {
 
 	debugfs_quote "$(realpath "$out")"
 	# with what it prints discarded, since it warns about every file whose owner it can't set; it doesn't fail
-	# for any error anyway, and the images built from the files are checked to hold the files of the original ones
+	# for any error anyway, so make_extract_fs checks its output before anything modifies the files
 	"$debugfs" -R "rdump / $debugfs_quote" "$img" 2>/dev/null
 }
 
@@ -1245,6 +1245,7 @@ function get_avbtool_partitions {
 
 function make_extract_fs {
 	extract_image "$@"
+	python3 "$data_dir/target_files_inputs.py" fs-extracted-verify "$2" "$1"
 
 	if test -n "$dev_fast_sign"; then
 		find "$1" -type f \( -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex' \) ! -name framework-res.apk -delete
