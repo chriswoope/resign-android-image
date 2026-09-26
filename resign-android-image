@@ -1296,9 +1296,6 @@ function make_extract_ota_payload {
 	make_dir "$dir/ota" make_extract_ota
 
 	make_dir "$dir/ota_meta" do_extract_ota_manifest "$ota_zip"
-	for i in apex_info.pb; do
-		make_file "$dir/ota_meta/$i" make_hardlink "$dir/ota/$i"
-	done
 
 	do_extract_ota_payload "$1" "$ota_zip" "$dir/ota_meta/ab_partitions.txt"
 	mkdir -p "$1/META"
@@ -2405,11 +2402,11 @@ function make_target_files_base {
 		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr")
 
 		make_file "$dir/ota_meta/postinstall_config.txt" make_postinstall_config
-		for i in "$dir/ota_meta"/*; do
-			i="${i##*/}"
-			if test "$i" != dynamic_partitions_info.txt && test "$i" != misc_info.txt; then
-				ln -f "$dir/ota_meta/$i" "$1/META/$i"
-			fi
+		# the partitions of the OTA, which the signing isn't given for it not to require the images of all of
+		# them, and what runs once they are written, as the upstream OTA has them, while the other files of META
+		# are those that the signing made for the images it built
+		for i in ab_partitions.txt postinstall_config.txt; do
+			ln -f "$dir/ota_meta/$i" "$1/META/$i"
 		done
 
 		rm -f "$1/META/care_map.pb"
