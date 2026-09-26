@@ -995,8 +995,9 @@ if ! test -x "$blkid"; then
 fi
 
 fsckerofs="$otatools/bin/fsck.erofs"
-if ! test -x "$fsckerofs"; then
-	fsckerofs="$(which fsck.erofs)"
+if ! test -x "$fsckerofs" && ! fsckerofs="$(which fsck.erofs)"; then
+	echo "There is no fsck.erofs in the otatools, and none installed either: install erofs-utils" >&2
+	exit 1
 fi
 
 aosp="$dir/aosp"
