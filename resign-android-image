@@ -216,6 +216,12 @@ while test "$#" != 0; do
 	shift 1
 done
 
+# checked before the dependencies are installed and the script is run again in its own mount namespace
+if test "$os" != grapheneos; then
+	echo "Unsupported OS: $os" >&2
+	exit 1
+fi
+
 if test -z "$threads"; then
 	threads="$(nproc)"
 elif ! [[ $threads =~ ^[1-9][0-9]*$ ]]; then
@@ -627,7 +633,7 @@ function with_temp_dir
 
 function discard
 {
-	echo "${make_indent}DISCARD: $@"
+	echo "${make_indent}DISCARD: $@" >&2
 	if test -n "$want_discard"; then
 		rm -rf "$@"
 	fi
@@ -745,9 +751,6 @@ if test "$os" == grapheneos; then
 	factory_identity="contact@grapheneos.org"
 	factory_allowed_signers="$data_dir/grapheneos-allowed_signers"
 	ota_cert="$data_dir/grapheneos-otacerts/$device.pem"
-else
-	echo "Unsupported OS: $os"
-	exit 1
 fi
 
 # the OTA and the factory images are downloaded into the work directory and discarded once extracted,
@@ -2702,7 +2705,7 @@ function make_ota {
 	if test "$result" == "CHECK SUCCESSFUL"; then
 		ln "$outdir/ota_unchecked.zip" "$1"
 	else
-		echo "OTA key check failed!!!"
+		printf '%s\n' "$result" "OTA key check failed!!!" >&2
 		exit 1
 	fi
 }
@@ -2933,7 +2936,7 @@ function make_factory {
 		# they are discarded from here
 		rm -rf -- "$outdir/factory_unchecked"
 	else
-		echo "Factory key check failed!!!"
+		printf '%s\n' "$result" "Factory key check failed!!!" >&2
 		exit 1
 	fi
 }
