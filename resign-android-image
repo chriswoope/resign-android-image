@@ -2888,9 +2888,8 @@ function make_factory_unchecked {
 		ln "$outdir/factory_image"/* "$out"
 	else
 		local zip="$(realpath "$out/image-$device-$out_build.zip")"
-		# files in the zip must be in the proper order
-		factory_image_entries="$(<$dir/factory_image.list)"
-		(cd "$outdir/factory_image"; zip -q "$zip_opt" "$zip" $factory_image_entries)
+		# files in the zip must be in the proper order, which zip takes the names in, one per line, from its input
+		(cd "$outdir/factory_image" && zip -q "$zip_opt" "$zip" -@) < "$dir/factory_image.list"
 
 		ls -1 "$dir/factory/$factory_name"|while read i; do
 			if test "$i" == avb_pkmd.bin; then
@@ -2969,25 +2968,22 @@ function make_factory_zip {
 	# the signature of the zip made before
 	rm -f -- "$out_factory.sig"
 
-	factory_entries="$(
-		local super_inserted=
+	# the names of the files, in the order of the original zip, which zip takes one per line from its input
+	{
+		local super_inserted= entry
 		while IFS= read -r entry; do
-			local base
 			# the build number appears in the directory name and in the image zip name
 			entry="${entry//"$build"/"$out_build"}"
-			base="$(basename "$entry")"
-			if [[ -e "$outdir/factory/$out_factory_name"/super_1.img || -e "$outdir/factory/$out_factory_name"/super.img ]] && [[ "$base" == super*.img ]]; then
+			if [[ -e "$outdir/factory/$out_factory_name"/super_1.img || -e "$outdir/factory/$out_factory_name"/super.img ]] && [[ ${entry##*/} == super*.img ]]; then
 				if test -z "$super_inserted"; then
 					(cd "$outdir/factory" && ls -1 "$out_factory_name"/super*.img 2>/dev/null | grep -vE '/super_empty.img$' | sort -V)
 					super_inserted=1
 				fi
 			else
-				echo "$entry"
+				printf '%s\n' "$entry"
 			fi
 		done < "$dir/factory.list"
-	)"
-
-	(cd "$outdir/factory"; zip -q "$zip_opt" "$zip" $factory_entries)
+	}|(cd "$outdir/factory" && zip -q "$zip_opt" "$zip" -@)
 }
 
 function make_factory_zip_sig {
