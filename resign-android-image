@@ -2271,13 +2271,6 @@ function make_ota_unchecked {
 	if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
 		extra_ota+=( "--disable_ublk" )
 	fi
-	ls -1 "$dir/ota_payload"|while read i; do
-		if test -f "$dir/ota_payload/$i" && ! unzip -q -l "$outdir/target_files.zip" "IMAGES/$i" >/dev/null; then
-			local b="$(basename "$f" .img)"
-			extra_ota+=( "--custom-image" )
-			extra_ota+=( "$b:$i" )
-		fi
-	done
 	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "${extra_ota[@]}" "$outdir/target_files.zip" "$1"
 }
 
