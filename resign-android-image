@@ -1863,10 +1863,16 @@ EOF
 
 	wait_background
 
-	cp -a -n -l --target-directory="$1" "$outdir/target_files_extracted"/*
+	# the files patched above are skipped, which makes cp -n fail in coreutils 9.2 to 9.4, while --update=none,
+	# which skips them as silently as -n did before and does again since, only exists since 9.3
+	local no_clobber=--update=none
+	if ! cp --update=none --version >/dev/null 2>&1; then
+		no_clobber=-n
+	fi
+	cp -a "$no_clobber" -l --target-directory="$1" "$outdir/target_files_extracted"/*
 
 	if test "$build_method" == resign; then
-		cp -a -n -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
+		cp -a "$no_clobber" -l --target-directory="$1" "$outdir/boot_inputs/target_files"/*
 		# the runtime rejects compiled code that no longer matches what it was compiled from or against
 		# and odrefresh only compiles the boot image and the system server jars again when the files
 		# compiled from them are missing, so a stale boot image leaves every process without one: it is
