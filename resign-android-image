@@ -1234,6 +1234,18 @@ function make_extract_ota_payload {
 	discard_download "$ota_zip"
 }
 
+function extract_postinstall_config {
+	do_extract_ota_manifest "$1" "$ota_zip"
+	mv -- "$1/postinstall_config.txt" "$2"
+}
+
+# the postinstall config of the OTA, which an ota_meta made before it was extracted along with the rest lacks
+function make_postinstall_config {
+	with_download_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
+	with_temp_dir "$1.meta" extract_postinstall_config "$1"
+	discard_download "$ota_zip"
+}
+
 function make_target_files_extracted {
 	make_dir "$dir/ota_payload" make_extract_ota_payload
 
@@ -2338,6 +2350,7 @@ function make_target_files_base {
 		outr="$(realpath "$1")"
 		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr")
 
+		make_file "$dir/ota_meta/postinstall_config.txt" make_postinstall_config
 		ls -1 "$dir/ota_meta"|while read i; do
 			if test "$i" != dynamic_partitions_info.txt && test "$i" != misc_info.txt; then
 				ln -f "$dir/ota_meta/$i" "$1/META/$i"
