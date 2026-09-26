@@ -953,9 +953,10 @@ function make_signapk_jsa {
 	with_temp_dir "$1.build" make_signapk_jsa_in "$1" "$2"
 }
 
-function gen_key {
+function gen_key (
+	umask 077
 	openssl genrsa -f4 4096 > "$1"
-}
+)
 
 subject='/CN=GrapheneOS/'
 function make_pem {
