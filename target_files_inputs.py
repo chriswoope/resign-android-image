@@ -115,19 +115,13 @@ PARTITIONS = ("system", "vendor", "product", "system_ext", "odm", "vendor_dlkm",
 PARENT_PARTITIONS = {"system_ext": "system", "product": "system", "vendor": "system", "system_dlkm": "system",
                      "odm": "vendor", "vendor_dlkm": "vendor", "odm_dlkm": "vendor"}
 
-# where the file_contexts of each part of the SELinux policy is in the target files, with the path it
-# has in a device that doesn't have a partition for it, in the order the build concatenates them in
-# (system/sepolicy/Android.bp): those of the platform as they are, and then those of the device sorted
-# with fc_sort, which matters since the last of the entries that match a path is the one that counts
-PLATFORM_FILE_CONTEXTS = (
-    ("SYSTEM/etc/selinux/plat_file_contexts",),
-    ("SYSTEM_EXT/etc/selinux/system_ext_file_contexts", "SYSTEM/system_ext/etc/selinux/system_ext_file_contexts"),
-    ("PRODUCT/etc/selinux/product_file_contexts", "SYSTEM/product/etc/selinux/product_file_contexts"),
-)
-DEVICE_FILE_CONTEXTS = (
-    ("VENDOR/etc/selinux/vendor_file_contexts", "SYSTEM/vendor/etc/selinux/vendor_file_contexts"),
-    ("ODM/etc/selinux/odm_file_contexts", "VENDOR/odm/etc/selinux/odm_file_contexts"),
-)
+# where the file_contexts of each part of the SELinux policy is on the device, in the order the build
+# concatenates them in (system/sepolicy/Android.bp): those of the platform as they are, and then those of
+# the device sorted with fc_sort, which matters since the last of the entries that match a path is the one
+# that counts
+PLATFORM_FILE_CONTEXTS = ("/system/etc/selinux/plat_file_contexts", "/system_ext/etc/selinux/system_ext_file_contexts",
+                          "/product/etc/selinux/product_file_contexts")
+DEVICE_FILE_CONTEXTS = ("/vendor/etc/selinux/vendor_file_contexts", "/odm/etc/selinux/odm_file_contexts")
 
 EXT4_MAGIC = 0xEF53
 EROFS_MAGIC = 0xE0F5E1E2
@@ -1423,13 +1417,10 @@ def tree_files(target_files, partition):
     return files
 
 
-def policy_file_contexts(target_files, parts):
-    """The paths of the file_contexts of the parts of the policy in target_files that it has."""
-    paths = []
-    for candidates in parts:
-        found = [p for p in (os.path.join(target_files, c) for c in candidates) if os.path.exists(p)]
-        paths += found[:1]
-    return paths
+def policy_file_contexts(target_files, locations):
+    """The paths in target_files of the file_contexts at the locations on the device that it has."""
+    return [path for path in (target_files_path(target_files, location) for location in locations)
+            if os.path.exists(path)]
 
 
 def fs_config_name(partition, path):
