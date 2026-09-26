@@ -2648,9 +2648,9 @@ function make_factory_image {
 				while IFS= read -r line; do
 					if [[ "${#super_files[@]}" != 0 && ( "$line" == "echo Flashing super"* || "$line" == "fastboot flash super super"* ) ]]; then
 						if test -z "$super_inserted"; then
-							for ((i = 0; i < ${#super_files[@]}; i++)); do
-								echo "echo Flashing ${super_names[$i]}"
-								echo "fastboot flash super ${super_files[$i]}"
+							for ((j = 0; j < ${#super_files[@]}; j++)); do
+								echo "echo Flashing ${super_names[$j]}"
+								echo "fastboot flash super ${super_files[$j]}"
 							done
 							super_inserted=1
 						fi
@@ -2666,9 +2666,9 @@ function make_factory_image {
 				while IFS= read -r line; do
 					if [[ "${#super_files[@]}" != 0 && "$line" == "echo Flashing super"* ]]; then
 						if test -z "$super_inserted"; then
-							for ((i = 0; i < ${#super_files[@]}; i++)); do
-								echo "echo Flashing ${super_names[$i]}"
-								echo "fastboot flash super ${super_files[$i]}"
+							for ((j = 0; j < ${#super_files[@]}; j++)); do
+								echo "echo Flashing ${super_names[$j]}"
+								echo "fastboot flash super ${super_files[$j]}"
 								echo "if %errorlevel% neq 0 call:pakExit"
 								echo
 							done
@@ -2698,8 +2698,8 @@ function make_factory_image {
 				while IFS= read -r line; do
 					if [[ "${#super_files[@]}" != 0 && "$line" == flash\ super\ super* ]]; then
 						if test -z "$super_inserted"; then
-							for ((i = 0; i < ${#super_files[@]}; i++)); do
-								echo "flash super ${super_files[$i]}"
+							for ((j = 0; j < ${#super_files[@]}; j++)); do
+								echo "flash super ${super_files[$j]}"
 							done
 							super_inserted=1
 						fi
