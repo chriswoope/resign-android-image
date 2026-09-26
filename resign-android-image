@@ -1880,36 +1880,36 @@ EOF
 }
 
 
+# write the misc_info.txt of the target files to $1, with only the entries that the signing and the
+# making of the OTA and of super read, all of them either taken from the images or the same for every
+# build that this can make
 function make_misc_info {
-	if false; then
-	cat ->"$1" <<EOF
-recovery_api_version=99999
-fstab_version=2
-ab_update=true
-verity=true
-avb_enable=true
-lz4_ramdisks=true
-avb_avbtool=avbtool
-EOF
-	else
-		# TODO: properly create this instead of copying one from a raven build from source and hoping it works
-		grep -vE 'selinux_fc=|vintf_enforce=|^building_|^avb_building_' "$data_dir/misc_info-raven.txt" > "$1"
-		# and the dynamic partitions as the payload has them, since the last value of an entry is the
-		# one that counts and those of the build misc_info-raven.txt comes from are not the same
-		cat "$dir/ota_payload/META/misc_info.txt" "$dir/ota_payload/META/dynamic_partitions_info.txt" >> "$1"
-		if test -e "$dir/ota_payload/init_boot.img"; then
-			echo "init_boot=true" >> "$1"
-			echo "init_boot_size=$(stat -c "%s" -- "$dir/ota_payload/init_boot.img")" >> "$1"
+	# which the target files are refused without, but which only a non-A/B OTA or a recovery image uses,
+	# with the values that they have for every build, and AVB, which the payload always has vbmeta for
+	printf '%s\n' recovery_api_version=3 fstab_version=2 avb_enable=true avb_avbtool=avbtool > "$1"
+	# the A/B update and the dynamic partitions as the payload has them
+	cat "$dir/ota_payload/META/misc_info.txt" "$dir/ota_payload/META/dynamic_partitions_info.txt" >> "$1"
+	# how the ramdisks of the boot images are compressed, which the OTA reads the build properties of
+	# the boot images out of
+	local boot_images=() b
+	for b in boot init_boot vendor_boot vendor_kernel_boot; do
+		if test -e "$dir/ota_payload/$b.img"; then
+			boot_images+=("$dir/ota_payload/$b.img")
 		fi
-	fi
+	done
+	python3 "$data_dir/target_files_inputs.py" lz4-ramdisks "${boot_images[@]}" >> "$1"
 
 	if test "$build_method" == resign; then
 		# have the signing build the filesystem images out of their files, as it does for a normal
-		# build, and give them the same hashtree footer as the original images
+		# build, with mke2fs, giving the image of a dynamic partition the size of its files, sharing the
+		# blocks of identical files if the original images do, and give them the same hashtree footer
+		# as the original images
+		printf '%s\n' use_dynamic_partition_size=true ext_mkuserimg=mkuserimg_mke2fs >> "$1"
 		local dynamic=" $(sed -nre 's/^dynamic_partition_list=//p' "$dir/ota_payload/META/dynamic_partitions_info.txt") "
-		local b
+		local images=()
 		for b in $image_parts; do
 			if test -e "$dir/ota_payload/$b.img"; then
+				images+=("$dir/ota_payload/$b.img")
 				printf '%s\n' "building_${b}_image=true" "${b}_fs_type=ext4" "${b}_selinux_fc=file_contexts.bin" "${b}_disable_sparse=true" >> "$1"
 				python3 "$data_dir/target_files_inputs.py" avb-args "$b" "$dir/ota_payload/$b.img" >> "$1"
 				# the size of a dynamic partition is the size of its image, while the AVB footer of the
@@ -1919,11 +1919,13 @@ EOF
 				fi
 			fi
 		done
+		python3 "$data_dir/target_files_inputs.py" ext4-share-dup-blocks "${images[@]}" >> "$1"
 
 		# and the boot images and vbmeta, with the dtbo and pvmfw images taken as prebuilt ones that the
-		# build adds a footer to
+		# build adds a footer to, and no recovery image, which isn't one of the images that are signed
 		cat "$outdir/boot_inputs/misc_info.txt" >> "$1"
 		if test -e "$dir/ota_payload/dtbo.img"; then
+			echo has_dtbo=true >> "$1"
 			python3 "$data_dir/target_files_inputs.py" avb-args dtbo "$dir/ota_payload/dtbo.img" >> "$1"
 		fi
 		if test -e "$outdir/target_files_intermediates/PREBUILT_IMAGES/pvmfw.img"; then
@@ -1933,8 +1935,11 @@ EOF
 		if test -n "$replace_boot"; then
 			python3 "$data_dir/target_files_inputs.py" avb-args boot "$dir/ota_payload/boot.img" >> "$1"
 		fi
+		echo no_recovery=true >> "$1"
 		check_vbmeta_partitions
-		printf '%s\n' avb_building_vbmeta_image=true "avb_vbmeta_args=--padding_size 4096 $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img"|tr '\n' ' ')" >> "$1"
+		# with the AVB key of the release script, which the signing only writes to the misc_info.txt that
+		# the images are built with if there is a key there to replace, leaving vbmeta unsigned otherwise
+		printf '%s\n' avb_building_vbmeta_image=true avb_vbmeta_key_path=keys/avb.pem "avb_vbmeta_algorithm=$avb_algorithm" "avb_vbmeta_args=--padding_size 4096 $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img"|tr '\n' ' ')" >> "$1"
 		# the fingerprints in the AVB properties that the images are given, which are those of the
 		# original images, have the build number of the version, as the ones of the build.prop files do
 		if test -n "$build_number_sed"; then

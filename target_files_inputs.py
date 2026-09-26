@@ -47,6 +47,12 @@
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
+#     target_files_inputs.py lz4-ramdisks [IMAGE...]
+#         print the misc_info.txt entry that makes the build compress the ramdisks it builds, and read the
+#         ones of the boot images it reads build properties out of, as the ramdisks of the boot IMAGEs are
+#     target_files_inputs.py ext4-share-dup-blocks IMAGE [IMAGE...]
+#         print the misc_info.txt entry that makes the build share the blocks of identical files in the
+#         ext4 images it builds if the ext4 IMAGEs were built that way
 #     target_files_inputs.py apk-keys TARGET_FILES CERTS META
 #         write to the META directory the apkcerts.txt and apexkeys.txt files naming the key that
 #         each APK and APEX in the TARGET_FILES directory, and each APK in the payload of an APEX, is
@@ -137,6 +143,7 @@ INCOMPAT_INLINE_DATA = 0x8000
 # the incompatible features that don't change how the metadata read here is laid out
 INCOMPAT_SUPPORTED = (INCOMPAT_FILETYPE | INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_MMP | INCOMPAT_FLEX_BG
                       | INCOMPAT_CSUM_SEED | INCOMPAT_INLINE_DATA)
+RO_COMPAT_SHARED_BLOCKS = 0x4000
 
 EXTENTS_FL = 0x80000
 INLINE_DATA_FL = 0x10000000
@@ -1310,6 +1317,15 @@ def fs_dump(image):
     json.dump(Ext4(image).files(), sys.stdout, sort_keys=True)
 
 
+def ext4_share_dup_blocks(images):
+    """Print the misc_info.txt entry that makes the build share the blocks of identical files in the ext4
+    images it builds, if the images were built that way, which e2fsdroid marks them with the shared_blocks
+    feature for."""
+    print_flag("ext4_share_dup_blocks", {image: bool(struct.unpack_from("<I", Ext4(image).read(1024, 1024), 0x64)[0]
+                                                     & RO_COMPAT_SHARED_BLOCKS) for image in images},
+               "share the blocks of identical files")
+
+
 def fs_extracted_verify(image, tree):
     """Check extraction before any patches or intentional deletions. Do not follow host symlinks."""
     actual = {""}
@@ -1536,17 +1552,46 @@ LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"
 CPIO_TRAILER = b"TRAILER!!!"
 
 
-def unpack_boot_image(image, out):
+def boot_image_options(image, out):
     """The mkbootimg options that image was made with, as unpack_bootimg writes them out to out."""
-    args = subprocess.run(["unpack_bootimg", "--boot_img", image, "--out", out, "--format", "mkbootimg"],
-                          check=True, stdout=subprocess.PIPE, text=True).stdout
+    tokens = shlex.split(subprocess.run(["unpack_bootimg", "--boot_img", image, "--out", out, "--format", "mkbootimg"],
+                                        check=True, stdout=subprocess.PIPE, text=True).stdout)
+    return list(zip(tokens[::2], tokens[1::2]))
+
+
+def unpack_boot_image(image, out):
+    """The boot_image_options of image, which is going to be built again from them."""
     info = subprocess.run(["unpack_bootimg", "--boot_img", image, "--out", out + ".info"], check=True,
                           stdout=subprocess.PIPE, text=True).stdout
     # a GKI boot image is certified by a signature that only a prebuilt image can carry
     if re.search(r"^boot\.img signature size: (?!0$)", info, re.M):
         fail(f"{image} has a boot signature, which target files can only hold in a prebuilt image")
-    tokens = shlex.split(args)
-    return list(zip(tokens[::2], tokens[1::2]))
+    return boot_image_options(image, out)
+
+
+def print_flag(key, images, what):
+    """Print the misc_info.txt entry that sets key to true if what, as images maps each image to, holds
+    for the images, which the build makes all the same way."""
+    if len(set(images.values())) > 1:
+        fail(f"only some of {' '.join(images)} {what}, while the build makes them all the same way")
+    if any(images.values()):
+        print(f"{key}=true")
+
+
+def lz4_ramdisks(images):
+    """Print the misc_info.txt entry that makes the build compress the ramdisks it builds with lz4, and
+    decompress the ones of the boot images that it reads build properties out of with it, if the ramdisks
+    of the boot images are compressed with it."""
+    compressed = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, image in enumerate(images):
+            # the first one, which the build always makes itself
+            ramdisk = next((value for option, value in boot_image_options(image, os.path.join(tmp, str(i)))
+                            if option in RAMDISK_OPTIONS), None)
+            if ramdisk and os.path.getsize(ramdisk):
+                with open(ramdisk, "rb") as f:
+                    compressed[image] = f.read(len(LZ4_LEGACY_MAGIC)) == LZ4_LEGACY_MAGIC
+    print_flag("lz4_ramdisks", compressed, "have a ramdisk compressed with lz4")
 
 
 def cpio_entries(ramdisk):
@@ -1716,7 +1761,7 @@ def boot_inputs(out, partitions):
                         f.write(values["--cmdline"])
                 header = ["--header_version", values["--header_version"]]
                 if partition == "init_boot":
-                    misc_info.append(f"mkbootimg_init_args={shlex.join(header)}")
+                    misc_info += ["init_boot=true", f"mkbootimg_init_args={shlex.join(header)}"]
                 else:
                     share("mkbootimg header version", values["--header_version"], image)
                 share("mkbootimg_version_args", shlex.join(
@@ -1924,6 +1969,10 @@ def main():
         ramdisk_file(os.fsencode(args[1]), args[2:])
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
+    elif len(args) >= 1 and args[0] == "lz4-ramdisks":
+        lz4_ramdisks(args[1:])
+    elif len(args) >= 2 and args[0] == "ext4-share-dup-blocks":
+        ext4_share_dup_blocks(args[1:])
     elif len(args) == 4 and args[0] == "apk-keys":
         apk_keys(args[1], args[2], args[3])
     elif len(args) == 3 and args[0] == "apex-verify":
@@ -1939,6 +1988,7 @@ def main():
     else:
         fail("usage: fs-dump IMAGE | fs-extracted-verify IMAGE DIRECTORY | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED | avb-args PARTITION IMAGE | "
+             "lz4-ramdisks [IMAGE...] | ext4-share-dup-blocks IMAGE... | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE | ramdisk-file PATH IMAGE...")
