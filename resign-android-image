@@ -448,7 +448,9 @@ replace_boot_digest=
 if test -n "$replace_boot"; then
 	replace_boot_digest="$(sha256sum < "$replace_boot")"
 fi
-key_dir_path="$(realpath -m -- "$key_dir")"
+# absolute, since the keys are also used from other directories, such as the one the signing runs in
+key_dir="$(realpath -m -- "$key_dir")"
+key_dir_path="$key_dir"
 options="$(declare -p os device build key_dir_path version update_url dex2oat dev_fast_sign sign_factory_images adb_root recovery_adb_root adb_keys_content adb_at_boot adb_until_unlock adb_any_key allowbackup adb_backup cross_profile_localhost always_screenshot always_screenshot_surfaceview no_location_ismock record_anything replace_boot_digest replace_boot_allow_change replace_boot_allow_new_files hosts_url magisk ro_debuggable ro_secure)"
 if test -e "$dir/options" && test "$(< "$dir/options")" != "$options" && test -z "$reuse_changed_options"; then
 	echo "$dir was used with other options, and what was made with them would be used in place of what these ones make:" >&2
