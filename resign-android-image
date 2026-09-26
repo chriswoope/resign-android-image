@@ -2777,7 +2777,10 @@ function check_factory {
 	if test -n "$factory_optimized"; then
 		ln "$outdir/factory_unchecked/$out_factory_name"/* "$1/factory_image"
 		if test -e "$1/factory_image/super_1.img"; then
-			"$otatools/bin/simg2img" $(ls -1 "$1/factory_image"/super_*.img|sort -V) "$1/super.img" >&2
+			local super_images=()
+			mapfile -d '' -t super_images < <(printf '%s\0' "$1/factory_image"/super_*.img|sort -zV)
+			wait $!
+			"$otatools/bin/simg2img" "${super_images[@]}" "$1/super.img" >&2
 		else
 			"$otatools/bin/simg2img" "$1/factory_image/super.img" "$1/super.img" >&2
 		fi
