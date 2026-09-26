@@ -2772,9 +2772,10 @@ function make_factory_zip {
 }
 
 function make_factory_zip_sig {
-	local key="$(realpath "$key_dir/factory.sec")"
 	if test "$sign_factory_images" == signify; then
-		(cd "$outdir/out"; sha256sum --tag "$out_factory_name.zip"|$signify -S -s "$key" -e -m - -x "$1")
+		# only the digest is computed in the directory of the zip, for it to name the zip without the path to it,
+		# since the paths may be relative to the current directory
+		(cd "$outdir/out" && sha256sum --tag "$out_factory_name.zip")|$signify -S -s "$key_dir/factory.sec" -e -m - -x "$1"
 	elif test "$sign_factory_images" == ssh-keygen; then
 		ssh-keygen -Y sign -n "factory images" -f "$key_dir/id_ed25519" < "$out_factory" > "$1"
 	fi
