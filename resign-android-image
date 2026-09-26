@@ -621,6 +621,13 @@ function download
 
 android=
 
+# the Pixel 10 devices, which have the 6.6 kernel, for which OTAs are made without ublk, and take larger
+# fastboot downloads
+pixel_10=
+if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
+	pixel_10=1
+fi
+
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
 	if test "$build" -ge 2026061800; then
@@ -668,7 +675,7 @@ if test "$os" == grapheneos; then
 		out_factory_word=factory
 		factory_optimized=
 	fi
-	if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
+	if test -n "$pixel_10"; then
 		max_download_size=$((0x10000000))
 	else
 		max_download_size=$((0xf900000))
@@ -2405,7 +2412,7 @@ function make_target_files_zip {
 # needs out_target_files.zip
 function make_ota_unchecked {
 	local extra_ota=()
-	if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
+	if test -n "$pixel_10"; then
 		extra_ota+=( "--disable_ublk" )
 	fi
 	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "${extra_ota[@]}" "$outdir/target_files.zip" "$1"
