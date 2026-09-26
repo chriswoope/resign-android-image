@@ -1944,8 +1944,28 @@ function make_dynamic_partitions_info {
 	cp "$dir"/ota_payload/META/dynamic_partitions_info.txt "$1"
 }
 
+# print the line of certs.txt of the certificate $1, in hex DER, of the key $2
+function print_cert_line {
+	local digest
+	digest="$(xxd -p -r <<< "$1"|sha256sum)"
+	printf '%s %s %s\n' "${digest%% *}" "$1" "$2"
+}
+
 function make_certs_mac {
-	(shared=; cd "$outdir"/target_files_intermediates && find . -name '*mac_permissions.xml'|(while IFS= read -r f; do d="$(echo $f|sed -re 's,./([^/]*)/.*,\1,')"; { grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f" || test "$?" == 1; }|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/'|while read i v; do k=""; case $v in base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi;; network_stack) k=networkstack;; media) k=media;; platform) k=platform;; bluetooth) k=bluetooth;; esac; if test -n "$k"; then echo $(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1) "$i" "$k"; fi; done; done)|sort|uniq)>"$1"
+	local f i v k shared=
+	find "$outdir"/target_files_intermediates -name '*mac_permissions.xml' -print0|while IFS= read -r -d '' f; do
+		while read -r i v; do
+			case "$v" in
+				# the first one of all the files is taken for the shared key, the others for the test key
+				base) if test -z "$shared"; then k=shared; shared=1; else k=testkey; fi ;;
+				network_stack) k=networkstack ;;
+				media|platform|bluetooth) k="$v" ;;
+				*) continue ;;
+			esac
+			print_cert_line "$i" "$k"
+		done < <({ grep --only-matching -E 'signature="[^"]*"><seinfo value="[^"]*"' "$f" || test "$?" == 1; }|sed -re 's/^signature="([^"]*)".* value="([^"]*)"/\1 \2/')
+		wait $!
+	done|sort -u > "$1"
 }
 
 function make_certs {
@@ -1963,7 +1983,7 @@ function make_certs {
 					exit 1
 				fi|openssl x509 -in /dev/stdin -inform PEM -outform DER|xxd -p -c 999999999)"
 				test -n "$i" || exit 1
-				echo "$(echo "$i"|xxd -p -r|sha256sum -|cut -d ' ' -f 1)" "$i" "$k"
+				print_cert_line "$i" "$k"
 			fi
 		done
 	)|sort|uniq>"$1"
