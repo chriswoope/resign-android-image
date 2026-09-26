@@ -1200,33 +1200,17 @@ function make_target_files_extracted {
 		done
 	fi
 
-	query=
-
-	if test "$build_method" != rebuild; then
-		# unconditionally extract so that if we change flags we don't have to rebuild
-		query='(^|/)build\.prop$|(^|/)plat_sepolicy.cil$|(^|/)services-platform-compat-config.xml$|(^|/)hosts$'
-		if test "$build_method" == resign; then
-			if test -n "$dev_fast_sign"; then
-				query="$query|"'framework-res\.apk$'
-			else
-				query="$query|"'\.apk$|\.c?apex$'
-			fi
-
-			query="$query"'|(^|/)otacerts\.zip$|mac_permissions\.xml$'
-		fi
-	fi
-
 	# the images are read by one process each, so they are all read at the same time
 	local background_pids=()
 	for b in $image_parts; do
 		if test "$b" != system && test -e "$dir/ota_payload/$b.img"; then
 			d="$(echo "$b"|tr a-z A-Z)"
-			background make_dir "$outdir/target_files_extracted/$d" make_extract_fs "$dir/ota_payload/$b.img" "$query"
+			background make_dir "$outdir/target_files_extracted/$d" make_extract_fs "$dir/ota_payload/$b.img"
 		fi
 	done
 
 	if ! test -e "$outdir/target_files_extracted/SYSTEM" || ! test -e "$outdir/target_files_extracted/ROOT"; then
-		background with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img" "$query"
+		background with_temp_dir "$outdir/extract_root_and_system" extract_root_and_system "$dir/ota_payload/system.img"
 	fi
 
 	if test "$build_method" == resign; then
