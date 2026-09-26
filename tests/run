@@ -3,7 +3,8 @@ set -euo pipefail
 
 # End to end tests of resign-android-image: each test resigns a real release with some options, in a
 # work directory of its own, and checks what it built with tools other than the ones the script
-# checks its own output with.
+# checks its own output with; the unit test instead runs the unit tests in the tests directory with the
+# otatools of the release.
 #
 # Usage: tests/run [OPTIONS] [TEST...] [-- RESIGN_OPTIONS...]
 #
@@ -29,7 +30,7 @@ keep=
 tests=()
 resign_options=()
 
-all_tests=(basic modifications no_dex2oat)
+all_tests=(unit basic modifications no_dex2oat)
 
 while test "$#" != 0; do
 	case "$1" in
@@ -160,6 +161,13 @@ function check_metadata {
 	for channel in stable beta alpha testing; do
 		test "$(< "$out/$device-$channel")" == "$1 $2 $device $channel" || fail "The metadata of the $channel channel is wrong: $(< "$out/$device-$channel")"
 	done
+}
+
+# the unit tests of the checks that the script makes on what it builds, which make images failing them,
+# with the otatools that the build uses
+function test_unit {
+	resign --otatools-only
+	PATH="$otatools:$PATH" python3 -m unittest discover -s "$repo/tests" -p '*.py' > "$work/unit.log" 2>&1 || fail "The unit tests failed, see $work/unit.log"
 }
 
 function test_basic {

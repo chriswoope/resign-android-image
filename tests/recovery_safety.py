@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recovery safety regressions. Run with the otatools bin directory on PATH."""
+"""Recovery safety regressions. Run with the otatools bin directory on PATH, as tests/run unit does."""
 
 from pathlib import Path
 import subprocess
