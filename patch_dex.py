@@ -30,7 +30,8 @@
 # whose name matches more than the one method it is meant to patch, so that the build fails loudly
 # instead of silently producing an unpatched or over-patched image if Android renames, moves or
 # duplicates the code being patched. What was patched is reported, and the patched dex file is checked
-# to differ from the original one only where an edit meant to write.
+# to differ from the original one only where an edit meant to write, and to disassemble there as the
+# instructions it was meant to hold.
 
 import bisect
 import hashlib
@@ -193,6 +194,28 @@ def encode(insns, method, refs):
     return bytes(out), units
 
 
+def expected(insns, method):
+    """Return how dexdump disassembles instructions assembled for a method, as (name, registers,
+    operand) like decoded() returns"""
+    out = []
+    for line, _, fmt, regs, ref in insns:
+        if fmt in ("11n", "21s"):
+            ref = f"#int {int(ref, 0)}"
+        out.append((line.partition(" ")[0], [f"v{method.register(reg, 16)}" for reg in regs], ref))
+    return out
+
+
+def decoded(text):
+    """Split the disassembly of an instruction by dexdump into its name, its registers and what
+    follows them (the class, method or field it names, or its literal), without the comment"""
+    name, _, rest = text.partition(" ")
+    args = rest.split(" // ")[0].replace("{", "").replace("}", "").split(", ") if rest else []
+    regs = []
+    while args and re.fullmatch(r"v[0-9]+", args[0]):
+        regs.append(args.pop(0))
+    return name, regs, ", ".join(arg for arg in args if arg) or None
+
+
 def uleb128(dex, pos):
     """Decode the unsigned LEB128 at pos, returning it and the position just past it"""
     value = shift = 0
@@ -334,9 +357,10 @@ def spans(op, target, method):
     return out
 
 
-def replace(dex, method, refs, op, code, start, end, changes):
+def replace(dex, method, refs, op, code, start, end, changes, written):
     """Replace the bytecode of a method between start and end, filling what is left with nops, and
-    record in changes every range of the dex file that is written"""
+    record in changes every range of the dex file that is written and in written the offset of the
+    method, where the new bytecode starts and how it should disassemble"""
     bodies = [parse(body) for body in code.split("\nor\n")]
     insns = next((body for body in bodies if not missing(body, refs)), None)
     if insns is None:
@@ -373,6 +397,7 @@ def replace(dex, method, refs, op, code, start, end, changes):
         fail(f"a replacement inside a method must use single code unit instructions: {code}")
     dex[start:end] = body.ljust(end - start, b"\0")
     changes.append((start, end))
+    written.append((method.offset, start, expected(insns, method)))
 
     if op == "method":
         # the replacement ends in a return and a nop never throws, so the try blocks of the method
@@ -450,6 +475,22 @@ def check(path, before, after, changes):
         fail(f"patching {path} changed the byte at {at:#x}, which no edit was meant to touch")
 
 
+def check_disassembly(dexdump, path, dex, starts, written):
+    """Fail unless dexdump disassembles each run of new bytecode as the instructions it was assembled
+    from, so that a wrong encoding, such as a wrong opcode, stops the build rather than leaving the
+    method doing something else"""
+    patched = path + ".patched"
+    with open(patched, "wb") as f:
+        f.write(dex)
+    methods = {method.offset: method for method in disassemble(dexdump, patched, dex, starts)[0]}
+    os.unlink(patched)
+    for offset, start, want in written:
+        got = [decoded(text) for at, text in methods[offset].insns if at >= start][:len(want)]
+        if got != want:
+            fail(f"the new bytecode of {methods[offset].name} in {path} disassembles as "
+                 f"{got} rather than {want}")
+
+
 def patch(dexdump, path, dex, edits, matched):
     """Apply the edits to the contents of one dex file, disassembled with the dexdump at the path
     dexdump, recording where each of them matched, and return whether they changed"""
@@ -462,11 +503,12 @@ def patch(dexdump, path, dex, edits, matched):
         fail(f"no instruction of {path} could be read back from its disassembly")
 
     changes = []
+    written = []
     for i, (op, target, code) in enumerate(edits):
         for method in methods:
             for start, end, match in spans(op, target, method):
                 replace(dex, method, refs[method.index], op,
-                        match.expand(code) if match else code, start, end, changes)
+                        match.expand(code) if match else code, start, end, changes, written)
                 matched[i].append((method.name, os.path.basename(path)))
 
     if changes:
@@ -478,6 +520,7 @@ def patch(dexdump, path, dex, edits, matched):
             dex[start + 8:start + 12] = struct.pack("<I", zlib.adler32(dex[start + 12:end]))
             changes += [(start + 8, start + 12), (start + 12, start + 32)]
         check(path, before, dex, changes)
+        check_disassembly(dexdump, path, dex, starts, written)
     return bool(changes)
 
 
