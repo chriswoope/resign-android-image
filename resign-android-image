@@ -710,13 +710,6 @@ function download
 	wget -O "$@"
 }
 
-# the Pixel 10 devices, which have the 6.6 kernel, for which OTAs are made without ublk, and take larger
-# fastboot downloads
-pixel_10=
-if [[ $device == @(rango|mustang|blazer|frankel) ]]; then
-	pixel_10=1
-fi
-
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
 	if test "$build" -ge 2026061800; then
@@ -753,11 +746,6 @@ if test "$os" == grapheneos; then
 		factory_name="$device-factory-$build"
 		out_factory_word=factory
 		factory_optimized=
-	fi
-	if test -n "$pixel_10"; then
-		max_download_size=$((0x10000000))
-	else
-		max_download_size=$((0xf900000))
 	fi
 	factory_url="$base_url/$factory_name"
 	ota_url="$base_url/$device-ota_update-$build"
@@ -2580,13 +2568,10 @@ function make_target_files_zip {
 	fi
 }
 
-# needs out_target_files.zip
+# needs out_target_files.zip, whose dynamic_partitions_info.txt has disable_ublk=true, as ota_from_target_files
+# --disable_ublk would add, when the payload of the upstream OTA is made with it
 function make_ota_unchecked {
-	local extra_ota=()
-	if test -n "$pixel_10"; then
-		extra_ota+=( "--disable_ublk" )
-	fi
-	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "${extra_ota[@]}" "$outdir/target_files.zip" "$1"
+	"$otatools/bin/ota_from_target_files" -k "$key_dir/releasekey" "$outdir/target_files.zip" "$1"
 }
 
 # check that the otacerts.zip $2 of the $1 holds the certificate of the release key, which it writes to $3,
@@ -2796,7 +2781,15 @@ function make_factory_image {
 		fi
 
 		if test -e "$dir/factory_image/super_1.img"; then
-			simg2simg "$1/super.img" "$1/super" "$max_download_size"
+			# split into pieces of at most the size of a download of the device, like the upstream ones, which the
+			# fastboot script of the factory images checks the device for
+			local max_download_size
+			max_download_size="$(sed -nre 's/^check-var max-download-size (0x[0-9a-fA-F]+)\s*$/\1/p' "$dir/factory_image/script.txt")"
+			if ! [[ $max_download_size =~ ^0x[0-9a-fA-F]+$ ]]; then
+				echo "$dir/factory_image/script.txt doesn't check for a single max-download-size, which super was split for" >&2
+				exit 1
+			fi
+			simg2simg "$1/super.img" "$1/super" "$((max_download_size))"
 			rm -f "$1/super.img"
 
 			local supers=("$1"/super.[0-9]*)
