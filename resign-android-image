@@ -2489,6 +2489,10 @@ function take_signed_image {
 }
 
 function make_target_files_zip {
+	# what was made from the target files made before, which is only made when missing, including what --keep
+	# kept of it and what failed its check, would otherwise be taken for made from these
+	rm -rf -- "$outdir/ota_unchecked.zip" "$outdir/factory_image" "$outdir/factory_unchecked"
+
 	if test "$build_method" == resign; then
 		# which is discarded once the OTA is made, while the files marking what was made from it are kept, so
 		# it is made again for the target files that are made again
@@ -2667,6 +2671,8 @@ function check_ota {
 }
 
 function make_ota {
+	# the metadata of the OTA made before
+	rm -rf -- "$outdir/out_meta"
 	make_file "$outdir/ota_unchecked.zip" make_ota_unchecked
 
 	result="$(with_temp_dir "$outdir/check_ota" check_ota)"
@@ -2898,6 +2904,9 @@ function make_factory {
 	if test "$result" == "CHECK SUCCESSFUL"; then
 		mkdir -p "$1/$out_factory_name"
 		ln --target-directory="$1/$out_factory_name" "$outdir/factory_unchecked/$out_factory_name"/*
+		# which only has more links to the same files, and otherwise keeps the gigabytes of the images once
+		# they are discarded from here
+		rm -rf -- "$outdir/factory_unchecked"
 	else
 		echo "Factory key check failed!!!"
 		exit 1
@@ -2940,6 +2949,8 @@ function make_factory_zip {
 
 	local zip="$(realpath "$1")"
 	rm -f "$zip"
+	# the signature of the zip made before
+	rm -f -- "$out_factory.sig"
 
 	factory_entries="$(
 		local super_inserted=
@@ -3057,9 +3068,8 @@ if test -n "$build_ota"; then
 
 	make_dir "$outdir/out_meta" make_metadata
 
+	# replacing those of the OTA made before
 	ls -1 "$outdir/out_meta"|while read i; do
-		if ! test -e "$outdir/out/$i"; then
-			ln "$outdir/out_meta/$i" "$outdir/out/$i"
-		fi
+		ln -f "$outdir/out_meta/$i" "$outdir/out/$i"
 	done
 fi
