@@ -2993,13 +2993,22 @@ function make_factory_zip {
 	# the names of the files, in the order of the original zip, which zip takes one per line from its input,
 	# failing on a name that isn't there rather than silently leaving it out
 	{
-		local super_inserted= entry
+		local super_inserted= entry i
 		while IFS= read -r entry; do
 			# the build number appears in the directory name and in the image zip name
 			entry="${entry//"$build"/"$out_build"}"
 			if [[ -e "$outdir/factory/$out_factory_name"/super_1.img || -e "$outdir/factory/$out_factory_name"/super.img ]] && [[ ${entry##*/} == super*.img ]]; then
+				# the super image, or the pieces it was split into, in their order, in place of the upstream ones
 				if test -z "$super_inserted"; then
-					(cd "$outdir/factory" && ls -1 "$out_factory_name"/super*.img 2>/dev/null | grep -vE '/super_empty.img$' | sort -V)
+					if test -e "$outdir/factory/$out_factory_name/super.img"; then
+						printf '%s\n' "$out_factory_name/super.img"
+					fi
+					for ((i = 1; ; i++)); do
+						if ! test -e "$outdir/factory/$out_factory_name/super_$i.img"; then
+							break
+						fi
+						printf '%s\n' "$out_factory_name/super_$i.img"
+					done
 					super_inserted=1
 				fi
 			else
