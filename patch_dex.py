@@ -404,12 +404,15 @@ def replace(dex, method, refs, op, code, start, end, changes, written):
 
     if op == "method":
         # the replacement ends in a return and a nop never throws, so the try blocks of the method
-        # are now unreachable dead code; the bytecode kept its size, so they stay in bounds, but an
-        # address pointing inside the replacement (rather than into the nops after it, where every
-        # code unit starts an instruction) has to be moved past it to stay instruction-aligned
+        # that only cover the nops after it are unreachable dead code, which stays in bounds since the
+        # bytecode kept its size; but a try block covering the replacement, which starts before its
+        # end, makes its handlers reachable, now nops running off the end of the method, which the
+        # verifier rejects, if an instruction of it can throw, and an address pointing inside the
+        # replacement (rather than into the nops after it, where every code unit starts an
+        # instruction) has to be moved past it to stay instruction-aligned
         units = len(body) // 2
         tries, starts, handlers = catches(dex, method)
-        if any(0 < address < units for address in starts + [h[2] for h in handlers]):
+        if any(start < units for start in starts) or any(0 < address < units for _, _, address in handlers):
             if units + method.tries > method.units:
                 fail(f"{method.name} has no room after the replacement for its try blocks")
             # a try block can cover no fewer than one instruction and they have to stay ordered and
