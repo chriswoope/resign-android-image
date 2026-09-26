@@ -1,12 +1,9 @@
 #!/usr/bin/env python
 
-import hashlib
 import os
 import os.path
 import re
-import shutil
 import struct
-import subprocess
 import sys
 import zipfile
 
@@ -99,21 +96,6 @@ def main(filename, output_dir):
         print("POSTINSTALL_PATH_%s=%s" % (p.partition_name, p.postinstall_path), file = pf)
         print("FILESYSTEM_TYPE_%s=%s" % (p.partition_name, p.filesystem_type), file = pf)
         print("POSTINSTALL_OPTIONAL_%s=%s" % (p.partition_name, "true" if p.postinstall_optional else "false"), file = pf)
-
-  with open(os.path.join(output_dir, "dynamic_partitions_info.txt"), "w") as df:
-    if payload.manifest.HasField("dynamic_partition_metadata"):
-      d = payload.manifest.dynamic_partition_metadata
-      print("use_dynamic_partitions=true", file = df)
-      if d.HasField("snapshot_enabled") and d.snapshot_enabled:
-        print("virtual_ab=true", file = df)
-#     if d.HasField("vabc_enabled") and d.vabc_enabled:
-#      	print("virtual_ab_compression=true")
-      print("super_partition_groups=" + " ".join([g.name for g in d.groups]), file = df)
-      for g in d.groups:
-        print("super_" + g.name + "_group_size=" + str(g.size), file = df)
-        print("super_" + g.name + "_partition_list=" + " ".join(g.partition_names), file = df)
-    else:
-      print("use_dynamic_partitions=false")
 
 if __name__ == '__main__':
   try:
