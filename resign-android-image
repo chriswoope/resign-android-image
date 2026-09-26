@@ -2472,6 +2472,9 @@ function make_target_files_zip {
 			echo "The images don't verify with vbmeta and the AVB key!!!" >&2
 			exit 1
 		fi
+		# and that the recovery trusts the release key and accepts the next updates, as for the OTA and the
+		# factory images, since the target files are the output when neither is asked for
+		with_temp_dir "$outdir/check_target_files" check_images "$outdir/target_files/IMAGES" "$outdir/target_files/IMAGES/system.img"
 
 		make_file "$outdir/target_files/META/care_map.pb" make_care_map
 
