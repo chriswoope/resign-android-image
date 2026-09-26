@@ -1015,21 +1015,23 @@ done
 # signapk writes an APK through a ZipOutputStream, which writes the fields of the zip headers a byte at a
 # time, to an unbuffered FileOutputStream, making a system call for each byte: buffer the CountingOutputStream
 # that everything it writes goes through, which makes it several times faster and writes the same bytes
+# make the signapk.jar $2 in the directory $1
+function make_signapk_jar_in {
+	local src="$aosp/build/make/tools/signapk/src/com/android/signapk/CountingOutputStream.java"
+	local patched="$1/CountingOutputStream.java"
+	sed -re 's/^(\s*mBase = )base;$/\1new java.io.BufferedOutputStream(base);/' "$src" > "$patched"
+	if cmp -s "$src" "$patched"; then
+		echo "There is no assignment of the stream to write to in $src" >&2
+		exit 1
+	fi
+	# javac, which the Java runtime has without the JDK
+	java -m jdk.compiler/com.sun.tools.javac.Main -d "$1/classes" "$patched"
+	cp "$otatools/framework/signapk.jar.otatools" "$2"
+	(cd "$1/classes" && zip -q -X -D -r "$2" com)
+}
+
 function make_signapk_jar {
-	function go {
-		local src="$aosp/build/make/tools/signapk/src/com/android/signapk/CountingOutputStream.java"
-		local patched="$1/CountingOutputStream.java"
-		sed -re 's/^(\s*mBase = )base;$/\1new java.io.BufferedOutputStream(base);/' "$src" > "$patched"
-		if cmp -s "$src" "$patched"; then
-			echo "There is no assignment of the stream to write to in $src" >&2
-			exit 1
-		fi
-		# javac, which the Java runtime has without the JDK
-		java -m jdk.compiler/com.sun.tools.javac.Main -d "$1/classes" "$patched"
-		cp "$otatools/framework/signapk.jar.otatools" "$2"
-		(cd "$1/classes" && zip -q -X -D -r "$2" com)
-	}
-	with_temp_dir "$1.build" go "$1"
+	with_temp_dir "$1.build" make_signapk_jar_in "$1"
 }
 
 make_file "$otatools/framework/signapk.jar" make_signapk_jar
@@ -1264,7 +1266,7 @@ function extract_root {
 }
 
 function extract_root_and_system {
-	work="$1"
+	local work="$1"
 	shift
 	make_extract_fs "$work" "$@"
 	make_dir "$outdir/target_files_extracted/SYSTEM" extract_system "$work"
@@ -1404,6 +1406,7 @@ function patch_apex {
 	local cmd="$4"
 	shift 4
 
+	local type args=() modded_apex_r aligned_tmp
 	type="$(deapexer info --print-type "$apex")"
 	if test "$type" == COMPRESSED; then
 		deapexer decompress --input "$apex" --output "$work"/original.apex
@@ -1429,7 +1432,6 @@ function patch_apex {
 		exit 1
 	fi
 
-	args=()
 	if test -e "$work/apex/apex_manifest.json"; then
 		args+=(--manifest_json "$work/apex/apex_manifest.json")
 	fi
@@ -1490,6 +1492,7 @@ function patch_apk_raw {
 	mkdir -p "$files"
 	unzip -x -d "$files" "$in_zip"
 	"$cmd" "$files" "$@"
+	local out_zip_r
 	out_zip_r="$(realpath "$out_zip")"
 	bsdtar -tf "$in_zip"|(cd "$files" && zip -0 -@ "$out_zip_r")
 	rm -f "$out"
@@ -2140,58 +2143,61 @@ function make_target_files_intermediates_zip {
 	zip_target_files "$1" "$outdir/target_files_intermediates"
 }
 
-function make_target_files_signed_zip {
-	function go {
-		make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
-		discard "$outdir/target_files_intermediates" "$outdir/target_files_intermediates.done"
+# sign the target files into $2 in the directory $1
+function make_target_files_signed_zip_in {
+	make_file "$outdir/target_files_intermediates.zip" make_target_files_intermediates_zip
+	discard "$outdir/target_files_intermediates" "$outdir/target_files_intermediates.done"
 
-		if test "$build_method" == vbmeta; then
-			rm -f "$2"
-			ln "$outdir/target_files_intermediates.zip" "$2"
-		else
-			from="$(realpath "$outdir/target_files_intermediates.zip")"
-			to="$(realpath "$2")"
-			# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with
-			if test -e "$signapk_jsa" && ! java "${signapk_java_args[@]}" -Xshare:on -XX:SharedArchiveFile="$signapk_jsa" -cp "$otatools/framework/signapk.jar" -version 2>/dev/null; then
-				rm "$signapk_jsa"
-			fi
-			make_file "$signapk_jsa" make_signapk_jsa "$from"
-			mkdir -p "$1/build/make/target/product"
-			ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
-			ln -s "$(realpath "$key_dir")" "$1/keys"
-			cd "$1"
-			# added to the arguments of sign_target_files_apks in the release script, which gets them as its own
-			local sign_args=(-k build/make/target/product/security/bluetooth=keys/bluetooth)
-			# signing the APKs and APEXes in parallel, which the releasetools before those of Android 17 can't do
-			if grep -q '"threads="' "$otatools/releasetools/sign_target_files_apks.py"; then
-				sign_args+=(--threads "$threads")
-			fi
-			# sign_target_files_apks splits the Java options like a shell does, so each one is single quoted
-			local java_args= arg
-			for arg in "${signapk_java_args[@]}" -XX:SharedArchiveFile="$signapk_jsa"; do
-				java_args+=" '${arg//\'/\'\\\'\'}'"
-			done
-			sign_args+=(--java_args "$java_args")
-			generate_release_sh="$aosp/script/generate-release.sh"
-			if ! test -e "$generate_release_sh"; then
-				generate_release_sh="$aosp/script/release.sh"
-			fi
-
-			local sign_cmd
-			sign_cmd="$(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/')"
-			# the arguments are added after the key directory, where a change to the release script would otherwise
-			# leave them out without an error, of the only command there is to sign with
-			if [[ $sign_cmd != 'sign_target_files_apks '*'-d "$KEY_DIR" "$@"'* || $sign_cmd == *$'\n'sign_target_files_apks* ]]; then
-				echo "There is no single sign_target_files_apks command with -d \"\$KEY_DIR\" to add the arguments after in $generate_release_sh" >&2
-				exit 1
-			fi
-			printf '%s\n%s\n' "$sign_cmd" '"$RESIGN_FROM" "$RESIGN_TO"'|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
-			# check that the sign tools signed all the files they are for, with the payloads they are
-			# in repacked as they were
-			python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to"
+	if test "$build_method" == vbmeta; then
+		rm -f "$2"
+		ln "$outdir/target_files_intermediates.zip" "$2"
+	else
+		local from to generate_release_sh
+		from="$(realpath "$outdir/target_files_intermediates.zip")"
+		to="$(realpath "$2")"
+		# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with
+		if test -e "$signapk_jsa" && ! java "${signapk_java_args[@]}" -Xshare:on -XX:SharedArchiveFile="$signapk_jsa" -cp "$otatools/framework/signapk.jar" -version 2>/dev/null; then
+			rm "$signapk_jsa"
 		fi
-	}
-	with_temp_dir "$outdir/sign_target_files" go "$@"
+		make_file "$signapk_jsa" make_signapk_jsa "$from"
+		mkdir -p "$1/build/make/target/product"
+		ln -s "$(realpath "$outdir/product_security")" "$1/build/make/target/product/security"
+		ln -s "$(realpath "$key_dir")" "$1/keys"
+		cd "$1"
+		# added to the arguments of sign_target_files_apks in the release script, which gets them as its own
+		local sign_args=(-k build/make/target/product/security/bluetooth=keys/bluetooth)
+		# signing the APKs and APEXes in parallel, which the releasetools before those of Android 17 can't do
+		if grep -q '"threads="' "$otatools/releasetools/sign_target_files_apks.py"; then
+			sign_args+=(--threads "$threads")
+		fi
+		# sign_target_files_apks splits the Java options like a shell does, so each one is single quoted
+		local java_args= arg
+		for arg in "${signapk_java_args[@]}" -XX:SharedArchiveFile="$signapk_jsa"; do
+			java_args+=" '${arg//\'/\'\\\'\'}'"
+		done
+		sign_args+=(--java_args "$java_args")
+		generate_release_sh="$aosp/script/generate-release.sh"
+		if ! test -e "$generate_release_sh"; then
+			generate_release_sh="$aosp/script/release.sh"
+		fi
+
+		local sign_cmd
+		sign_cmd="$(sed -nre '/^sign_target_files_apks/h; x; /./ {x; /\\$/p; /\\$/! s/.*//;}; x' "$generate_release_sh"|sed -re 's/(-d "\$KEY_DIR")/\1 "$@"/')"
+		# the arguments are added after the key directory, where a change to the release script would otherwise
+		# leave them out without an error, of the only command there is to sign with
+		if [[ $sign_cmd != 'sign_target_files_apks '*'-d "$KEY_DIR" "$@"'* || $sign_cmd == *$'\n'sign_target_files_apks* ]]; then
+			echo "There is no single sign_target_files_apks command with -d \"\$KEY_DIR\" to add the arguments after in $generate_release_sh" >&2
+			exit 1
+		fi
+		printf '%s\n%s\n' "$sign_cmd" '"$RESIGN_FROM" "$RESIGN_TO"'|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
+		# check that the sign tools signed all the files they are for, with the payloads they are
+		# in repacked as they were
+		python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to"
+	fi
+}
+
+function make_target_files_signed_zip {
+	with_temp_dir "$outdir/sign_target_files" make_target_files_signed_zip_in "$@"
 }
 
 function make_target_files_signed {
@@ -3082,7 +3088,7 @@ fi
 if test -n "$build_ota"; then
 	function make_metadata {
 		ln "$out_ota" "$1/ota.zip"
-		generate_metadata="$aosp/script/generate-metadata"
+		local generate_metadata="$aosp/script/generate-metadata"
 		if ! test -e "$generate_metadata"; then
 			generate_metadata="$aosp/script/generate-metadata.py"
 		fi
