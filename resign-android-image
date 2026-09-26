@@ -2736,8 +2736,11 @@ function do_ln_dir {
 	ln "$2"/* "$1"
 }
 
+# extract the factory images into $dir/factory, listing their files in $dir/factory.list, and put the images
+# into $dir/factory_image, which the factory images of the builds before the install ones have in a zip of their
+# own, whose files are listed in $dir/factory_image.list
 function extract_factory_image {
-	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory_image.list"; then
+	if ! test -e "$dir/factory_image" || ! test -e "$dir/factory.list" || { test -z "$factory_optimized" && ! test -e "$dir/factory_image.list"; }; then
 		if ! test -e "$dir/factory" || ! test -e "$dir/factory.list"; then
 			make_factory_download
 
