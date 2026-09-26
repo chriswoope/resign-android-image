@@ -2075,7 +2075,10 @@ function make_target_files_intermediates {
 #		echo dummy_partition_name_so_resign_fails_to_build_images > "$outdir/target_files_intermediates/META/ab_partitions.txt"
 	fi
 	if test "$build_method" == resign; then
-		make_dir "$outdir/fs_expected" make_fs_config
+		# The configs live in the disposable intermediate tree, while fs_expected survives signing.
+		# Regenerate both whenever that tree needs completing; its .done marker covers this step.
+		mkdir -p "$outdir/fs_expected"
+		make_fs_config "$outdir/fs_expected"
 		# pvmfw may only be in the factory images, since it doesn't have to be updated by OTAs
 		local pvmfw="$dir/ota_payload/pvmfw.img"
 		if ! test -e "$pvmfw" && [[ " $(get_avbtool_partitions "$dir/ota_payload/vbmeta.img"|tr '\n' ' ') " == *" pvmfw "* ]]; then
