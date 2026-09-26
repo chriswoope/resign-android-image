@@ -1209,7 +1209,7 @@ function make_extract_fs {
 	with_temp_dir "$outdir/mnt" extract_image "$@"
 
 	if test -n "$dev_fast_sign"; then
-		find "$1" -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex'|grep -v framework-res.apk|xargs rm -f
+		find "$1" -type f \( -iname '*.apk' -o -iname '*.apex' -o -iname '*.capex' \) ! -name framework-res.apk -delete
 	fi
 }
 
