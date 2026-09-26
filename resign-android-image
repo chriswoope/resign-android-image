@@ -773,8 +773,17 @@ dexpreopt_tools="$(realpath "$var_dir")/dexpreopt_tools-$android_version"
 make_file "$dexpreopt_tools.zip" download_ci_artifact dexpreopt_tools.zip "$dexpreopt_tools.zip"
 make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 
+# the jar isn't signed, so it is checked against the SHA-256 of the one on Maven, which was checked against
+# the SHA-1 that Maven publishes next to it
 function download_aapt2 {
+	local digest
 	curl --fail -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
+	read -r digest _ < <(sha256sum < "$otatools.aapt2.zip")
+	if test "$digest" != d5c7a4bbf71f483c99f808c7ce74e4f1bc859e71a9411dfd33cf5de6e5a2dcfa; then
+		echo "$otatools.aapt2.zip is not the aapt2 that was published on Maven" >&2
+		remove_bad_download "$otatools.aapt2.zip"
+		exit 1
+	fi
 	bsdtar -O -x -f "$otatools.aapt2.zip" aapt2 > "$1"
 	chmod +x "$1"
 }
