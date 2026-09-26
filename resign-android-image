@@ -189,7 +189,7 @@ while test "$#" != 0; do
 		# remove all APEXes, CAPEXes and APKs to make signing very fast during development of this script
 		dev_fast_sign=1
 	else
-		echo "Error: unrecognized parameter $1" 2>&1
+		echo "Error: unrecognized parameter $1" >&2
 		exit 1
 	fi
 	shift 1
