@@ -76,6 +76,20 @@ class BootVerification(unittest.TestCase):
                             allow_additions=True, allow_new_files=True)
 
 
+    def test_ramdisk_file_must_be_in_a_single_ramdisk(self):
+        other = self.make_image("other", {"otacerts.zip": b"certificates"})
+        script = Path(__file__).resolve().parents[1] / "target_files_inputs.py"
+
+        def ramdisk_file(*images):
+            return subprocess.run([sys.executable, str(script), "ramdisk-file", "otacerts.zip", *images],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+        self.assertEqual(ramdisk_file(self.original, other).stdout, b"certificates")
+        for images in [(self.original,), (other, other)]:
+            with self.subTest(images=images):
+                self.assertNotEqual(ramdisk_file(*images).returncode, 0)
+
+
 class RecoveryCertificate(unittest.TestCase):
     def test_supported_and_unsupported_certificates(self):
         with tempfile.TemporaryDirectory() as tmp:

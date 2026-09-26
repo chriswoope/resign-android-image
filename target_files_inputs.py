@@ -34,6 +34,9 @@
 #     target_files_inputs.py recovery-cert-check CERTIFICATE
 #         check that the OTA certificate uses RSA parameters and a signature algorithm accepted by
 #         recovery's certificate loader and the RSA-only host OTA signature verifier
+#     target_files_inputs.py ramdisk-file PATH IMAGE [IMAGE...]
+#         print the file at PATH in the ramdisks of the boot IMAGEs, which must be in only one of them,
+#         since the kernel unpacks them over each other in the order the bootloader loads them in
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
@@ -1684,6 +1687,10 @@ def boot_inputs(out, partitions):
                     if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name in (".", "..") or name in names:
                         fail(f"{image} has a ramdisk named {name!r}, which cannot be a fragment in target files")
                     names.append(name)
+                    # the signing replaces the OTA certificates only in the ramdisks it builds, so the
+                    # recovery would keep trusting the original key with a prebuilt one holding them
+                    if any(os.path.basename(entry[0]) == b"otacerts.zip" for entry in cpio_entries(ramdisk)):
+                        fail(f"{image} has OTA certificates in its {name} ramdisk, which is kept as it is")
                     fragment_dir = os.path.join(tree, "RAMDISK_FRAGMENTS", name)
                     os.makedirs(fragment_dir)
                     with open(os.path.join(fragment_dir, "mkbootimg_args"), "w") as f:
@@ -1724,6 +1731,21 @@ def recovery_cert_check(certificate):
             or not exponent or int(exponent[1]) not in (3, 65537)):
         fail(f"{certificate}: OTA signing requires a recovery-compatible RSA key: "
              "2048 or 4096 bits, with public exponent 3 or 65537")
+
+
+def ramdisk_file(path, images):
+    """Print the file at path in the ramdisks of the boot images, which the kernel unpacks over each
+    other, so that it must be in only one of them to be the one there whatever order they are loaded in."""
+    found = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, image in enumerate(images):
+            for option, value in unpack_boot_image(image, os.path.join(tmp, str(i))):
+                if option in RAMDISK_OPTIONS and os.path.getsize(value):
+                    found += [(mode, contents) for name, mode, *_, contents in cpio_entries(value)
+                              if os.path.normpath(name).lstrip(b"/") == path]
+    if len(found) != 1 or not stat.S_ISREG(found[0][0]):
+        fail(f"The ramdisks of {' '.join(images)} have {len(found)} entries at /{os.fsdecode(path)} rather than a file")
+    sys.stdout.buffer.write(found[0][1])
 
 
 def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False):
@@ -1784,6 +1806,8 @@ def main():
                     allow_additions="--allow-additions" in args[3:], allow_new_files="--allow-new-files" in args[3:])
     elif len(args) == 2 and args[0] == "recovery-cert-check":
         recovery_cert_check(args[1])
+    elif len(args) >= 3 and args[0] == "ramdisk-file":
+        ramdisk_file(os.fsencode(args[1]), args[2:])
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
     elif len(args) == 4 and args[0] == "apk-keys":
@@ -1803,7 +1827,7 @@ def main():
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
-             "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE")
+             "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE | ramdisk-file PATH IMAGE...")
 
 
 if __name__ == "__main__":

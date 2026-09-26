@@ -2420,16 +2420,22 @@ function make_ota_unchecked {
 
 # make sure we have the correct key in recovery so that we can sideload another update, otherwise we can get locked out the device...
 # and that vbmeta is signed with the AVB key that the bootloader is locked with, and that the system is
-# the one of the version being built, with the timestamp that the updater compares
+# the one of the version being built, with the timestamp that the updater compares: the images are those
+# in the directory $2 but for the system image $3
 function check_images {
-	local vendor_boot="$2"
 	local system="$3"
-	local vbmeta="$4"
-	"$otatools/bin/unpack_bootimg" --boot_img "$vendor_boot" --out "$1/vendor_boot" >&2
-	mkdir "$1/vendor_boot_ramdisk" >&2
-	"$otatools/bin/lz4" -d "$1/vendor_boot/vendor_ramdisk00" -|(cd "$1/vendor_boot_ramdisk" && cpio -i) >&2
+	local vbmeta="$2/vbmeta.img"
+	# the recovery boots with the ramdisks of all of them, the generic one included, and any of them
+	# could hold certificates that the others' are unpacked over
+	local boot_images=() b
+	for b in vendor_boot boot init_boot; do
+		if test -e "$2/$b.img"; then
+			boot_images+=("$2/$b.img")
+		fi
+	done
+	python3 "$data_dir/target_files_inputs.py" ramdisk-file system/etc/security/otacerts.zip "${boot_images[@]}" > "$1/recovery_otacerts.zip"
 	mkdir "$1/recovery_otacerts" >&2
-	unzip -x -d "$1/recovery_otacerts" "$1/vendor_boot_ramdisk/system/etc/security/otacerts.zip" >&2
+	unzip -x -d "$1/recovery_otacerts" "$1/recovery_otacerts.zip" >&2
 	if ! cmp "$1/recovery_otacerts/keys/releasekey.x509.pem" "$key_dir/releasekey.x509.pem"; then
 		echo "Recovery otacerts.zip has wrong key!!!" >&2
 		exit 1
@@ -2469,8 +2475,9 @@ function check_images {
 function check_ota {
 	mkdir "$1/ota_payload"
 	ota_payload_offset "$outdir/ota_unchecked.zip"
-	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions vendor_boot,system,vbmeta >&2
-	check_images "$1" "$1/ota_payload/vendor_boot.img" "$1/ota_payload/system.img" "$1/ota_payload/vbmeta.img"
+	# which skips the partitions that the payload doesn't have
+	"$otatools/bin/ota_extractor" -payload "$outdir/ota_unchecked.zip" -payload_offset "$ota_payload_offset" -output_dir "$1/ota_payload" -partitions boot,init_boot,vendor_boot,system,vbmeta >&2
+	check_images "$1" "$1/ota_payload" "$1/ota_payload/system.img"
 	# the recovery that the OTA installs verifies the signature of the next OTA to sideload, and the one of its
 	# payload, with the certificates of its otacerts.zip, so it must accept this OTA, which the next ones are
 	# signed like
@@ -2726,7 +2733,7 @@ function check_factory {
 		"$otatools"/bin/lpunpack -p system_a "$1/super.img" "$1/lpunpack" >&2
 		mv "$1/lpunpack/system_a.img" "$1/system.img"
 	else
-		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$out_factory_name/image-$device-$out_build.zip" system.img vendor_boot.img vbmeta.img >&2
+		unzip -x -d "$1/factory_image" "$outdir/factory_unchecked/$out_factory_name/image-$device-$out_build.zip" system.img vbmeta.img '*boot.img' >&2
 		"$otatools/bin/simg2img" "$1/factory_image/system.img" "$1/system.img"  >&2
 	fi
 	# the key that the bootloader is locked with after flashing
@@ -2735,7 +2742,7 @@ function check_factory {
 		exit 1
 	fi
 
-	check_images "$1" "$1/factory_image/vendor_boot.img" "$1/system.img" "$1/factory_image/vbmeta.img"
+	check_images "$1" "$1/factory_image" "$1/system.img"
 	echo "CHECK SUCCESSFUL"
 }
 
