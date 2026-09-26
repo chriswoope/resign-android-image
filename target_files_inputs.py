@@ -25,12 +25,14 @@
 #         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
 #         and to OUT/misc_info.txt the misc_info.txt entries they are built with. A boot image without a
 #         ramdisk is left to be used as a prebuilt one, as it is by a normal build
-#     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED
+#     target_files_inputs.py boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... < CHANGED
 #         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
 #         files in its ramdisks of the ORIGINAL one, with the same names, metadata and contents, but for
 #         the contents of the files at the paths in the ramdisk, NUL separated, read from the standard
 #         input, which may have changed. --allow-additions also allows new paths listed in CHANGED;
-#         --allow-new-files allows any new paths. Existing paths must retain their metadata and order.
+#         --allow-new-files allows any new paths but those in the ramdisks of the OTHER boot images
+#         loaded along with IMAGE, which the new file would replace or be replaced by. Existing paths
+#         must retain their metadata and order.
 #     target_files_inputs.py recovery-cert-check CERTIFICATE
 #         check that the OTA certificate uses RSA parameters and a signature algorithm accepted by
 #         recovery's certificate loader and the RSA-only host OTA signature verifier
@@ -1733,25 +1735,34 @@ def recovery_cert_check(certificate):
              "2048 or 4096 bits, with public exponent 3 or 65537")
 
 
+def ramdisk_entries(images, tmp):
+    """The entries of the ramdisks of the boot images, as cpio_entries gives them but for the name, which is
+    made relative to the root, unpacking them in tmp."""
+    for i, image in enumerate(images):
+        for option, value in unpack_boot_image(image, os.path.join(tmp, str(i))):
+            if option in RAMDISK_OPTIONS and os.path.getsize(value):
+                for name, *rest in cpio_entries(value):
+                    yield (os.path.normpath(name).lstrip(b"/"), *rest)
+
+
 def ramdisk_file(path, images):
     """Print the file at path in the ramdisks of the boot images, which the kernel unpacks over each
     other, so that it must be in only one of them to be the one there whatever order they are loaded in."""
-    found = []
     with tempfile.TemporaryDirectory() as tmp:
-        for i, image in enumerate(images):
-            for option, value in unpack_boot_image(image, os.path.join(tmp, str(i))):
-                if option in RAMDISK_OPTIONS and os.path.getsize(value):
-                    found += [(mode, contents) for name, mode, *_, contents in cpio_entries(value)
-                              if os.path.normpath(name).lstrip(b"/") == path]
+        found = [(mode, contents) for name, mode, *_, contents in ramdisk_entries(images, tmp) if name == path]
     if len(found) != 1 or not stat.S_ISREG(found[0][0]):
         fail(f"The ramdisks of {' '.join(images)} have {len(found)} entries at /{os.fsdecode(path)} rather than a file")
     sys.stdout.buffer.write(found[0][1])
 
 
-def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False):
+def boot_verify(image, original, changed, allow_additions=False, allow_new_files=False, loaded_with=()):
     with tempfile.TemporaryDirectory() as tmp:
         actual = describe_boot_image(image, os.path.join(tmp, "image"), changed)
         expected = describe_boot_image(original, os.path.join(tmp, "original"), changed)
+        # the paths of the ramdisks of the boot images loaded along with the image, which the kernel unpacks
+        # its ramdisks over, or the other way around, so that a file new to the image replaces one of theirs,
+        # like those of the recovery in the ramdisk of vendor_boot, or is replaced by it
+        loaded_names = {os.fsdecode(name) for name, *_ in ramdisk_entries(loaded_with, os.path.join(tmp, "loaded"))}
     if allow_additions or allow_new_files:
         for (option, a), (expected_option, e) in zip(actual, expected):
             if option != expected_option or option not in RAMDISK_OPTIONS:
@@ -1765,7 +1776,8 @@ def boot_verify(image, original, changed, allow_additions=False, allow_new_files
             if len(set(names)) != len(names):
                 fail(f"{image}: {option} has duplicate ramdisk paths")
             a[:] = [entry for entry in a if entry[0] in original_names or not (
-                allow_new_files or (allow_additions and os.fsencode(entry[0]) in changed))]
+                (allow_new_files and entry[0] not in loaded_names)
+                or (allow_additions and os.fsencode(entry[0]) in changed))]
     if actual != expected:
         errors = []
         for (option, a), (expected_option, e) in zip(actual, expected):
@@ -1780,10 +1792,26 @@ def boot_verify(image, original, changed, allow_additions=False, allow_new_files
             if a_files == e_files:
                 errors.append(f"{option} has its files in another order")
             errors += [f"{option} /{name} is {a_files.get(name)} rather than {e_files.get(name)}"
+                       + (", and is in the ramdisks loaded along with it" if name in loaded_names else "")
                        for name in sorted(a_files.keys() | e_files.keys()) if a_files.get(name) != e_files.get(name)]
         if len(actual) != len(expected):
             errors.append(f"{len(actual)} options rather than {len(expected)}")
         fail(f"{image} is not made like the original one:\n" + "\n".join(errors))
+
+
+def boot_verify_options(args):
+    """The keyword arguments of boot_verify that the options args of boot-verify stand for, or None if they
+    aren't valid."""
+    options = {"allow_additions": False, "allow_new_files": False, "loaded_with": []}
+    args = iter(args)
+    for option in args:
+        if option in ("--allow-additions", "--allow-new-files"):
+            options[option[2:].replace("-", "_")] = True
+        elif option == "--loaded-with" and (image := next(args, None)) is not None:
+            options["loaded_with"].append(image)
+        else:
+            return None
+    return options
 
 
 def main():
@@ -1800,10 +1828,8 @@ def main():
         fs_verify(args[1], args[2])
     elif len(args) >= 4 and len(args) % 2 == 0 and args[0] == "boot-inputs":
         boot_inputs(args[1], list(zip(args[2::2], args[3::2])))
-    elif len(args) >= 3 and args[0] == "boot-verify" and all(
-            option in ("--allow-additions", "--allow-new-files") for option in args[3:]):
-        boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path),
-                    allow_additions="--allow-additions" in args[3:], allow_new_files="--allow-new-files" in args[3:])
+    elif len(args) >= 3 and args[0] == "boot-verify" and (options := boot_verify_options(args[3:])) is not None:
+        boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path), **options)
     elif len(args) == 2 and args[0] == "recovery-cert-check":
         recovery_cert_check(args[1])
     elif len(args) >= 3 and args[0] == "ramdisk-file":
@@ -1824,7 +1850,7 @@ def main():
         fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
-             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] < CHANGED | avb-args PARTITION IMAGE | "
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE | ramdisk-file PATH IMAGE...")

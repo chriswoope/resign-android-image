@@ -63,6 +63,15 @@ class BootVerification(unittest.TestCase):
         boot_verify(added, self.original, {b"new"}, allow_additions=True)
         boot_verify(added, self.original, set(), allow_new_files=True)
 
+    def test_new_files_cannot_replace_those_of_the_ramdisks_loaded_along(self):
+        # like the recovery in the ramdisk of vendor_boot, which that of boot is unpacked over
+        recovery = self.make_image("recovery", {"new": b"recovery"})
+        added = self.make_image("added", {"init": b"original init", "other": b"unchanged", "new": b"new"})
+        with self.assertRaises(SystemExit):
+            boot_verify(added, self.original, set(), allow_new_files=True, loaded_with=[recovery])
+        boot_verify(added, self.original, {b"new"}, allow_additions=True, allow_new_files=True,
+                    loaded_with=[recovery])
+
     def test_deletion_metadata_kernel_and_header_stay_protected(self):
         variants = [
             ("removed", {"other": b"unchanged"}, {}),

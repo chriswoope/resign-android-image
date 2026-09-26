@@ -1979,10 +1979,17 @@ EOF
 # Check the replacement with the same verifier as rebuilt boot images. Only explicitly allowed
 # ramdisk contents and additions may differ; the kernel, header and existing metadata must match.
 function make_replaced_boot {
-	local extra=()
+	local extra=() b
 	if test -n "$replace_boot_allow_new_files"; then
 		extra+=(--allow-new-files)
 	fi
+	# whose ramdisks the kernel unpacks the one of boot over, so that a file new to it can replace one of
+	# theirs, like those of the recovery in vendor_boot, which must then be allowed to change explicitly
+	for b in vendor_boot init_boot; do
+		if test -e "$dir/ota_payload/$b.img"; then
+			extra+=(--loaded-with "$dir/ota_payload/$b.img")
+		fi
+	done
 	printf '%s\0' "${replace_boot_allow_change[@]}"|python3 "$data_dir/target_files_inputs.py" boot-verify "$replace_boot" "$2" --allow-additions "${extra[@]}"
 	cp -- "$replace_boot" "$1"
 }
