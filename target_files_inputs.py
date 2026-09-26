@@ -1798,7 +1798,7 @@ def recovery_cert_check(certificate):
     dump = subprocess.run(["openssl", "x509", "-in", certificate, "-text", "-noout"], check=True,
                           stdout=subprocess.PIPE, text=True).stdout
     algorithms = re.findall(r"^\s*Signature Algorithm: (\S+)\s*$", dump, re.M)
-    allowed = {"md5WithRSA", "md5WithRSAEncryption", "sha1WithRSAEncryption", "sha256WithRSAEncryption"}
+    allowed = {"md5WithRSA", "md5WithRSAEncryption", "sha1WithRSA", "sha1WithRSAEncryption", "sha256WithRSAEncryption"}
     if not algorithms or any(algorithm not in allowed for algorithm in algorithms):
         fail(f"{certificate}: recovery does not support this certificate signature algorithm: {algorithms}")
     key_type = re.search(r"^\s*Public Key Algorithm: (\S+)\s*$", dump, re.M)
