@@ -336,7 +336,8 @@ def disassemble(dexdump, path, dex, starts):
 def spans(op, target, method):
     """Return the (start, end, match) of every run of bytecode of a method that an edit replaces"""
     if op == "method":
-        if method.name == target or method.name.endswith("." + target):
+        # dexdump names a class inside another one after it and a $, and a class in a package after it and a dot
+        if method.name == target or method.name.endswith(("." + target, "$" + target)):
             return [(method.start, method.end, None)]
         return []
 
