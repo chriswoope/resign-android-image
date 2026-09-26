@@ -2106,9 +2106,10 @@ function make_target_files_signed_zip_in {
 		local from to generate_release_sh
 		from="$(realpath "$outdir/target_files_intermediates.zip")"
 		to="$(realpath "$2")"
-		# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with
+		# the archive can only be used by the Java runtime that made it, with the signapk.jar it was made with;
+		# another run sharing it may have found it unusable and removed it as well
 		if test -e "$signapk_jsa" && ! java "${signapk_java_args[@]}" -Xshare:on -XX:SharedArchiveFile="$signapk_jsa" -cp "$otatools/framework/signapk.jar" -version 2>/dev/null; then
-			rm "$signapk_jsa"
+			rm -f -- "$signapk_jsa"
 		fi
 		make_file "$signapk_jsa" make_signapk_jsa "$from"
 		mkdir -p "$1/build/make/target/product"
