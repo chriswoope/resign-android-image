@@ -1309,7 +1309,8 @@ function make_target_files_extracted {
 
 	if test "$build_method" == vbmeta; then
 		mkdir -p "$outdir/target_files_extracted/IMAGES"
-		ls -1 "$dir/ota_payload"|while read i; do
+		for i in "$dir/ota_payload"/*; do
+			i="${i##*/}"
 			if test "$i" == vbmeta.img; then
 				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$outdir/target_files_extracted/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
 			elif test -f "$dir/ota_payload/$i"; then
@@ -2376,7 +2377,8 @@ function make_target_files_base {
 		(cd "$outdir/target_files_signed" && find . -name build.prop -print0|xargs -0 cp -a --parents --target-directory="$outr")
 
 		make_file "$dir/ota_meta/postinstall_config.txt" make_postinstall_config
-		ls -1 "$dir/ota_meta"|while read i; do
+		for i in "$dir/ota_meta"/*; do
+			i="${i##*/}"
 			if test "$i" != dynamic_partitions_info.txt && test "$i" != misc_info.txt; then
 				ln -f "$dir/ota_meta/$i" "$1/META/$i"
 			fi
@@ -2506,7 +2508,8 @@ function make_target_files_zip {
 		make_dir "$outdir/target_files" make_target_files_base
 
 		mkdir -p "$outdir/target_files/IMAGES"
-		ls -1 "$dir/ota_payload"|while read i; do
+		for i in "$dir/ota_payload"/*; do
+			i="${i##*/}"
 			local done=
 			for j in $signed_images; do
 				if test "$i" == "$j.img"; then
@@ -2780,7 +2783,8 @@ function make_factory_image {
 		fi
 	fi
 
-	ls -1 "$dir/factory_image" | while read i; do
+	for i in "$dir/factory_image"/*; do
+		i="${i##*/}"
 		if test "$i" == avb_pkmd.bin; then
 			cp -a "$key_dir/avb_pkmd.bin" "$1"
 		elif test "$i" == flash-all.sh; then
@@ -2883,7 +2887,8 @@ function make_factory_unchecked {
 		# files in the zip must be in the proper order, which zip takes the names in, one per line, from its input
 		(cd "$outdir/factory_image" && zip -q "$zip_opt" "$zip" -@) < "$dir/factory_image.list"
 
-		ls -1 "$dir/factory/$factory_name"|while read i; do
+		for i in "$dir/factory/$factory_name"/*; do
+			i="${i##*/}"
 			if test "$i" == avb_pkmd.bin; then
 				cp -a "$key_dir/avb_pkmd.bin" "$out"
 			elif test "$i" == "image-$device-$build.zip"; then
@@ -3075,7 +3080,5 @@ if test -n "$build_ota"; then
 	make_dir "$outdir/out_meta" make_metadata
 
 	# replacing those of the OTA made before
-	ls -1 "$outdir/out_meta"|while read i; do
-		ln -f "$outdir/out_meta/$i" "$outdir/out/$i"
-	done
+	ln -f --target-directory="$outdir/out" "$outdir/out_meta"/*
 fi
