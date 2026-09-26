@@ -1459,7 +1459,8 @@ function patch_updater {
 # is run with qemu-user, which emulates the register, if it doesn't work as it is
 function dex2oat_runner {
 	dex2oat_runner=
-	if dmesg 2>/dev/null|grep -q '^\[ *[0-9.]*\] Starting gVisor\.\.\.$'; then
+	# not in a pipeline, whose status would be the one of dmesg being killed by grep having found the line
+	if grep -q '^\[ *[0-9.]*\] Starting gVisor\.\.\.$' < <(dmesg 2>/dev/null); then
 		local log="$outdir/dex2oat-gvisor.log"
 		if python3 "$data_dir/target_files_inputs.py" preopt-check "$1" "$dexpreopt_tools" "" > "$log" 2>&1; then
 			cat "$log"
