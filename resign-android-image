@@ -243,11 +243,13 @@ function check_build_number {
 		exit 1
 	fi
 }
-# which is compared as a number to choose the branch of the build
+# which is compared as a number with the builds that changed what is done
 check_build_number build "$build"
-# the builds before Android 13 have no bluetooth key, which the key mapping and the signing expect
-if test "$build" -lt 2022081900; then
-	echo "Build $build is from before Android 13, which isn't supported" >&2
+# the builds before 2023062300 have no signed tag in the repositories that the signing scripts of the build are
+# taken from, which are only trusted as the tag of the build signed by the OS (and those before Android 13 have
+# no bluetooth key either, which the key mapping and the signing expect)
+if test "$build" -lt 2023062300; then
+	echo "Build $build is from before 2023062300, whose sources have no signed tag, which isn't supported" >&2
 	exit 1
 fi
 if test -n "$version"; then
@@ -414,6 +416,11 @@ if test -z "$unshared"; then
 
 	if ! which git >/dev/null; then
 		deb+=(git)
+	fi
+
+	# which the tags of the sources and the factory images are verified with
+	if ! which ssh-keygen >/dev/null; then
+		deb+=(openssh-client)
 	fi
 
 	if ! which python3 >/dev/null; then
@@ -688,15 +695,22 @@ function do_git_init
 	git init -q --bare "$1"
 }
 
-# fetch the ref $3 of the repository at the URL $2 into the repository $4, as refs/fetched/$3, and put its files
-# into $1, all while holding the lock on the repository, since another run can move the ref of a branch
+# fetch the tag $3 of the repository at the URL $2 into the repository $4, as refs/fetched/$3, and put its files
+# into $1 once it is checked to be the tag $3 signed with the key of the OS, since its files are run along with the
+# keys, all while holding the lock on the repository, since another run can fetch the tag again meanwhile
 function git_fetch_checkout
 {
-	git -C "$4" fetch -q --no-tags --force "$2" "+$3:refs/fetched/$3"
+	local name
+	git -C "$4" fetch -q --no-tags --force "$2" "+refs/tags/$3:refs/fetched/$3"
+	# which prints the name of the tag only if it is signed with a key of the allowed signers
+	if ! name="$(git -C "$4" -c gpg.ssh.allowedSignersFile="$allowed_signers" verify-tag --format='%(tag)' "refs/fetched/$3")" || test "$name" != "$3"; then
+		echo "The tag $3 of $2 is not signed with the key of the OS as tag $3" >&2
+		exit 1
+	fi
 	git -C "$4" archive "refs/fetched/$3"|tar -x -C "$1"
 }
 
-# put into $1 the files of the ref $3 of the repository at the URL $2, which is fetched into a repository with no
+# put into $1 the files of the tag $3 of the repository at the URL $2, which is fetched into a repository with no
 # checkout of its own, shared by all the runs, so that runs of different builds don't check out each other's
 function do_git_checkout
 {
@@ -712,30 +726,11 @@ function download
 
 if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
-	if test "$build" -ge 2026061800; then
-		branch=17
-	elif test "$build" -ge 2025121000; then
-		branch=16-qpr2
-	elif test "$build" -ge 2025111800; then
-		branch=16-qpr1
-	elif test "$build" -ge 2025063000; then
-		branch=16
-	elif test "$build" -ge 2024101600; then
-		branch=15
-	elif test "$build" -ge 2023100800; then
-		branch=14
-	else
-		branch=13
-	fi
-
-	if test "$build" -ge 2023062300; then
-		git_ref="$build"
-		case "${build: -1}" in
-			1|3|5|7|9) git_ref="${build::-1}$((${build: -1} - 1))" ;;
-		esac
-	else
-		git_ref="$branch"
-	fi
+	# the tag of the sources of the build
+	git_ref="$build"
+	case "${build: -1}" in
+		1|3|5|7|9) git_ref="${build::-1}$((${build: -1} - 1))" ;;
+	esac
 
 	base_url="https://releases.grapheneos.org"
 	if test "$build" -ge 2024082000; then
@@ -751,7 +746,7 @@ if test "$os" == grapheneos; then
 	ota_url="$base_url/$device-ota_update-$build"
 	factory_key="$data_dir/grapheneos-factory.pub"
 	factory_identity="contact@grapheneos.org"
-	factory_allowed_signers="$data_dir/grapheneos-allowed_signers"
+	allowed_signers="$data_dir/grapheneos-allowed_signers"
 	ota_cert="$data_dir/grapheneos-otacerts/$device.pem"
 	# the algorithm that the release script signs the images with by AVB, which is the one the AVB key has to
 	# be for, since the images in the virt APEX can only be signed again with the algorithm they have
@@ -2719,7 +2714,7 @@ function download_factory {
 	curl --fail "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
 	curl --fail "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
 	if test "$(head -n 1 "$factory_zip_dir/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
-		if ! ssh-keygen -Y verify -f "$factory_allowed_signers" -I "$factory_identity" -n "factory images" -s "$factory_zip_dir/$factory_name.zip.sig" < "$factory_zip_dir/$factory_name.zip"; then
+		if ! ssh-keygen -Y verify -f "$allowed_signers" -I "$factory_identity" -n "factory images" -s "$factory_zip_dir/$factory_name.zip.sig" < "$factory_zip_dir/$factory_name.zip"; then
 			echo "Failed to verify factory image signature of $factory_zip_dir/$factory_name.zip with ssh-keygen!" >&2
 			remove_bad_download "$factory_zip_dir/$factory_name.zip" "$factory_zip_dir/$factory_name.zip.sig"
 			exit 1
