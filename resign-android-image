@@ -2903,8 +2903,9 @@ function make_factory_unchecked {
 		ln "$outdir/factory_image"/* "$out"
 	else
 		local zip="$(realpath "$out/image-$device-$out_build.zip")"
-		# files in the zip must be in the proper order, which zip takes the names in, one per line, from its input
-		(cd "$outdir/factory_image" && zip -q "$zip_opt" "$zip" -@) < "$dir/factory_image.list"
+		# files in the zip must be in the proper order, which zip takes the names in, one per line, from its input,
+		# failing on a name that isn't there rather than silently leaving it out
+		(cd "$outdir/factory_image" && zip -q -MM "$zip_opt" "$zip" -@) < "$dir/factory_image.list"
 
 		for i in "$dir/factory/$factory_name"/*; do
 			i="${i##*/}"
@@ -2984,7 +2985,8 @@ function make_factory_zip {
 	# the signature of the zip made before
 	rm -f -- "$out_factory.sig"
 
-	# the names of the files, in the order of the original zip, which zip takes one per line from its input
+	# the names of the files, in the order of the original zip, which zip takes one per line from its input,
+	# failing on a name that isn't there rather than silently leaving it out
 	{
 		local super_inserted= entry
 		while IFS= read -r entry; do
@@ -2999,7 +3001,7 @@ function make_factory_zip {
 				printf '%s\n' "$entry"
 			fi
 		done < "$dir/factory.list"
-	}|(cd "$outdir/factory" && zip -q "$zip_opt" "$zip" -@)
+	}|(cd "$outdir/factory" && zip -q -MM "$zip_opt" "$zip" -@)
 }
 
 function make_factory_zip_sig {
