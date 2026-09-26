@@ -4,7 +4,7 @@ resign-android-image is a script that takes GrapheneOS binary OTA updates and re
 
 **Status: minimally maintained (now mostly with AI) for my own Pixel 6 Pro and Pixel Tablet, other devices completely untested by me. Added some code to support Pixel 7/8/..., it builds but not sure if it actually works. Currently working with Android 17 builds including both OTA and installation on new devices; it should continue working including with new Android versions until major modifications to the build or OS layout are made**
 
-**Important: when setting up GrapheneOS, make sure to select to NOT disable OEM unlocking (disabling it is currently the default, so you need to uncheck the checkbox explicitly!), unless you REALLY know what you are doing! Doing so means that you can get the device in a state where it doesn't boot, doesn't enter recovery, you can't flash with fastboot and you can't unlock the bootloader to flash, which might make the device unrecoverable. While I never bricked my own device, this script is not as reliable as the main GrapheneOS build infrastructure.** Note that the downside is large, but the security benefit is very limited or nonexistent. Someone who manages to get kernel-level or root-level access remotely to a device or someone with physical access to an unlocked device can just turn it on again, while someone with physical access to a locked device can just replace the device with an identical device, achieving the same result as unlocking the bootloader on your device, since it wipes user data anyway. Since data is wiped, you will notice it and can check the key ID during boot to see if the bootloader was unlocked or relocked with a different key. Anyone will physical access will be able to easily wipe your device and data at no cost if you leave OEM unlocking enabled, but stealing it or hitting it with an hammer also causes you to lose the data.
+**Important: when setting up GrapheneOS, make sure to select to NOT disable OEM unlocking (disabling it is currently the default, so you need to uncheck the checkbox explicitly!), unless you REALLY know what you are doing! Doing so means that you can get the device in a state where it doesn't boot, doesn't enter recovery, you can't flash with fastboot and you can't unlock the bootloader to flash, which might make the device unrecoverable. While I never bricked my own device, this script is not as reliable as the main GrapheneOS build infrastructure.** Note that the downside is large, but the security benefit is very limited or nonexistent. Someone who manages to get kernel-level or root-level access remotely to a device or someone with physical access to an unlocked device can just turn it on again, while someone with physical access to a locked device can just replace the device with an identical device, achieving the same result as unlocking the bootloader on your device, since it wipes user data anyway. Since data is wiped, you will notice it and can check the key ID during boot to see if the bootloader was unlocked or relocked with a different key. Anyone with physical access will be able to easily wipe your device and data at no cost if you leave OEM unlocking enabled, but stealing it or hitting it with a hammer also causes you to lose the data.
 
 With resign-android-image, you can take back control of your Android device, by letting you run the OS (currently only GrapheneOS is supported) with a locked bootloader, but signed with your own keys instead of the upstream keys, and with some optional modifications including optional root access, without building it from scratch every time there is an update.
 
@@ -12,7 +12,7 @@ With this tool, you are no longer at the mercy of your OS' upstream developers, 
 
 This tool works by resigning Android OS images with your own verified boot and APK keys and optionally making a few modifications by patching, such as enabling ADB root and removing a few antifeatures included in Android upstream. This is accomplished by reconstructing the target_files.zip from the upstream OTA updates, making changes, resigning it and rebuilding the images from it like a normal release, and building OTA and/or factory images.
 
-By resigning instead of rebuilding from scratch, you get an OS that is as close as possible to upstream, a much less resource-intensive process, and a much better guarantee that the process will not introduce bugs and once setup the system will continue working as the upstream OS is updated; furthermore, the way changes like ADB root is performed is much more minimal than existing options like a userdebug build and is thus very unlikely to introduce bugs or security holes unlike switching to an userdebug build.
+By resigning instead of rebuilding from scratch, you get an OS that is as close as possible to upstream, a much less resource-intensive process, and a much better guarantee that the process will not introduce bugs and once setup the system will continue working as the upstream OS is updated; furthermore, the way changes like ADB root are performed is much more minimal than existing options like a userdebug build and is thus very unlikely to introduce bugs or security holes unlike switching to a userdebug build.
 
 In particular you can, without wiping /data:
 - Change the way the OS is modified (e.g. to add/remove ADB root)
@@ -78,7 +78,7 @@ This repository includes a script to setup a Qubes workstation that signs update
 To use it:
 1. Install Qubes on a supported machine if you don't already have a Qubes workstation
 2. Install a Debian OS template and create a Debian based Qubes VM for signing updates
-3. Create a Qubes VM for serving updates (or reuse another VM running servers) or get an VPS, cloud instance or remote server with SSH access
+3. Create a Qubes VM for serving updates (or reuse another VM running servers) or get a VPS, cloud instance or remote server with SSH access
 4. Setup a domain and point it to your Qubes workstation or SSH-accessible server (use a dynamic DNS updater if needed, for instance Cloudflare can provide dynamic DNS). Note that the update url including "https://" and a trailing slash must have the same number of characters as the OS update URL, which is "https://releases.grapheneos.org/" for GrapheneOS
 5. Setup a web server in the server VM or SSH-accessible server with HTTPS certificates from letsencrypt (Caddy is recommended since it's written in a memory-safe language and easy to configure)
 6. Clone this git repository in a trusted VM on the Qubes installation and copy the contents of this repository to dom0
@@ -106,13 +106,13 @@ The OTA release certificate is checked against recovery's supported algorithms a
 
 ## Key loss
 
-If you lose your private keys, then of course it will be impossible to update the device since the bootloader is locked. Again, having root enabled will allow you to copy everything in /data and restore with no data loss at all (except for things protected with Keymaster keys, where you need to manually decrypt them until key escrow is implemented). Note that an hardware-based solution for this situation requires cracking the Titan M/M2 chip in addition to being able to reprogram the UFS flash.
+If you lose your private keys, then of course it will be impossible to update the device since the bootloader is locked. Again, having root enabled will allow you to copy everything in /data and restore with no data loss at all (except for things protected with Keymaster keys, where you need to manually decrypt them until key escrow is implemented). Note that a hardware-based solution for this situation requires cracking the Titan M/M2 chip in addition to being able to reprogram the UFS flash.
 
 # Modifications supported
 
 ## GrapheneOS updater URL
 
-GrapheneOS designed the updater with an hardcoded update URL that it downloads updates from unconditionally; to remedy this, use --update-url to specify an alternate URL.
+GrapheneOS designed the updater with a hardcoded update URL that it downloads updates from unconditionally; to remedy this, use --update-url to specify an alternate URL.
 
 It works by binary patching resources.arsc in the updater APK.
 
@@ -120,7 +120,7 @@ Even with no options, the URL is replaced with an invalid domain to avoid perfor
 
 ## ADB root
 
-Not having full arbitrary read/write access to the state of your own device state is generally considered unacceptable and the sign of a device that is not truly yours and completely under your control, but rather owned and controlled by an entity who dictates how your device should behave; unfortunately that's the way it is with upstream GrapheneOS and stock OS, but fortunately, you can remedy the situation with the --adb-root option.
+Not having full arbitrary read/write access to the state of your own device is generally considered unacceptable and the sign of a device that is not truly yours and completely under your control, but rather owned and controlled by an entity who dictates how your device should behave; unfortunately that's the way it is with upstream GrapheneOS and stock OS, but fortunately, you can remedy the situation with the --adb-root option.
 
 ADB root works in a minimally invasive way, by binary patching adbd so that all calls to __android_log_is_debuggable() are replaced with a constant of 1, making it believe that ro.debuggable=1 is set, even though it isn't (setting it globally like most Magisk and other rooting methods usually do causes several bugs since several parts of the system assume that functionality that is compiled out in non-debuggable builds is present when ro.debuggable=1).
 
@@ -214,7 +214,7 @@ Functionality impact: with --always-screenshot-surfaceview, DRM-protected video 
 
 Android developers graciously included a freedom-respecting feature that allows you to instruct the OS to respond to location queries by asking an application of your choice that can respond arbitrarily rather than using the GPS receiver.
 
-Unfortunately, they also included an antifeature, consisting in the "Location.isMock()" privacy-devastating interface, that disastrously leaks to applications information about whether you confidentially provided such an instruction the OS.
+Unfortunately, they also included an antifeature, consisting in the "Location.isMock()" privacy-devastating interface, that disastrously leaks to applications information about whether you confidentially provided such an instruction to the OS.
 
 By using --no-location-ismock, you can remedy the situation, by binary patching services.jar to remove every call to Location.setIsFromMockProvider(true) in it, which is what the mock location provider of the system server marks the locations it injects with, so that Location.isMock() and Location.isFromMockProvider() always return false.
 
@@ -232,11 +232,11 @@ Security impact: malware that is granted the permission to capture the screen ca
 
 Android developers often release applications infested with advertisements for their own personal gain at your expense.
 
-You can remedy this situation by enabling Private DNS and setting it to dns.adguard-dns.com. If you don't like sending all you DNS requests to AdGuard, you can use --hosts-url URL or --adaway (which is --hosts-url https://adaway.org/hosts.txt) to add to the hosts file the host names that a hosts file at that URL maps to 127.0.0.1, which can block a lot of advertising and tracking related domains.
+You can remedy this situation by enabling Private DNS and setting it to dns.adguard-dns.com. If you don't like sending all your DNS requests to AdGuard, you can use --hosts-url URL or --adaway (which is --hosts-url https://adaway.org/hosts.txt) to add to the hosts file the host names that a hosts file at that URL maps to 127.0.0.1, which can block a lot of advertising and tracking related domains.
 
 Security impact: none affecting you
 
-Functionality impact: you will not be able to access the blocked domains even if want to
+Functionality impact: you will not be able to access the blocked domains even if you want to
 
 ## Magisk (manual)
 
@@ -280,7 +280,7 @@ This is currently not implemented.
 
 ## Screenshot detection prevention
 
-Android OS stores screenshots as normal media, allowing application with the media permission to detect that a screenshot has been taken.
+Android OS stores screenshots as normal media, allowing applications with the media permission to detect that a screenshot has been taken.
 
 Obviously such a privacy hole should be plugged, by not treating screenshots as media unless/until the user shares them with an app.
 
@@ -322,6 +322,6 @@ It would be nice to support updating with upstream OTAs without having to resign
 
 This requires major work to write a custom "bootloader" (possibly a Linux kernel with kexec and custom initramfs) that would boot as a kernel and load the upstream kernel since we need to boot the upstream kernel (to support kernel updates) but we must use a modified initramfs (to support sideloading OTAs in recovery, which needs changed keys and changed update logic to not apply the vbmeta and rename the boot partitions from the upstream OTA).
 
-This loader would need to cryptographically verify the vbmeta (including rollback protection, but it must be possible to "reset" it with an resign-android-image OTA) and load the kernel like the bootloader does with an initramfs modified on the fly to add hooks that make all the desired modifications dynamically.
+This loader would need to cryptographically verify the vbmeta (including rollback protection, but it must be possible to "reset" it with a resign-android-image OTA) and load the kernel like the bootloader does with an initramfs modified on the fly to add hooks that make all the desired modifications dynamically.
 
 The OTA update system also needs to be modified and must both support modified application of upstream OTAs plus application of resign-android-image OTAs.
