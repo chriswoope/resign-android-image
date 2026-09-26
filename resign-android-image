@@ -688,6 +688,14 @@ function discard_download
 	fi
 }
 
+# remove a download that turned out not to be the file it is for, which the next run would otherwise resume
+# downloading after rather than download again
+function remove_bad_download
+{
+	echo "Removing $* for the next run to download again" >&2
+	rm -f -- "$@"
+}
+
 # the Android version and quarterly platform release of the build, which is the prefix of its build ID (like CP2A
 # in CP2A.260705.006 of Android 17), from the fingerprint in the metadata of its OTA, where it was extracted or else
 # in the OTA itself, which is downloaded already for this before it is verified with the otatools chosen by it
@@ -698,7 +706,11 @@ else
 	if ! test -e "$ota_zip.ok"; then
 		curl --fail "$ota_url.zip" -C - -o "$ota_zip"
 	fi
-	ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"
+	if ! ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"; then
+		echo "$ota_zip is not an OTA zip" >&2
+		remove_bad_download "$ota_zip" "$ota_zip.ok"
+		exit 1
+	fi
 fi
 post_build_re=$'(^|\n)post-build=[^:\n]*:([0-9.]+)/([0-9A-Z]+)\\.'
 if ! [[ $ota_metadata =~ $post_build_re ]]; then
@@ -1029,6 +1041,7 @@ function do_extract_ota_manifest {
 function verify_ota {
 	if ! "$otatools/bin/check_ota_package_signature" "$ota_cert" "$ota_zip"; then
 		echo "Failed to verify OTA update signature of $ota_zip!" >&2
+		remove_bad_download "$ota_zip"
 		exit 1
 	fi
 	touch "$1"
@@ -2446,11 +2459,13 @@ function download_factory {
 	if test "$(head -n 1 "$factory_zip_dir/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
 		if ! ssh-keygen -Y verify -f "$factory_allowed_signers" -I "$factory_identity" -n "factory images" -s "$factory_zip_dir/$factory_name.zip.sig" < "$factory_zip_dir/$factory_name.zip"; then
 			echo "Failed to verify factory image signature of $factory_zip_dir/$factory_name.zip with ssh-keygen!" >&2
+			remove_bad_download "$factory_zip_dir/$factory_name.zip" "$factory_zip_dir/$factory_name.zip.sig"
 			exit 1
 		fi
 	else
 		if ! ( cd "$factory_zip_dir" && $signify -Cqp "$factory_key" -x "$factory_name.zip.sig" ); then
 			echo "Failed to verify factory image signature of $factory_zip_dir/$factory_name.zip with signify!" >&2
+			remove_bad_download "$factory_zip_dir/$factory_name.zip" "$factory_zip_dir/$factory_name.zip.sig"
 			exit 1
 		fi
 	fi
