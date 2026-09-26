@@ -765,6 +765,9 @@ if test "$os" == grapheneos; then
 	factory_identity="contact@grapheneos.org"
 	factory_allowed_signers="$data_dir/grapheneos-allowed_signers"
 	ota_cert="$data_dir/grapheneos-otacerts/$device.pem"
+	# the algorithm that the release script signs the images with by AVB, which is the one the AVB key has to
+	# be for, since the images in the virt APEX can only be signed again with the algorithm they have
+	avb_algorithm=SHA256_RSA4096
 fi
 
 # the OTA and the factory images are downloaded into the work directory and discarded once extracted,
@@ -1080,7 +1083,7 @@ function make_pk8 {
 }
 
 function gen_avb_pem {
-	openssl genrsa 4096 | openssl pkcs8 -topk8 -nocrypt -out "$1"
+	openssl genrsa "${avb_algorithm##*_RSA}" | openssl pkcs8 -topk8 -nocrypt -out "$1"
 }
 
 function make_avb_pkmd {
@@ -1154,6 +1157,14 @@ function make_keys (
 	# nor the recovery
 	if ! "$otatools/bin/avbtool" extract_public_key --key "$key_dir/avb.pem" --output -|cmp -s - "$key_dir/avb_pkmd.bin"; then
 		echo "$key_dir/avb_pkmd.bin doesn't have the public key of $key_dir/avb.pem: a bootloader locked with it only boots images signed with the key it was made from, so put that key back, or delete it to have it made from the new one" >&2
+		exit 1
+	fi
+	# and its number of bits, the first field of the public key, has to be the one of the algorithm
+	local avb_key_bits
+	avb_key_bits="$(od -An -tu4 --endian=big -N4 "$key_dir/avb_pkmd.bin")"
+	avb_key_bits="${avb_key_bits//[!0-9]/}"
+	if test "$avb_key_bits" != "${avb_algorithm##*_RSA}"; then
+		echo "$key_dir/avb.pem is a $avb_key_bits bit key, while the images are signed with $avb_algorithm, which the images in the virt APEX can only be signed again with, so it has to be a ${avb_algorithm##*_RSA} bit RSA key" >&2
 		exit 1
 	fi
 	if test "$sign_factory_images" == signify; then
@@ -1249,14 +1260,6 @@ function get_avbtool_partitions {
 	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Partition Name:\s*(.*)/\1/p'
 }
 
-function get_avb_algorithm {
-	local avb_algorithm=SHA256_RSA4096
-	if test "$(stat -c %s "$key_dir/avb_pkmd.bin")" == 520; then
-		avb_algorithm=SHA256_RSA2048
-	fi
-	echo "$avb_algorithm"
-}
-
 function make_extract_fs {
 	extract_image "$@"
 
@@ -1329,7 +1332,7 @@ function make_target_files_extracted {
 		for i in "$dir/ota_payload"/*; do
 			i="${i##*/}"
 			if test "$i" == vbmeta.img; then
-				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$(get_avb_algorithm)" --key "$key_dir/avb.pem" --output "$outdir/target_files_extracted/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
+				"$otatools/bin/avbtool" make_vbmeta_image --padding_size 4096 --algorithm "$avb_algorithm" --key "$key_dir/avb.pem" --output "$outdir/target_files_extracted/IMAGES/vbmeta.img" --include_descriptors_from_image "$dir/ota_payload/vbmeta.img" $(get_avbtool_vbmeta_opts "$dir/ota_payload/vbmeta.img")
 			elif test -f "$dir/ota_payload/$i"; then
 				make_file "$outdir/target_files_extracted/IMAGES/$i" make_hardlink "$dir/ota_payload/$i"
 			fi
@@ -1454,9 +1457,9 @@ function patch_apex {
 	if test -e "$work/apex/apex_manifest.json"; then
 		args+=(--manifest_json "$work/apex/apex_manifest.json")
 	fi
-	# apexer always signs the payload with SHA256_RSA4096, which fails with a 2048 bit AVB key, so
-	# pass the algorithm of the key on to avbtool, which takes the last --algorithm it is given
-	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --signing_args "--algorithm $(get_avb_algorithm)" --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
+	# apexer signs the payload with SHA256_RSA4096 whatever the key, so pass the algorithm of the AVB key
+	# on to avbtool, which takes the last --algorithm it is given
+	"$otatools/bin/apexer" --force --payload_only --do_not_check_keyname --key "$key_dir"/avb.pem --signing_args "--algorithm $avb_algorithm" --apexer_tool_path "$otatools/bin:$PATH" --manifest "$work/apex/apex_manifest.pb" --build_info "$work/apex/apex_build_info.pb" "${args[@]}" "$work/payload" "$work/apex_payload.img"
 
 	cp "$work/original.apex" "$work/modded.apex"
 	modded_apex_r="$(realpath "$work/modded.apex")"
@@ -2189,7 +2192,7 @@ function make_target_files_signed_zip_in {
 			echo "There is no single sign_target_files_apks command with -d \"\$KEY_DIR\" to add the arguments after in $generate_release_sh" >&2
 			exit 1
 		fi
-		printf '%s\n%s\n' "$sign_cmd" '"$RESIGN_FROM" "$RESIGN_TO"'|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$(get_avb_algorithm)" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
+		printf '%s\n%s\n' "$sign_cmd" '"$RESIGN_FROM" "$RESIGN_TO"'|RESIGN_FROM="$from" RESIGN_TO="$to" KEY_DIR=keys AVB_ALGORITHM="$avb_algorithm" PYTHONUNBUFFERED=1 bash -x -s -- "${sign_args[@]}"
 		# check that the sign tools signed all the files they are for, with the payloads they are
 		# in repacked as they were
 		python3 "$data_dir/target_files_inputs.py" apex-verify "$from" "$to"
