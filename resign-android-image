@@ -1150,23 +1150,26 @@ function make_keys (
 		echo "$key_dir/avb.pem is a $avb_key_bits bit key, while the images are signed with $avb_algorithm, which the images in the virt APEX can only be signed again with, so it has to be a ${avb_algorithm##*_RSA} bit RSA key" >&2
 		exit 1
 	fi
-	if test "$sign_factory_images" == signify; then
-		if test -n "$generate_keys"; then
-			make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
-		elif ! test -e "$key_dir/factory.sec"; then
-			echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
-			exit 1
-		fi
-		if ! test -e "$key_dir/factory.pub"; then
-			echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
-			exit 1
-		fi
-	elif test "$sign_factory_images" == ssh-keygen; then
-		if test -n "$generate_keys"; then
-			make_file "$key_dir/id_ed25519" gen_ssh_key "$key_dir/id_ed25519.pub"
-		elif ! test -e "$key_dir/id_ed25519"; then
-			echo "Key $key_dir/id_ed25519 not found, use --generate-keys to generate keys automatically" >&2
-			exit 1
+	# and the key that the factory zip is signed with, which only a build of it needs
+	if test -n "$build_factory_zip"; then
+		if test "$sign_factory_images" == signify; then
+			if test -n "$generate_keys"; then
+				make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
+			elif ! test -e "$key_dir/factory.sec"; then
+				echo "Key $key_dir/factory.sec not found, use --generate-keys to generate keys automatically" >&2
+				exit 1
+			fi
+			if ! test -e "$key_dir/factory.pub"; then
+				echo "Public key $key_dir/factory.pub not found, but secret key $key_dir/factory.sec is present: either delete the private key or regenerate the public key from the private key manually" >&2
+				exit 1
+			fi
+		elif test "$sign_factory_images" == ssh-keygen; then
+			if test -n "$generate_keys"; then
+				make_file "$key_dir/id_ed25519" gen_ssh_key "$key_dir/id_ed25519.pub"
+			elif ! test -e "$key_dir/id_ed25519"; then
+				echo "Key $key_dir/id_ed25519 not found, use --generate-keys to generate keys automatically" >&2
+				exit 1
+			fi
 		fi
 	fi
 )
