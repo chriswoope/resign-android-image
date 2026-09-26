@@ -2753,7 +2753,10 @@ if ! test -e "$out_ota" || ! test -e "$out_factory"; then
 	fi
 fi
 discard "$outdir/target_files.zip"
-discard "$outdir/factory"
+# unless it is the factory image asked for with --factory-image
+if test -z "$build_factory"; then
+	discard "$outdir/factory"
+fi
 
 if test -n "$build_factory_zip" && test -n "$sign_factory_images"; then
 	make_file "$out_factory.sig" make_factory_zip_sig
