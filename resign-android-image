@@ -78,6 +78,8 @@ unshared=
 download_cache=
 timing=
 threads=
+# the seconds that a download may go without transferring anything before it fails, rather than wait forever
+network_timeout=300
 dex2oat=1
 otatools_only=
 
@@ -111,6 +113,10 @@ while test "$#" != 0; do
 	elif test "$1" == "--threads"; then
 		check_option_value "$@"
 		threads="$2"
+		shift
+	elif test "$1" == "--network-timeout"; then
+		check_option_value "$@"
+		network_timeout="$2"
 		shift
 	elif test "$1" == "--no-dex2oat"; then
 		dex2oat=
@@ -233,6 +239,7 @@ if test -z "$threads"; then
 	threads="$(nproc)"
 fi
 check_positive_integer "number of threads" "$threads"
+check_positive_integer "network timeout" "$network_timeout"
 
 # checked now rather than when the factory zip is signed at the end of the build
 if ! [[ $sign_factory_images == @(|signify|ssh-keygen) ]]; then
@@ -705,7 +712,7 @@ function do_git_init
 function git_fetch_checkout
 {
 	local name
-	git -C "$4" fetch -q --no-tags --force "$2" "+refs/tags/$3:refs/fetched/$3"
+	git -C "$4" -c http.lowSpeedLimit=1 -c http.lowSpeedTime="$network_timeout" fetch -q --no-tags --force "$2" "+refs/tags/$3:refs/fetched/$3"
 	# which prints the name of the tag only if it is signed with a key of the allowed signers
 	if ! name="$(git -C "$4" -c gpg.ssh.allowedSignersFile="$allowed_signers" verify-tag --format='%(tag)' "refs/fetched/$3")" || test "$name" != "$3"; then
 		echo "The tag $3 of $2 is not signed with the key of the OS as tag $3" >&2
@@ -725,7 +732,14 @@ function do_git_checkout
 
 function download
 {
-	wget -O "$@"
+	wget --timeout="$network_timeout" -O "$@"
+}
+
+# curl, which fails when it transfers nothing for the network timeout, rather than wait forever for a server or a
+# connection that stopped sending anything
+function curl_with_timeout
+{
+	curl --connect-timeout "$network_timeout" --speed-limit 1 --speed-time "$network_timeout" "$@"
 }
 
 if test "$os" == grapheneos; then
@@ -792,7 +806,7 @@ function discard_download
 # download the OTA, or the rest of it
 function curl_ota
 {
-	curl --fail "$ota_url.zip" -C - -o "$ota_zip"
+	curl_with_timeout --fail "$ota_url.zip" -C - -o "$ota_zip"
 }
 
 # remove a download that turned out not to be the file it is for, which the next run would otherwise resume
@@ -867,9 +881,10 @@ function download_ci_artifact {
 	local bid
 	bid="$(python3 -c '
 import json, re, sys, urllib.error, urllib.parse, urllib.request
-ci, branch, target, version, artifact, dest = sys.argv[1:]
+ci, branch, target, version, artifact, dest, timeout = sys.argv[1:]
 def get(path, *parts):
-    with urllib.request.urlopen(ci + path.format(*(urllib.parse.quote(p, safe="") for p in parts))) as f:
+    with urllib.request.urlopen(ci + path.format(*(urllib.parse.quote(p, safe="") for p in parts)),
+                                timeout=int(timeout)) as f:
         return f.read().decode()
 # the builds of the branch, newest first, in pages that start from the last build of the previous one
 start = json.loads(get("/branch/{}/last-build-id", branch))["last_build_id"]
@@ -892,7 +907,7 @@ while ids := [i for i in json.loads(get("/branch/{}/build-ids/between/{}/1?", br
             sys.exit()
     start = ids[-1]
 sys.exit(f"There is no build of Android {version} on {branch} on the Android CI: put the {artifact} of it at {dest}")
-' "$android_ci" "$android_ci_branch" "$android_ci_target" "$android_version" "$2" "$3")"
+' "$android_ci" "$android_ci_branch" "$android_ci_target" "$android_version" "$2" "$3" "$network_timeout")"
 	download "$1" "$android_ci/submitted/$bid/$android_ci_target/latest/raw/$2"
 }
 
@@ -926,7 +941,7 @@ make_dir "$dexpreopt_tools" do_unzip "$dexpreopt_tools.zip"
 # the SHA-1 that Maven publishes next to it
 function download_aapt2 {
 	local digest
-	curl --fail -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
+	curl_with_timeout --fail -C - -o "$otatools.aapt2.zip" https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.3.0-10880808/aapt2-8.3.0-10880808-linux.jar
 	read -r digest _ < <(sha256sum < "$otatools.aapt2.zip")
 	if test "$digest" != d5c7a4bbf71f483c99f808c7ce74e4f1bc859e71a9411dfd33cf5de6e5a2dcfa; then
 		echo "$otatools.aapt2.zip is not the aapt2 that was published on Maven" >&2
@@ -2329,7 +2344,7 @@ function apply_modifications {
 		# 127.0.0.1, other than the localhost ones that the hosts file has already, from a list that may
 		# have DOS line endings; one with none is taken for not being a hosts file rather than left out
 		local hosts
-		hosts="$(curl --fail "$hosts_url"|sed -nre 's/\r$//; /^127\.0\.0\.1 \.*localhost\.*$/d; /^127\.0\.0\.1 [0-9.]*[a-zA-Z_-][0-9a-zA-Z._-]*$/p')"
+		hosts="$(curl_with_timeout --fail "$hosts_url"|sed -nre 's/\r$//; /^127\.0\.0\.1 \.*localhost\.*$/d; /^127\.0\.0\.1 [0-9.]*[a-zA-Z_-][0-9a-zA-Z._-]*$/p')"
 		if test -z "$hosts"; then
 			echo "$hosts_url has no host names mapped to 127.0.0.1 to add to the hosts file" >&2
 			exit 1
@@ -2742,8 +2757,8 @@ function make_ota {
 }
 
 function download_factory {
-	curl --fail "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
-	curl --fail "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
+	curl_with_timeout --fail "$factory_url.zip" -C - -o "$factory_zip_dir/$factory_name.zip"
+	curl_with_timeout --fail "$factory_url.zip.sig" -C - -o "$factory_zip_dir/$factory_name.zip.sig"
 	if test "$(head -n 1 "$factory_zip_dir/$factory_name.zip.sig")" == "-----BEGIN SSH SIGNATURE-----"; then
 		if ! ssh-keygen -Y verify -f "$allowed_signers" -I "$factory_identity" -n "factory images" -s "$factory_zip_dir/$factory_name.zip.sig" < "$factory_zip_dir/$factory_name.zip"; then
 			echo "Failed to verify factory image signature of $factory_zip_dir/$factory_name.zip with ssh-keygen!" >&2
