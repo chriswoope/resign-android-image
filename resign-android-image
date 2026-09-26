@@ -579,7 +579,7 @@ function git_clone_ref
 	shift 2
 	make_dir "$dir" do_git_clone --branch "$ref" "$@"
 	# a tag is checked out detached, with no branch to pull into
-	( cd "$dir" && git fetch --tags && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi )
+	( cd "$dir" && git fetch --tags --force && git checkout "$ref" && if git symbolic-ref -q HEAD >/dev/null; then git pull --rebase; fi )
 }
 
 function download
