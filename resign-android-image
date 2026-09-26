@@ -606,14 +606,6 @@ function do_git_clone
 	git clone "$@" "$out"
 }
 
-function git_clone
-{
-	local dir="$1"
-	shift
-	make_dir "$dir" do_git_clone "$@"
-	( cd "$dir" && git pull --rebase )
-}
-
 function git_clone_ref
 {
 	local dir="$1"
