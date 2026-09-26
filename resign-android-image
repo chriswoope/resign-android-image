@@ -737,15 +737,15 @@ function remove_bad_download
 	rm -f -- "$@"
 }
 
-# run the command that follows the download $1 while holding a lock on it, so that downloading it again, in
-# parallel in this run or in another run sharing the download cache, waits for the download in progress to be
-# done rather than appending to the same file along with it
-function with_download_lock
+# run the command that follows the file $1 while holding a lock on it, so that making it again, in parallel in
+# this run or in another run sharing it, waits for the one in progress to be done rather than writing to the same
+# file along with it, as downloading it again would, appending to it
+function with_lock
 {
 	local fd
 	exec {fd}>>"$1.lock"
 	if ! flock -n "$fd"; then
-		echo "Waiting for the download of $1 in progress" >&2
+		echo "Waiting for another run to be done with $1" >&2
 		flock "$fd"
 	fi
 	"${@:2}"
@@ -760,7 +760,7 @@ if test -e "$ota_metadata_file"; then
 	ota_metadata="$(< "$ota_metadata_file")"
 else
 	if ! test -e "$ota_zip.ok"; then
-		with_download_lock "$ota_zip" curl_ota
+		with_lock "$ota_zip" curl_ota
 	fi
 	if ! ota_metadata="$(unzip -p "$ota_zip" META-INF/com/android/metadata)"; then
 		echo "$ota_zip is not an OTA zip" >&2
@@ -1220,7 +1220,7 @@ function make_extract_ota {
 }
 
 function make_extract_ota_payload {
-	with_download_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
+	with_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
 	make_dir "$dir/ota" make_extract_ota
 
 	make_dir "$dir/ota_meta" do_extract_ota_manifest "$ota_zip"
@@ -1241,7 +1241,7 @@ function extract_postinstall_config {
 
 # the postinstall config of the OTA, which an ota_meta made before it was extracted along with the rest lacks
 function make_postinstall_config {
-	with_download_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
+	with_lock "$ota_zip" make_file "$ota_zip.ok" download_ota
 	with_temp_dir "$1.meta" extract_postinstall_config "$1"
 	discard_download "$ota_zip"
 }
@@ -2680,7 +2680,7 @@ function download_factory {
 # download the factory images and verify them, unless that is done already
 function make_factory_download {
 	mkdir -p "$factory_zip_dir"
-	with_download_lock "$factory_zip_dir/$factory_name.zip" make_file "$factory_zip_ok" download_factory
+	with_lock "$factory_zip_dir/$factory_name.zip" make_file "$factory_zip_ok" download_factory
 }
 
 function do_unzip_img2simg {
