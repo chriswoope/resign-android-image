@@ -860,6 +860,14 @@ function make_keys {
 		fi
 		make_file "$key_dir/$i.x509.pem" make_pem "$key_dir/$i.key"
 		make_file "$key_dir/$i.pk8" make_pk8 "$key_dir/$i.key"
+		# which are only made when missing, so they can be left from another key: a recovery trusting a
+		# certificate that the OTAs are not signed with would refuse every update
+		local public
+		public="$(openssl pkey -in "$key_dir/$i.key" -pubout)"
+		if test "$(openssl x509 -in "$key_dir/$i.x509.pem" -noout -pubkey)" != "$public" || test "$(openssl pkey -inform DER -in "$key_dir/$i.pk8" -pubout)" != "$public"; then
+			echo "$key_dir/$i.x509.pem or $key_dir/$i.pk8 doesn't have the public key of $key_dir/$i.key: devices trust only the key their images were signed with, so put that key back, or delete them to have them made from the new one" >&2
+			exit 1
+		fi
 	done
 	if test -n "$generate_keys"; then
 		make_file "$key_dir/avb.pem" gen_avb_pem
@@ -868,6 +876,12 @@ function make_keys {
 		exit 1
 	fi
 	make_file "$key_dir/avb_pkmd.bin" make_avb_pkmd "$key_dir/avb.pem"
+	# likewise, since a bootloader locked with a key that vbmeta isn't signed with boots neither the system
+	# nor the recovery
+	if ! "$otatools/bin/avbtool" extract_public_key --key "$key_dir/avb.pem" --output -|cmp -s - "$key_dir/avb_pkmd.bin"; then
+		echo "$key_dir/avb_pkmd.bin doesn't have the public key of $key_dir/avb.pem: a bootloader locked with it only boots images signed with the key it was made from, so put that key back, or delete it to have it made from the new one" >&2
+		exit 1
+	fi
 	if test "$sign_factory_images" == signify; then
 		if test -n "$generate_keys"; then
 			make_file "$key_dir/factory.sec" gen_signify_key "$key_dir/factory.pub"
