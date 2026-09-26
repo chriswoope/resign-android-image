@@ -1262,8 +1262,10 @@ function extract_image {
 	"$debugfs" -R "rdump / $debugfs_quote" "$img" 2>/dev/null
 }
 
+# the options that make avbtool give a vbmeta image the rollback index and the flags of the vbmeta image $1,
+# from the lines of its header, which unlike those of its descriptors aren't indented
 function get_avbtool_vbmeta_opts {
-	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^\s*Rollback Index:\s*(.*)/--rollback_index \1/p; s/^\s*Rollback Index Location:\s*(.*)/--rollback_index_location \1/p'
+	"$otatools"/bin/avbtool info_image --image "$1"|sed -nre 's/^Rollback Index:\s*(.*)/--rollback_index \1/p; s/^Rollback Index Location:\s*(.*)/--rollback_index_location \1/p; s/^Flags:\s*(.*)/--flags \1/p'
 }
 
 # what avbtool tells of image $1 and its footer, which includes the digest of the image, but for the
@@ -2551,7 +2553,7 @@ function take_signed_image {
 		with_temp_dir "$outdir/boot_expected_$2" verify_built_boot "$img" "$orig" "$2"
 	elif test "$2" == vbmeta; then
 		if ! diff <(get_avbtool_partitions "$orig"|sort) <(get_avbtool_partitions "$img"|sort) >&2 || test "$(get_avbtool_vbmeta_opts "$orig")" != "$(get_avbtool_vbmeta_opts "$img")"; then
-			echo "The built vbmeta doesn't verify the same partitions with the same rollback index as the original one" >&2
+			echo "The built vbmeta doesn't verify the same partitions with the same rollback index and flags as the original one" >&2
 			exit 1
 		fi
 	elif test "$2" == boot && test -n "$replace_boot"; then
