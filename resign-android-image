@@ -244,6 +244,11 @@ function check_build_number {
 }
 # which is compared as a number to choose the branch of the build
 check_build_number build "$build"
+# the builds before Android 13 have no bluetooth key, which the key mapping and the signing expect
+if test "$build" -lt 2022081900; then
+	echo "Build $build is from before Android 13, which isn't supported" >&2
+	exit 1
+fi
 if test -n "$version"; then
 	check_build_number version "$version"
 fi
@@ -684,8 +689,6 @@ function download
 	wget -O "$@"
 }
 
-android=
-
 # the Pixel 10 devices, which have the 6.6 kernel, for which OTAs are made without ublk, and take larger
 # fastboot downloads
 pixel_10=
@@ -697,28 +700,18 @@ if test "$os" == grapheneos; then
 	git=https://github.com/GrapheneOS
 	if test "$build" -ge 2026061800; then
 		branch=17
-		android=170
 	elif test "$build" -ge 2025121000; then
 		branch=16-qpr2
-		android=162
 	elif test "$build" -ge 2025111800; then
 		branch=16-qpr1
-		android=161
 	elif test "$build" -ge 2025063000; then
 		branch=16
-		android=160
 	elif test "$build" -ge 2024101600; then
 		branch=15
-		android=150
 	elif test "$build" -ge 2023100800; then
 		branch=14
-		android=140
-	elif test "$build" -ge 2022081900; then
-		branch=13
-		android=130
 	else
-		branch=12.1
-		android=121
+		branch=13
 	fi
 
 	if test "$build" -ge 2023062300; then
@@ -1090,10 +1083,7 @@ function gen_ssh_key {
 
 function make_keys {
 	mkdir -p "$key_dir"
-	keys="releasekey platform shared media networkstack"
-	if test "$android" -ge 130; then
-		keys="$keys bluetooth"
-	fi
+	keys="releasekey platform shared media networkstack bluetooth"
 	# which are only generated all together: a key generated next to others that devices already trust, like an
 	# AVB key next to the release key, makes updates that they install and then can't boot, recovery included
 	local files=() missing=()
