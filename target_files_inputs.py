@@ -60,6 +60,9 @@
 #         it is signed with a key that isn't there, to leave it signed as it is, and the tool that
 #         signs the files in the payload of an APEX that are signed with its payload key with the
 #         payload key the APEX is signed with, if it has any
+#     target_files_inputs.py shared-user-certificate TARGET_FILES SHARED_USER_ID
+#         print, in hex DER, the certificate that the APKs in the TARGET_FILES directory with the
+#         SHARED_USER_ID in their manifest are signed with, which they all must be signed with
 #     target_files_inputs.py stale-preopt TARGET_FILES PATCHED [PATCHED...]
 #         remove from the TARGET_FILES directory, printing each of them, the files that dexpreopt
 #         compiled that are stale once the dex code of the APKs and jars at the paths PATCHED in it has
@@ -151,6 +154,17 @@ EXTENT_MAGIC = 0xF30A
 XATTR_MAGIC = 0xEA020000
 XATTR_PREFIXES = {1: b"user.", 2: b"system.posix_acl_access", 3: b"system.posix_acl_default", 4: b"trusted.",
                   6: b"security.", 7: b"system.", 8: b"system.richacl"}
+
+# the chunks of the binary XML of a compiled AndroidManifest.xml (frameworks/base/libs/androidfw/include/
+# androidfw/ResourceTypes.h) that are read here
+RES_STRING_POOL_TYPE = 0x0001
+RES_XML_TYPE = 0x0003
+RES_XML_START_ELEMENT_TYPE = 0x0102
+RES_XML_RESOURCE_MAP_TYPE = 0x0180
+RES_STRING_POOL_UTF8_FLAG = 0x100
+NO_STRING = 0xFFFFFFFF
+# android.R.attr.sharedUserId
+ATTR_SHARED_USER_ID = 0x0101000B
 
 XATTR_SELINUX = b"security.selinux"
 XATTR_CAPABILITY = b"security.capability"
@@ -572,6 +586,85 @@ def apk_keys(target_files, certs, meta):
             sign_tool = f' sign_tool="{PAYLOAD_SIGN_TOOL}"' if name in payload_signed else ""
             f.write(f'name="{name}" public_key="apk_dummy_public_key" private_key="apk_dummy_private_key" '
                     f'{certificate("container_", key, "PRESIGNED")} partition=""{sign_tool}\n')
+
+
+def string_pool(chunk):
+    """The strings of the string pool chunk of binary XML."""
+    header_size = struct.unpack_from("<H", chunk, 2)[0]
+    count, _, flags, strings_start = struct.unpack_from("<IIII", chunk, 8)
+    strings = []
+    for offset in struct.unpack_from(f"<{count}I", chunk, header_size):
+        at = strings_start + offset
+        if flags & RES_STRING_POOL_UTF8_FLAG:
+            # the length in UTF-16 code units and then the one in bytes, each in one byte or two
+            for _ in range(2):
+                length = chunk[at]
+                at += 1
+                if length & 0x80:
+                    length = (length & 0x7F) << 8 | chunk[at]
+                    at += 1
+            strings.append(chunk[at:at + length].decode("utf-8", "surrogateescape"))
+        else:
+            # the length in UTF-16 code units, in one unit or two
+            length = struct.unpack_from("<H", chunk, at)[0]
+            at += 2
+            if length & 0x8000:
+                length = (length & 0x7FFF) << 16 | struct.unpack_from("<H", chunk, at)[0]
+                at += 2
+            strings.append(chunk[at:at + 2 * length].decode("utf-16-le", "surrogatepass"))
+    return strings
+
+
+def manifest_attribute(name, manifest, resource_id):
+    """The string value of the attribute with the resource ID of the root element of the binary XML
+    manifest of the APK name, or None if it has no such attribute."""
+    if len(manifest) < 8 or struct.unpack_from("<H", manifest)[0] != RES_XML_TYPE:
+        fail(f"{name} has no binary XML manifest")
+    offset = struct.unpack_from("<H", manifest, 2)[0]
+    strings = []
+    resource_ids = ()
+    while offset < len(manifest):
+        kind, header_size, size = struct.unpack_from("<HHI", manifest, offset)
+        chunk = manifest[offset:offset + size]
+        if kind == RES_STRING_POOL_TYPE:
+            strings = string_pool(chunk)
+        elif kind == RES_XML_RESOURCE_MAP_TYPE:
+            # the resource ID of each of the first strings, which name the attributes of the framework
+            resource_ids = struct.unpack_from(f"<{(size - header_size) // 4}I", chunk, header_size)
+        elif kind == RES_XML_START_ELEMENT_TYPE:
+            # the first element is the root one, whose attributes are where the header of the element,
+            # which follows the one of the chunk, says
+            attribute_start, attribute_size, attribute_count = struct.unpack_from("<HHH", chunk, header_size + 8)
+            for i in range(attribute_count):
+                _, attribute, raw_value = struct.unpack_from("<III", chunk, header_size + attribute_start + i * attribute_size)
+                if attribute < len(resource_ids) and resource_ids[attribute] == resource_id:
+                    if raw_value == NO_STRING:
+                        fail(f"{name} has an attribute {resource_id:#x} in its manifest that isn't a string")
+                    return strings[raw_value]
+            return None
+        offset += size
+    fail(f"{name} has no element in its manifest")
+
+
+def shared_user_certificate(target_files, shared_user_id):
+    """Print, in hex DER, the certificate that the APKs in the target files directory target_files with
+    the shared user ID shared_user_id are signed with, which they all must be signed with."""
+    certificates = {}
+    for root, dirs, names in os.walk(target_files):
+        dirs.sort()
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            # the targets of the symbolic links are paths on the device rather than on the host
+            if name.endswith(".apk") and not os.path.islink(path):
+                with zipfile.ZipFile(path) as z:
+                    manifest = z.read("AndroidManifest.xml")
+                if manifest_attribute(path, manifest, ATTR_SHARED_USER_ID) == shared_user_id:
+                    with open(path, "rb") as f:
+                        certificates.setdefault(apk_certificates(path, f.read()), []).append(path)
+    if len(certificates) != 1:
+        fail(f"the APKs with the shared user ID {shared_user_id} in {target_files} are signed with "
+             f"{len(certificates)} certificates rather than one: {list(certificates.values())}")
+    print(next(iter(certificates)).hex())
 
 
 def apex_verify(original, signed):
@@ -1975,6 +2068,8 @@ def main():
         ext4_share_dup_blocks(args[1:])
     elif len(args) == 4 and args[0] == "apk-keys":
         apk_keys(args[1], args[2], args[3])
+    elif len(args) == 3 and args[0] == "shared-user-certificate":
+        shared_user_certificate(args[1], args[2])
     elif len(args) == 3 and args[0] == "apex-verify":
         apex_verify(args[1], args[2])
     elif len(args) >= 3 and args[0] == "stale-preopt":
@@ -1989,7 +2084,7 @@ def main():
         fail("usage: fs-dump IMAGE | fs-extracted-verify IMAGE DIRECTORY | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
              "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL [--allow-additions] [--allow-new-files] [--loaded-with OTHER]... [--expected DIR] < CHANGED | avb-args PARTITION IMAGE | "
              "lz4-ramdisks [IMAGE...] | ext4-share-dup-blocks IMAGE... | "
-             "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
+             "apk-keys TARGET_FILES CERTS META | shared-user-certificate TARGET_FILES SHARED_USER_ID | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED | recovery-cert-check CERTIFICATE | ramdisk-file PATH IMAGE...")
 
