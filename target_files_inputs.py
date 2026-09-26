@@ -23,12 +23,13 @@
 #     target_files_inputs.py boot-inputs OUT PARTITION IMAGE [PARTITION IMAGE...]
 #         write to OUT/target_files the BOOT, INIT_BOOT and VENDOR_BOOT directories and the META files
 #         that the boot images IMAGE of each PARTITION (boot, init_boot or vendor_boot) are built from,
-#         to OUT/misc_info.txt the misc_info.txt entries they are built with, and to OUT/expected what
-#         the built images are expected to be like. A boot image without a ramdisk is left to be used
-#         as a prebuilt one, as it is by a normal build
-#     target_files_inputs.py boot-verify IMAGE EXPECTED
+#         and to OUT/misc_info.txt the misc_info.txt entries they are built with. A boot image without a
+#         ramdisk is left to be used as a prebuilt one, as it is by a normal build
+#     target_files_inputs.py boot-verify IMAGE ORIGINAL < CHANGED
 #         check that the built boot IMAGE has exactly the header, the kernel, the other files and the
-#         names and metadata of the files in its ramdisks described in the EXPECTED file
+#         files in its ramdisks of the ORIGINAL one, with the same names, metadata and contents, but for
+#         the contents of the files at the paths in the ramdisk, NUL separated, read from the standard
+#         input, which may have changed
 #     target_files_inputs.py avb-args PARTITION IMAGE
 #         print the misc_info.txt entries that make the build add the same AVB hash or hashtree footer
 #         to PARTITION as the one IMAGE has
@@ -1510,19 +1511,22 @@ def cpio_entries(ramdisk):
         entries.append((name, mode, uid, gid, rdev_major, rdev_minor, contents))
 
 
-def ramdisk_metadata(ramdisk):
-    return [[os.fsdecode(name), mode, uid, gid, rdev_major, rdev_minor]
-            for name, mode, uid, gid, rdev_major, rdev_minor, _ in cpio_entries(ramdisk)]
+def ramdisk_description(ramdisk, changed):
+    """The name, mode, owner and device numbers of each file of the ramdisk, and the digest of its contents
+    unless its path is in changed."""
+    return [[os.fsdecode(name), mode, uid, gid, rdev_major, rdev_minor,
+             None if name in changed else hashlib.sha256(contents).hexdigest()]
+            for name, mode, uid, gid, rdev_major, rdev_minor, contents in cpio_entries(ramdisk)]
 
 
-def describe_boot_image(image, tmp):
+def describe_boot_image(image, tmp, changed):
     """What a built boot image must be the same as the original in: its header, the contents of its
-    files and the names and metadata of the files in its ramdisks, whose contents may have changed."""
+    files and the files in its ramdisks, but for the contents of those at the paths in changed."""
     out = os.path.join(tmp, "unpacked")
     description = []
     for option, value in unpack_boot_image(image, out):
         if option in RAMDISK_OPTIONS:
-            value = ramdisk_metadata(value)
+            value = ramdisk_description(value, changed)
         elif option in BOOT_FILE_OPTIONS:
             with open(value, "rb") as f:
                 value = hashlib.sha256(f.read()).hexdigest()
@@ -1588,9 +1592,7 @@ def extract_ramdisk(ramdisk, tree, nodes_allowed):
 def boot_inputs(out, partitions):
     target_files = os.path.join(out, "target_files")
     meta = os.path.join(target_files, "META")
-    expected = os.path.join(out, "expected")
     os.makedirs(meta)
-    os.makedirs(expected)
     misc_info = []
     shared = {}
 
@@ -1691,9 +1693,6 @@ def boot_inputs(out, partitions):
             else:
                 fail(f"{partition} is not a boot image partition")
 
-            with open(os.path.join(expected, partition + ".json"), "w") as f:
-                json.dump(describe_boot_image(image, os.path.join(tmp, partition + ".expected")), f)
-
         if "mkbootimg header version" in shared and "vendor_boot" not in dict(partitions):
             misc_info.append(f"mkbootimg_args={shlex.join(['--header_version', shared['mkbootimg header version'][0]])}")
         if "mkbootimg_version_args" in shared:
@@ -1702,13 +1701,25 @@ def boot_inputs(out, partitions):
         f.writelines(line + "\n" for line in misc_info)
 
 
-def boot_verify(image, expected_path):
-    with open(expected_path) as f:
-        expected = json.load(f)
+def boot_verify(image, original, changed):
     with tempfile.TemporaryDirectory() as tmp:
-        actual = describe_boot_image(image, tmp)
+        actual = describe_boot_image(image, os.path.join(tmp, "image"), changed)
+        expected = describe_boot_image(original, os.path.join(tmp, "original"), changed)
     if actual != expected:
-        errors = [f"{a} rather than {e}" for a, e in zip(actual, expected) if a != e]
+        errors = []
+        for (option, a), (expected_option, e) in zip(actual, expected):
+            if [option, a] == [expected_option, e]:
+                continue
+            if option != expected_option or option not in RAMDISK_OPTIONS:
+                errors.append(f"{option} {a} rather than {expected_option} {e}")
+                continue
+            # a ramdisk, whose differences are told by file rather than as the whole of it
+            a_files = {name: rest for name, *rest in a}
+            e_files = {name: rest for name, *rest in e}
+            if a_files == e_files:
+                errors.append(f"{option} has its files in another order")
+            errors += [f"{option} /{name} is {a_files.get(name)} rather than {e_files.get(name)}"
+                       for name in sorted(a_files.keys() | e_files.keys()) if a_files.get(name) != e_files.get(name)]
         if len(actual) != len(expected):
             errors.append(f"{len(actual)} options rather than {len(expected)}")
         fail(f"{image} is not made like the original one:\n" + "\n".join(errors))
@@ -1729,7 +1740,7 @@ def main():
     elif len(args) >= 4 and len(args) % 2 == 0 and args[0] == "boot-inputs":
         boot_inputs(args[1], list(zip(args[2::2], args[3::2])))
     elif len(args) == 3 and args[0] == "boot-verify":
-        boot_verify(args[1], args[2])
+        boot_verify(args[1], args[2], set(path for path in sys.stdin.buffer.read().split(b"\0") if path))
     elif len(args) == 3 and args[0] == "avb-args":
         print("\n".join(avb_args(args[1], args[2])))
     elif len(args) == 4 and args[0] == "apk-keys":
@@ -1746,7 +1757,7 @@ def main():
         fsverity_update(args[1])
     else:
         fail("usage: fs-dump IMAGE | fs-config TARGET_FILES EXPECTED PARTITION METADATA... | fs-verify IMAGE EXPECTED | "
-             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE EXPECTED | avb-args PARTITION IMAGE | "
+             "boot-inputs OUT PARTITION IMAGE... | boot-verify IMAGE ORIGINAL < CHANGED | avb-args PARTITION IMAGE | "
              "apk-keys TARGET_FILES CERTS META | stale-preopt TARGET_FILES PATCHED... | preopt-check TARGET_FILES TOOLS RUNNER | "
              "recompile-preopt TARGET_FILES ORIGINAL TOOLS RUNNER THREADS PATCHED... | fsverity-update TARGET_FILES | "
              "apex-verify ORIGINAL SIGNED")

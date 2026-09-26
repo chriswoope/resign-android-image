@@ -2239,8 +2239,20 @@ function take_signed_image {
 	local orig="$dir/ota_payload/$2.img"
 	if test -e "$outdir/fs_expected/$2.json"; then
 		python3 "$data_dir/target_files_inputs.py" fs-verify "$img" "$outdir/fs_expected/$2.json"
-	elif test -e "$outdir/boot_inputs/expected/$2.json"; then
-		python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$outdir/boot_inputs/expected/$2.json"
+	elif test -d "$outdir/boot_inputs/target_files/${2^^}"; then
+		# built from the files of its ramdisk, of which only those that the signing replaces the OTA keys
+		# in, and those that the options change, may have changed, since the recovery, which the next OTA
+		# is sideloaded with, is one of them
+		local ramdisk="$outdir/boot_inputs/target_files/${2^^}/RAMDISK"
+		{
+			find "$ramdisk" -name otacerts.zip -type f -printf '%P\0'
+			if test -n "$prop_sed"; then
+				find "$ramdisk" \( -name build.prop -o -name prop.default \) -type f -printf '%P\0'
+			fi
+			if test -n "$recovery_adb_root" && test "$2" == vendor_boot; then
+				printf '%s\0' system/bin/adbd
+			fi
+		}|python3 "$data_dir/target_files_inputs.py" boot-verify "$img" "$orig"
 	elif test "$2" == vbmeta; then
 		if ! diff <(get_avbtool_partitions "$orig"|sort) <(get_avbtool_partitions "$img"|sort) >&2 || test "$(get_avbtool_vbmeta_opts "$orig")" != "$(get_avbtool_vbmeta_opts "$img")"; then
 			echo "The built vbmeta doesn't verify the same partitions with the same rollback index as the original one" >&2
