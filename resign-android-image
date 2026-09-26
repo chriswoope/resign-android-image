@@ -2330,17 +2330,24 @@ function apply_modifications {
 		# the version of the policy format, from the header of the precompiled policy
 		policy_version="$(od -An -tu4 --endian=little -j16 -N4 "$precompiled")"
 		read -r mapping_version < "$vendor_selinux/plat_sepolicy_vers.txt"
-		read -r genfs_version < "$vendor_selinux/genfs_labels_version.txt"
+		# and the version of the genfs labels, which the vendor only has since Android 15 QPR2, and has empty
+		# unless the device sets it
+		genfs_version=
+		if test -e "$vendor_selinux/genfs_labels_version.txt"; then
+			genfs_version="$(< "$vendor_selinux/genfs_labels_version.txt")"
+		fi
 		cil=()
 		for i in "$selinux/plat_sepolicy.cil" "$selinux/mapping/$mapping_version.cil" "$selinux/mapping/$mapping_version.compat.cil" \
 			"$system_ext_selinux/system_ext_sepolicy.cil" "$system_ext_selinux/mapping/$mapping_version.cil" "$system_ext_selinux/mapping/$mapping_version.compat.cil" \
 			"$product_selinux/product_sepolicy.cil" "$product_selinux/mapping/$mapping_version.cil" \
-			"$vendor_selinux/plat_pub_versioned.cil" "$vendor_selinux/vendor_sepolicy.cil" "$odm_selinux/odm_sepolicy.cil" \
-			"$selinux/plat_sepolicy_genfs_$genfs_version.cil"; do
+			"$vendor_selinux/plat_pub_versioned.cil" "$vendor_selinux/vendor_sepolicy.cil" "$odm_selinux/odm_sepolicy.cil"; do
 			if test -e "$i"; then
 				cil+=("$i")
 			fi
 		done
+		if test -n "$genfs_version" && test -e "$selinux/plat_sepolicy_genfs_$genfs_version.cil"; then
+			cil+=("$selinux/plat_sepolicy_genfs_$genfs_version.cil")
+		fi
 		secilc=("$otatools/bin/secilc" -m -M true -G -N -c "${policy_version// /}" -f /dev/null "${cil[@]}")
 		# compiling the policy before changing it must reproduce the precompiled one exactly
 		if ! "${secilc[@]}" -o /dev/stdout|cmp -s - "$precompiled"; then
