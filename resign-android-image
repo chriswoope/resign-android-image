@@ -824,9 +824,24 @@ function with_lock
 	exec {fd}>&-
 }
 
-# the Android version and quarterly platform release of the build, which is the prefix of its build ID (like CP2A
-# in CP2A.260705.006 of Android 17), from the fingerprint in the metadata of its OTA, where it was extracted or else
-# in the OTA itself, which is downloaded already for this before it is verified with the otatools chosen by it
+aosp="$dir/aosp"
+mkdir -p "$aosp/build" "$aosp/system" "$var_dir/git-$os"
+background_pids=()
+background make_dir "$aosp/script" do_git_checkout "$git/script" "$git_ref"
+background make_dir "$aosp/build/make" do_git_checkout "$git/platform_build" "$git_ref"
+background make_dir "$aosp/system/update_engine" do_git_checkout "$git/platform_system_update_engine" "$git_ref"
+wait_background
+
+for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
+	if ! test -e "$aosp/build/$i"; then
+		ln -s "make/$i" "$aosp/build/$i"
+	fi
+done
+
+# the Android version and quarterly platform release of the platform of the build, which is the prefix of its build
+# ID (like CP2A in CP2A.260705.006 of Android 17), from the fingerprint in the metadata of its OTA, where it was
+# extracted or else in the OTA itself, which is downloaded already for this before it is verified with the otatools
+# chosen by it
 ota_metadata_file="$dir/ota/META-INF/com/android/metadata"
 if test -e "$ota_metadata_file"; then
 	ota_metadata="$(< "$ota_metadata_file")"
@@ -846,6 +861,14 @@ if ! [[ $ota_metadata =~ $post_build_re ]]; then
 	exit 1
 fi
 android_version="${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+# but the build ID in the fingerprint is the one of the product, which can be set apart from the one of the platform
+# (as GrapheneOS does since 2026092500, giving Pixels the one of the stock OS, of a quarterly platform release that
+# isn't in AOSP), so the platform's one is taken from the sources, unless they set none for every product (as
+# GrapheneOS did before 2023090200, with the one of each product in it)
+build_id_re=$'(^|\n)BUILD_ID=([0-9A-Z]+)\\.'
+if [[ $(< "$aosp/build/make/core/build_id.mk") =~ $build_id_re ]]; then
+	android_version="${android_version%-*}-${BASH_REMATCH[2]}"
+fi
 
 # a device running the build that the version is made from would refuse it if its build timestamp were earlier
 if test -n "$build_date_utc"; then
@@ -861,7 +884,7 @@ if test -n "$build_date_utc"; then
 fi
 
 # the host tools are taken from the newest build on the Android CI of the same Android version and quarterly
-# platform release as the build
+# platform release as the platform of the build
 android_ci=https://ci.android.com/builds
 android_ci_branch=aosp-android-latest-release
 # the host tools are the same for every target
@@ -1026,20 +1049,6 @@ avb_openssl="$otatools/bin/avb_openssl"
 if ! test -x "$avb_openssl"; then
 	avb_openssl=openssl
 fi
-
-aosp="$dir/aosp"
-mkdir -p "$aosp/build" "$aosp/system" "$var_dir/git-$os"
-background_pids=()
-background make_dir "$aosp/script" do_git_checkout "$git/script" "$git_ref"
-background make_dir "$aosp/build/make" do_git_checkout "$git/platform_build" "$git_ref"
-background make_dir "$aosp/system/update_engine" do_git_checkout "$git/platform_system_update_engine" "$git_ref"
-wait_background
-
-for i in CleanSpec.mk buildspec.mk.default core envsetup.sh target tools; do
-	if ! test -e "$aosp/build/$i"; then
-		ln -s "make/$i" "$aosp/build/$i"
-	fi
-done
 
 # signapk writes an APK through a ZipOutputStream, which writes the fields of the zip headers a byte at a
 # time, to an unbuffered FileOutputStream, making a system call for each byte: buffer the CountingOutputStream
